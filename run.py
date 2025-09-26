@@ -1,12 +1,11 @@
 import argparse
 import importlib
+import os
 
 import akshare as ak
 import pandas as pd
 
 from backtest.backtester import Backtester
-
-import os
 
 # 动态获取 Python 安装目录，并构建 Tcl/Tk 库路径
 python_install_dir = os.path.dirname(os.path.dirname(os.__file__))
