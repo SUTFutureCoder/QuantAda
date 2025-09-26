@@ -1,4 +1,5 @@
 import backtrader as bt
+import matplotlib.pyplot as plt
 
 from .indicators import CustomMACD, CustomCrossOver
 
@@ -111,4 +112,4 @@ class Backtester:
         self.cerebro.run()
         print(f"Final Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
 
-        self.cerebro.plot(style='candlestick')
+        self.cerebro.plot()
