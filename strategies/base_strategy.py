@@ -24,7 +24,6 @@ class BaseStrategy(ABC):
         """
         通用日志记录
         """
-        dt = dt or dt.utcnow()
         self.broker.log(txt, dt)
 
     @abstractmethod

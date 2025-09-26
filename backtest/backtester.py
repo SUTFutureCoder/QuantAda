@@ -57,7 +57,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
     def __init__(self, strategy_class, strategy_params=None):
         self.dataclose = self.datas[0].close
 
-        indicator_factory = BacktraderIndicatorFactory(self)
+        indicator_factory = BacktraderIndicatorFactory(self.datas[0])
         self.strategy = strategy_class(broker=self, indicators=indicator_factory, params=strategy_params)
         self.strategy.init()
 
