@@ -6,6 +6,17 @@ import pandas as pd
 
 from backtest.backtester import Backtester
 
+import os
+
+# 动态获取 Python 安装目录，并构建 Tcl/Tk 库路径
+python_install_dir = os.path.dirname(os.path.dirname(os.__file__))
+tcl_library_path = os.path.join(python_install_dir, 'tcl', 'tcl8.6')  # 版本号请根据实际情况调整
+tk_library_path = os.path.join(python_install_dir, 'tcl', 'tk8.6')
+
+# 设置环境变量
+os.environ['TCL_LIBRARY'] = tcl_library_path
+os.environ['TK_LIBRARY'] = tk_library_path
+
 
 def get_strategy_class(strategy_filename):
     """动态导入策略类"""
