@@ -2,8 +2,10 @@ import argparse
 import importlib
 import os
 
-import akshare as ak
-import pandas as pd
+from data_providers.manager import DataManager
+from data_providers.csv_provider import CsvDataProvider
+from data_providers.akshare_provider import AkshareDataProvider
+from data_providers.tushare_provider import TushareDataProvider
 
 from backtest.backtester import Backtester
 
@@ -34,19 +36,6 @@ def get_strategy_class(strategy_filename):
 
     return strategy_class
 
-
-def get_data(symbol, end_date='20250101', data_path='data'):
-    print("Downloading data from akshare...")
-    ak_symbol = symbol.split('.')[1]
-    df = ak.fund_etf_hist_em(symbol=ak_symbol, period='daily', end_date=end_date, adjust='hfq')
-    df.rename(columns={'日期': 'datetime', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close',
-                       '成交量': 'volume'}, inplace=True)
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    df.set_index('datetime', inplace=True)
-    df['openinterest'] = 0
-    return df
-
-
 def run_backtest(strategy_filename, symbol, cash, commission):
     """执行回测"""
     print("--- Starting Backtest ---")
@@ -55,8 +44,25 @@ def run_backtest(strategy_filename, symbol, cash, commission):
     print(f"  Initial Cash: {cash:,.2f}")
     print(f"  Commission: {commission:.4f}")
 
+    # 1. 定义数据提供者列表，按优先级排序
+    data_providers = [
+        CsvDataProvider(),
+        AkshareDataProvider(),
+        TushareDataProvider()
+    ]
+    # 2. 实例化数据管理器
+    data_manager = DataManager(providers=data_providers)
+
+    # 3. 获取数据
+    print("\n--- Fetching Data ---")
+    data = data_manager.get_data(symbol)
+
+    if data is None or data.empty:
+        print("\nFatal: Could not get data for the specified symbol. Aborting backtest.")
+        return
+
+    print("\n--- Initializing Backtester ---")
     strategy_class = get_strategy_class(strategy_filename)
-    data = get_data(symbol)
 
     backtester = Backtester(
         data,
