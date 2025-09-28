@@ -16,7 +16,7 @@ class TushareDataProvider(BaseDataProvider):
             ts.set_token(token)
             self.pro = ts.pro_api()
 
-    def get_data(self, symbol: str, start_date: str, end_date: str = '20250101') -> pd.DataFrame | None:
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         if not self.pro:
             return None
 

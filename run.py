@@ -5,6 +5,7 @@ import os
 from data_providers.manager import DataManager
 from data_providers.csv_provider import CsvDataProvider
 from data_providers.akshare_provider import AkshareDataProvider
+from data_providers.sxsc_tushare_provider import SxscTushareProvider
 from data_providers.tushare_provider import TushareDataProvider
 
 from backtest.backtester import Backtester
@@ -36,7 +37,8 @@ def get_strategy_class(strategy_filename):
 
     return strategy_class
 
-def run_backtest(strategy_filename, symbol, cash, commission):
+
+def run_backtest(strategy_filename, symbol, cash, commission, start_date, end_date):
     """执行回测"""
     print("--- Starting Backtest ---")
     print(f"  Strategy: {strategy_filename}")
@@ -48,6 +50,7 @@ def run_backtest(strategy_filename, symbol, cash, commission):
     data_providers = [
         CsvDataProvider(),
         AkshareDataProvider(),
+        SxscTushareProvider(),
         TushareDataProvider()
     ]
     # 2. 实例化数据管理器
@@ -55,7 +58,7 @@ def run_backtest(strategy_filename, symbol, cash, commission):
 
     # 3. 获取数据
     print("\n--- Fetching Data ---")
-    data = data_manager.get_data(symbol)
+    data = data_manager.get_data(symbol, start_date, end_date)
 
     if data is None or data.empty:
         print("\nFatal: Could not get data for the specified symbol. Aborting backtest.")
@@ -108,6 +111,20 @@ if __name__ == '__main__':
         help="手续费率 (默认: 0.00015)"
     )
 
+    parser.add_argument(
+        '--start_date',
+        type=str,
+        default=None,
+        help="回测起始日期 (例如: 20241111)"
+    )
+
+    parser.add_argument(
+        '--end_date',
+        type=str,
+        default=None,
+        help="回测结束日期 (例如: 20250101)"
+    )
+
     # 3. 解析参数
     args = parser.parse_args()
 
@@ -116,7 +133,9 @@ if __name__ == '__main__':
         strategy_filename=args.strategy,
         symbol=args.symbol,
         cash=args.cash,
-        commission=args.commission
+        commission=args.commission,
+        start_date=args.start_date,
+        end_date=args.end_date
     )
 
     print("\n--- Backtest Finished ---")

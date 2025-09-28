@@ -11,7 +11,7 @@ class DataManager:
         self.providers = providers
         self.data_path = DATA_PATH
 
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = '20250101') -> pd.DataFrame | None:
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         """
         按优先级依次尝试从数据提供者获取数据。
         如果从非CSV源获取成功，则自动缓存到本地CSV文件。

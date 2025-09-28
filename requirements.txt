@@ -4,3 +4,4 @@ pandas
 tushare
 akshare
 ta-lib
+requests

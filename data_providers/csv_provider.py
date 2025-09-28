@@ -13,7 +13,7 @@ class CsvDataProvider(BaseDataProvider):
         if not os.path.exists(self.data_path):
             os.mkdir(self.data_path)
 
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = '20250101') -> pd.DataFrame | None:
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         csv_filename = f"{symbol.replace('.', '_')}.csv"
         csv_filepath = os.path.join(self.data_path, csv_filename)
 

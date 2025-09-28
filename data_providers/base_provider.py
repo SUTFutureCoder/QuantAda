@@ -8,7 +8,7 @@ class BaseDataProvider(ABC):
     数据提供者的抽象基类
     """
     @abstractmethod
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = '20250101') -> pd.DataFrame | None:
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         """
         获取指定交易标的的历史行情数据
 

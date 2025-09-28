@@ -5,25 +5,37 @@ from .base_provider import BaseDataProvider
 
 class AkshareDataProvider(BaseDataProvider):
 
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = '20250101') -> pd.DataFrame | None:
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         try:
-            # 转换symbol格式，SHSE.510300 -> 510300
-            ak_symbol = symbol
-            if symbol.find('.'):
+            # 1. 对symbol进行更健壮的解析
+            if '.' in symbol:
                 ak_symbol = symbol.split('.')[1]
+            else:
+                ak_symbol = symbol
 
-            # 简单的股票代码识别逻辑：A股主板、创业板、科创板、北交所等
+            # 2. 优雅地构建API参数字典
+            # 仅当start_date或end_date不为None时，才将其添加到参数字典中
+            api_params = {
+                'symbol': ak_symbol,
+                'period': 'daily',
+                'adjust': 'hfq'
+            }
+            if start_date:
+                api_params['start_date'] = start_date
+            if end_date:
+                api_params['end_date'] = end_date
+
+            # 3. 使用字典解包（**）调用akshare函数
             if ak_symbol.startswith(('6', '0', '3', '8', '4')):
                 print(f"Akshare: Detected stock symbol '{ak_symbol}'. Using 'stock_zh_a_hist'.")
-                df = ak.stock_zh_a_hist(symbol=ak_symbol, period='daily', end_date=end_date, adjust='hfq')
+                df = ak.stock_zh_a_hist(**api_params)
             else:
                 print(f"Akshare: Detected ETF/fund symbol '{ak_symbol}'. Using 'fund_etf_hist_em'.")
-                df = ak.fund_etf_hist_em(symbol=ak_symbol, period='daily', end_date=end_date, adjust='hfq')
+                df = ak.fund_etf_hist_em(**api_params)
 
             if df is None or df.empty:
                 return None
 
-            # --- 数据标准化 ---
             df.rename(columns={
                 '日期': 'datetime',
                 '开盘': 'open',
@@ -36,12 +48,8 @@ class AkshareDataProvider(BaseDataProvider):
             df['datetime'] = pd.to_datetime(df['datetime'])
             df.set_index('datetime', inplace=True)
 
-            # 筛选和添加必要列
             df = df[['open', 'high', 'low', 'close', 'volume']]
             df['openinterest'] = 0
-
-            if start_date:
-                df = df[df.index >= pd.to_datetime(start_date)]
 
             return df.sort_index(ascending=True)
 

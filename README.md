@@ -53,6 +53,9 @@ python ./run.py sample_macd_cross_strategy
 # 回测贵州茅台(SHSE.600519)，并设置50万初始资金
 python ./run.py sample_macd_cross_strategy --symbol SHSE.600519 --cash 500000
 
+# 设置回测开始时间以加快运行
+python ./run.py sample_macd_cross_strategy --symbol SHSE.600519 --cash 500000 --start_date 20250101
+
 # 查看所有可用参数
 python ./run.py --help
 ```
