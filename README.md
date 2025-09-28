@@ -22,7 +22,7 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/your-username/QuantAda.git
+git clone https://github.com/SUTFutureCoder/QuantAda.git
 cd QuantAda
 
 # 推荐创建并激活虚拟环境
