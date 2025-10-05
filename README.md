@@ -59,7 +59,7 @@ python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000
 python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000 --start_date 20250101
 
 # 设置多个标的及指定数据源
-python ./run.py sample_multi_portfolio_equal_weight_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519 --data_source=tushare
+python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519 --data_source=tushare
 
 # 查看所有可用参数
 python ./run.py --help
