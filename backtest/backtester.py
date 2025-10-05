@@ -18,8 +18,17 @@ class OrderProxy:
     def is_rejected(self): return self._order.status in [self._order.Canceled, self._order.Margin,
                                                          self._order.Rejected]
 
+    def getstatusname(self):
+        """Delegates call to the original backtrader order object."""
+        return self._order.getstatusname()
+
     @property
     def executed(self): return self._order.executed
+
+    @property
+    def data(self):
+        """Exposes the data feed associated with the order."""
+        return self._order.data
 
 
 class TradeProxy:
@@ -78,11 +87,11 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
 class Backtester:
     # 回测执行器
-    def __init__(self, data, strategy_class, strategy_params=None, start_date=None, end_date=None, cash=100000.0,
+    def __init__(self, datas, strategy_class, strategy_params=None, start_date=None, end_date=None, cash=100000.0,
                  commission=0.00015
                  , sizer_class=bt.sizers.PercentSizer, sizer_params={'percents': 95}):
         self.cerebro = bt.Cerebro()
-        self.data = data
+        self.datas = datas
         self.strategy_class = strategy_class
         self.strategy_params = strategy_params
         self.start_date = start_date
@@ -94,9 +103,15 @@ class Backtester:
 
     def run(self):
         # 将数据添加到Cerebro
-        feed = bt.feeds.PandasData(dataname=self.data, fromdate=pd.to_datetime(self.start_date),
-                                   todate=pd.to_datetime(self.end_date))
-        self.cerebro.adddata(feed)
+        for symbol, df in self.datas.items():
+            feed = bt.feeds.PandasData(
+                dataname=df,
+                fromdate=pd.to_datetime(self.start_date),
+                todate=pd.to_datetime(self.end_date),
+                name=symbol  # 为每个数据源命名，方便策略内部通过名称访问
+            )
+            self.cerebro.adddata(feed)
+            print(f"  Data feed for '{symbol}' added.")
 
         # 添加包装后的策略
         self.cerebro.addstrategy(

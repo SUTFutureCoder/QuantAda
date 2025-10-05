@@ -37,12 +37,12 @@ def get_strategy_class(strategy_filename):
     return strategy_class
 
 
-def run_backtest(strategy_filename, symbol, cash, commission, data_source
+def run_backtest(strategy_filename, symbols, cash, commission, data_source
                  , start_date, end_date):
     """执行回测"""
     print("--- Starting Backtest ---")
     print(f"  Strategy: {strategy_filename}")
-    print(f"  Symbol: {symbol}")
+    print(f"  Symbols: {symbols}")
     print(f"  Backtest Period: {start_date} to {end_date}")
     print(f"  Initial Cash: {cash:,.2f}")
     print(f"  Commission: {commission:.4f}")
@@ -58,22 +58,29 @@ def run_backtest(strategy_filename, symbol, cash, commission, data_source
     print("\n--- Fetching Data ---")
     print(f"  Requesting data from: {start_date or 'origin'} to {end_date or 'latest'}")
 
-    data = data_manager.get_data(
-        symbol,
-        start_date=start_date,
-        end_date=end_date,
-        specified_sources=data_source
-    )
+    datas = {}
+    for symbol in symbols:
+        print(f"  Fetching data for: {symbol}")
+        df = data_manager.get_data(
+            symbol,
+            start_date=start_date,
+            end_date=end_date,
+            specified_sources=data_source
+        )
+        if df is not None and not df.empty:
+            datas[symbol] = df
+        else:
+            print(f"  Warning: Failed to fetch data for {symbol}. It will be excluded from the backtest.")
 
-    if data is None or data.empty:
-        print("\nFatal: Could not get data for the specified symbol. Aborting backtest.")
+    if not datas:
+        print("\nFatal: Could not fetch data for any of the specified symbols. Aborting.")
         return
 
     print("\n--- Initializing Backtester ---")
     strategy_class = get_strategy_class(strategy_filename)
 
     backtester = Backtester(
-        data,
+        datas,
         strategy_class,
         start_date=start_date,
         end_date=end_date,
@@ -105,10 +112,10 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '--symbol',
+        '--symbols',
         type=str,
         default='SHSE.510300',
-        help="回测标的代码 (默认: SHSE.510300)"
+        help="以,分割的回测标的代码 (默认: SHSE.510300)"
     )
 
     parser.add_argument(
@@ -142,10 +149,13 @@ if __name__ == '__main__':
     # 3. 解析参数
     args = parser.parse_args()
 
+    # 将逗号分隔的字符串转换为列表
+    symbol_list = [s.strip() for s in args.symbols.split(',')]
+
     # 4. 调用回测函数
     run_backtest(
         strategy_filename=args.strategy,
-        symbol=args.symbol,
+        symbols=symbol_list,
         cash=args.cash,
         commission=args.commission,
         data_source=args.data_source,

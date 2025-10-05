@@ -1,4 +1,5 @@
 from .base_strategy import BaseStrategy
+from common import rules
 
 
 class SampleMacdCrossStrategy(BaseStrategy):
@@ -32,30 +33,11 @@ class SampleMacdCrossStrategy(BaseStrategy):
             return
 
         if not self.broker.position:
-            if self.crossover[0] > 0:
+            if rules.entry_signal_macd_golden_cross(self):
                 size_to_buy = 100  # 或根据资金动态计算
                 self.log(f'BUY CREATE, Buying {size_to_buy} shares, Price: {self.dataclose[0]:.2f}')
                 self.order = self.broker.buy(size=size_to_buy)
         else:
-            if self.crossover[0] < 0:
+            if rules.exit_signal_macd_dead_cross(self):
                 self.log(f'SELL SIGNAL: Closing position.')
                 self.order = self.broker.order_target_percent(target=0.0)
-
-    def notify_order(self, order):
-        if order.is_completed():
-            if order.is_buy():
-                self.log(
-                    f'BUY EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.5f}')
-            elif order.is_sell():
-                self.log(
-                    f'SELL EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.5f}')
-        elif order.is_rejected():
-            self.log(f'Order Canceled/Rejected/Margin')
-
-        # 重置order状态，允许下新单
-        if not order.is_pending():
-            self.order = None
-
-    def notify_trade(self, trade):
-        if trade.is_closed():
-            self.log(f'OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}')

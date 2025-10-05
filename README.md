@@ -11,7 +11,8 @@
 
 - **策略与引擎解耦**：得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `backtrader` 回测引擎和掘金量化等实盘环境中。
 - **模块化与可扩展**：
-    - **数据层**：采用责任链模式，按 `本地CSV -> Akshare -> Tushare` 优先级获取数据，并实现自动增量更新与本地缓存，保证数据获取的稳定与高效。
+    - **数据层**：支持指定主数据源和额外数据源。默认采用责任链模式，按 `本地CSV -> Akshare -> Tushare`
+      优先级获取数据，并实现自动增量更新与本地缓存，保证数据获取的稳定与高效。
     - **策略层**：支持将指标计算（`common/indicators`）和交易规则（`common/rules`）抽象为公共模块，方便团队成员共享和组合，避免重复造轮子。
     - **引擎层**：通过适配器模式清晰地隔离了回测与实盘，您可以轻松添加对QMT、VN.PY等其他平台的适配器，而无需改动任何策略代码。
 - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的灵活性和透明度。
@@ -52,10 +53,13 @@ TUSHARE_TOKEN = 'your_tushare_token_here'
 python ./run.py sample_macd_cross_strategy
 
 # 回测贵州茅台(SHSE.600519)，并设置50万初始资金
-python ./run.py sample_macd_cross_strategy --symbol SHSE.600519 --cash 500000
+python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000
 
 # 设置回测开始时间以加快运行
-python ./run.py sample_macd_cross_strategy --symbol SHSE.600519 --cash 500000 --start_date 20250101
+python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000 --start_date 20250101
+
+# 设置多个标的及指定数据源
+python ./run.py sample_multi_portfolio_equal_weight_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519 --data_source=tushare
 
 # 查看所有可用参数
 python ./run.py --help
@@ -78,9 +82,13 @@ QuantAda/
 │   └── indicators.py       # 回测专用的指标封装 (适配Backtrader)
 ├── common/                 # 通用逻辑模块
 │   ├── indicators.py       # 平台无关的指标计算逻辑
+│   └── rules.py            # 平台无关的交易规则函数
 ├── config.py               # 配置文件 (API密钥, 路径等)
 ├── data/                   # 行情数据缓存目录
-├── data_providers/         # 数据源模块
+├── data_extra_providers/   # 额外数据源模块
+│   ├── http_extra_provider.py         # HTTP额外数据获取类
+│   └── mysql_extra_provider.py        # MySQL额外数据获取类
+├── data_providers/         # 主数据源模块
 │   ├── akshare_provider.py # AkShare数据源适配器
 │   ├── base_provider.py    # 数据源抽象基类
 │   ├── csv_provider.py     # CSV数据源适配器
@@ -96,7 +104,10 @@ QuantAda/
 ├── run.py                  # 命令行回测启动器
 └── strategies/             # 策略模块
     ├── base_strategy.py    # 策略抽象基类
-    └── sample_macd_cross_strategy.py  # MACD样例策略
+    ├── sample_macd_cross_strategy.py  # MACD样例策略
+    ├── sample_extra_data_strategy.py  # 使用额外数据样例策略
+    └── sample_multi_portfolio_strategy.py  # 多标的等权样例策略
+    
 ```
 
 ## 免责声明 (Disclaimer)
