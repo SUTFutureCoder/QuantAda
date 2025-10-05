@@ -8,6 +8,7 @@ class CustomMACD(bt.indicators.MACD):
     """
     pass
 
+
 class CustomCrossOver(bt.indicators.CrossOver):
     """
     Backtrader封装：直接使用backtrader内置的CrossOver指标。

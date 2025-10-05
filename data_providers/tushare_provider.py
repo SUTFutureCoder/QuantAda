@@ -1,13 +1,15 @@
 import pandas as pd
 import tushare as ts
-from .base_provider import BaseDataProvider
+
 from config import TUSHARE_TOKEN
+from .base_provider import BaseDataProvider
 
 
 class TushareDataProvider(BaseDataProvider):
     """
     使用Tushare Pro获取数据
     """
+
     def __init__(self, token: str = TUSHARE_TOKEN):
         if not token or token == 'your_tushare_token_here':
             print("Warning: Tushare token is not configured. Tushare provider will be skipped.")
@@ -55,5 +57,3 @@ class TushareDataProvider(BaseDataProvider):
         except Exception as e:
             print(f"Tushare data provider failed for {symbol}: {e}")
             return None
-
-

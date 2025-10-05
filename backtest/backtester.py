@@ -1,4 +1,5 @@
 import backtrader as bt
+import pandas as pd
 
 from .indicators import CustomMACD, CustomCrossOver
 
@@ -77,12 +78,15 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
 class Backtester:
     # 回测执行器
-    def __init__(self, data, strategy_class, strategy_params=None, cash=100000.0, commission=0.00015,
-                 sizer_class=bt.sizers.PercentSizer, sizer_params={'percents': 95}):
+    def __init__(self, data, strategy_class, strategy_params=None, start_date=None, end_date=None, cash=100000.0,
+                 commission=0.00015
+                 , sizer_class=bt.sizers.PercentSizer, sizer_params={'percents': 95}):
         self.cerebro = bt.Cerebro()
         self.data = data
         self.strategy_class = strategy_class
         self.strategy_params = strategy_params
+        self.start_date = start_date
+        self.end_date = end_date
         self.cash = cash
         self.commission = commission
         self.sizer_class = sizer_class
@@ -90,7 +94,8 @@ class Backtester:
 
     def run(self):
         # 将数据添加到Cerebro
-        feed = bt.feeds.PandasData(dataname=self.data)
+        feed = bt.feeds.PandasData(dataname=self.data, fromdate=pd.to_datetime(self.start_date),
+                                   todate=pd.to_datetime(self.end_date))
         self.cerebro.adddata(feed)
 
         # 添加包装后的策略

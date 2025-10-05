@@ -2,13 +2,12 @@ import argparse
 import importlib
 import os
 
-from data_providers.manager import DataManager
-from data_providers.csv_provider import CsvDataProvider
-from data_providers.akshare_provider import AkshareDataProvider
-from data_providers.sxsc_tushare_provider import SxscTushareProvider
-from data_providers.tushare_provider import TushareDataProvider
-
 from backtest.backtester import Backtester
+from data_providers.akshare_provider import AkshareDataProvider
+from data_providers.csv_provider import CsvDataProvider
+from data_providers.manager import DataManager
+from data_providers.sxsc_tushare_provider import SxscTushareDataProvider
+from data_providers.tushare_provider import TushareDataProvider
 
 # 动态获取 Python 安装目录，并构建 Tcl/Tk 库路径
 python_install_dir = os.path.dirname(os.path.dirname(os.__file__))
@@ -38,27 +37,33 @@ def get_strategy_class(strategy_filename):
     return strategy_class
 
 
-def run_backtest(strategy_filename, symbol, cash, commission, start_date, end_date):
+def run_backtest(strategy_filename, symbol, cash, commission, data_source
+                 , start_date, end_date):
     """执行回测"""
     print("--- Starting Backtest ---")
     print(f"  Strategy: {strategy_filename}")
     print(f"  Symbol: {symbol}")
+    print(f"  Backtest Period: {start_date} to {end_date}")
     print(f"  Initial Cash: {cash:,.2f}")
     print(f"  Commission: {commission:.4f}")
 
-    # 1. 定义数据提供者列表，按优先级排序
     data_providers = [
         CsvDataProvider(),
         AkshareDataProvider(),
-        SxscTushareProvider(),
+        SxscTushareDataProvider(),
         TushareDataProvider()
     ]
-    # 2. 实例化数据管理器
     data_manager = DataManager(providers=data_providers)
 
-    # 3. 获取数据
     print("\n--- Fetching Data ---")
-    data = data_manager.get_data(symbol, start_date, end_date)
+    print(f"  Requesting data from: {start_date or 'origin'} to {end_date or 'latest'}")
+
+    data = data_manager.get_data(
+        symbol,
+        start_date=start_date,
+        end_date=end_date,
+        specified_sources=data_source
+    )
 
     if data is None or data.empty:
         print("\nFatal: Could not get data for the specified symbol. Aborting backtest.")
@@ -70,6 +75,8 @@ def run_backtest(strategy_filename, symbol, cash, commission, start_date, end_da
     backtester = Backtester(
         data,
         strategy_class,
+        start_date=start_date,
+        end_date=end_date,
         cash=cash,
         commission=commission
     )
@@ -88,6 +95,13 @@ if __name__ == '__main__':
         'strategy',
         type=str,
         help="要运行的策略文件名 (例如: sample_macd_cross_strategy.py 或 sample_macd_cross_strategy)"
+    )
+
+    parser.add_argument(
+        '--data_source',
+        type=str,
+        default=None,
+        help="指定数据源 (例如: csv akshare tushare sxsc_tushare)"
     )
 
     parser.add_argument(
@@ -134,8 +148,9 @@ if __name__ == '__main__':
         symbol=args.symbol,
         cash=args.cash,
         commission=args.commission,
+        data_source=args.data_source,
         start_date=args.start_date,
-        end_date=args.end_date
+        end_date=args.end_date,
     )
 
     print("\n--- Backtest Finished ---")

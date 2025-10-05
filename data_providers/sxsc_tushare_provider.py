@@ -1,8 +1,10 @@
+from functools import partial
+
 import pandas as pd
 import requests
-from functools import partial
-from .base_provider import BaseDataProvider
+
 from config import SXSC_TUSHARE_TOKEN
+from .base_provider import BaseDataProvider
 
 """
 基于山西证券tushare数据源代理
@@ -10,7 +12,7 @@ https://github.com/ActiveIce/sxscts
 """
 
 
-class SxscTushareProvider(BaseDataProvider):
+class SxscTushareDataProvider(BaseDataProvider):
     __http_url = 'http://221.204.19.233:7172'
     __timeout = 30  # 增加一个默认的请求超时时间
 
@@ -48,9 +50,9 @@ class SxscTushareProvider(BaseDataProvider):
             else:
                 print(f"SxscTushareProvider: Detected fund/ETF symbol '{ts_code}'. Using 'fund_daily' API.")
                 df = self.fund_daily(ts_code=ts_code,
-                                start_date=start_date,
-                                end_date=end_date,
-                                fields=fields_to_get)
+                                     start_date=start_date,
+                                     end_date=end_date,
+                                     fields=fields_to_get)
 
             if df is None or df.empty:
                 return None

@@ -1,5 +1,6 @@
-import pandas as pd
 import akshare as ak
+import pandas as pd
+
 from .base_provider import BaseDataProvider
 
 

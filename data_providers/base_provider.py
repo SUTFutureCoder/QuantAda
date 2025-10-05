@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
+
 import pandas as pd
 
 
 class BaseDataProvider(ABC):
-
     """
     数据提供者的抽象基类
     """
+
     @abstractmethod
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         """
@@ -20,4 +21,3 @@ class BaseDataProvider(ABC):
         且以'datetime'为索引
         """
         pass
-

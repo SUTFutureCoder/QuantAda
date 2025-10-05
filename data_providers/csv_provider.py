@@ -1,13 +1,16 @@
 import os
+
 import pandas as pd
-from .base_provider import BaseDataProvider
+
 from config import DATA_PATH
+from .base_provider import BaseDataProvider
 
 
 class CsvDataProvider(BaseDataProvider):
     """
     从本地CSV文件加载数据
     """
+
     def __init__(self, data_path: str = DATA_PATH):
         self.data_path = data_path
         if not os.path.exists(self.data_path):
