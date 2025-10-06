@@ -63,6 +63,9 @@ python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.00000
 # 自定义选股策略
 python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519
 
+# 使用额外数据源
+python ./run.py sample_extra_data_strategy --symbols=SZSE.000001
+
 # 查看所有可用参数
 python ./run.py --help
 ```

@@ -9,7 +9,10 @@ class SampleExtraDataStrategy(BaseStrategy):
     """
 
     def init(self):
+        # 主标的数据
         self.main_data = self.broker.datas[0]
+
+        # HTTP请求的额外数据
         self.stock_provider = HttpExtraProvider()
         self.stock_df = self.stock_provider.fetch()
 
