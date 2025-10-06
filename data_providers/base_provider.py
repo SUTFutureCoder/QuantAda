@@ -8,6 +8,10 @@ class BaseDataProvider(ABC):
     数据提供者的抽象基类
     """
 
+    # 定义一个类属性作为优先级，数值越小，优先级越高。
+    # 默认值设为一个较大的数，确保未指定优先级的provider排在最后。
+    PRIORITY = 100
+
     @abstractmethod
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         """

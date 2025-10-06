@@ -1,5 +1,5 @@
-from .base_strategy import BaseStrategy
 from common import rules
+from .base_strategy import BaseStrategy
 
 
 class SampleMacdCrossStrategy(BaseStrategy):

@@ -5,6 +5,7 @@ from .base_provider import BaseDataProvider
 
 
 class AkshareDataProvider(BaseDataProvider):
+    PRIORITY = 40  # 优先级低于CSV
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
         try:

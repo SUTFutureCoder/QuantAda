@@ -10,6 +10,7 @@ class CsvDataProvider(BaseDataProvider):
     """
     从本地CSV文件加载数据
     """
+    PRIORITY = 10  # 最高优先级，先从本地CSV读取
 
     def __init__(self, data_path: str = DATA_PATH):
         self.data_path = data_path

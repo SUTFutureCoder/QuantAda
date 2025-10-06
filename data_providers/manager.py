@@ -1,6 +1,7 @@
+import importlib
+import inspect
 import os
 from datetime import datetime
-from typing import List
 
 import pandas as pd
 from pandas.tseries.offsets import BDay
@@ -11,16 +12,48 @@ from .csv_provider import CsvDataProvider
 
 
 class DataManager:
-    def __init__(self, providers: List[BaseDataProvider]):
-        self.providers = providers
+    def __init__(self):
+        self.providers = self.auto_discover_and_sort_providers()
         self.data_path = DATA_PATH
         # 创建一个从字符串名称到提供者实例的映射
         self.provider_map = {
-            p.__class__.__name__.replace('DataProvider', '').lower(): p for p in providers
+            p.__class__.__name__.replace('DataProvider', '').lower(): p for p in self.providers
         }
         # 兼容 sxsc_tushare 这种带下划线的命名
         if 'sxsctushare' in self.provider_map:
             self.provider_map['sxsc_tushare'] = self.provider_map.pop('sxsctushare')
+
+    def auto_discover_and_sort_providers(self, provider_dir="data_providers"):
+        """
+        自动扫描、加载并根据PRIORITY属性排序所有数据提供者。
+        """
+        print("\n--- Auto-discovering Data Providers ---")
+        discovered_providers = []
+
+        # ... (文件扫描和动态导入的逻辑保持不变) ...
+        for filename in os.listdir(provider_dir):
+            if filename.endswith(".py") and not filename.startswith(("__", "base_", "manager.")):
+                module_name = filename[:-3]
+                module_path = f"{provider_dir.replace('/', '.')}.{module_name}"
+                try:
+                    module = importlib.import_module(module_path)
+                    for name, obj in inspect.getmembers(module, inspect.isclass):
+                        if issubclass(obj, BaseDataProvider) and obj is not BaseDataProvider:
+                            discovered_providers.append(obj())
+                            print(f"  Discovered provider: {name} (Priority: {obj.PRIORITY})")
+                            break
+                except Exception as e:
+                    print(f"  Warning: Failed to load provider from {filename}: {e}")
+
+        # --- 核心改动：根据PRIORITY属性进行排序 ---
+        # 数值越小，优先级越高
+        discovered_providers.sort(key=lambda p: p.PRIORITY)
+
+        print("\n--- Data Provider Chain (sorted by priority) ---")
+        for i, p in enumerate(discovered_providers):
+            print(f"  {i + 1}. {p.__class__.__name__}")
+
+        return discovered_providers
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
                  specified_sources: str = None) -> pd.DataFrame | None:

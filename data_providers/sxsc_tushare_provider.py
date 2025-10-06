@@ -13,6 +13,8 @@ https://github.com/ActiveIce/sxscts
 
 
 class SxscTushareDataProvider(BaseDataProvider):
+    PRIORITY = 30
+
     __http_url = 'http://221.204.19.233:7172'
     __timeout = 30  # 增加一个默认的请求超时时间
 

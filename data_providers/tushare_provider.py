@@ -9,6 +9,7 @@ class TushareDataProvider(BaseDataProvider):
     """
     使用Tushare Pro获取数据
     """
+    PRIORITY = 20
 
     def __init__(self, token: str = TUSHARE_TOKEN):
         if not token or token == 'your_tushare_token_here':
