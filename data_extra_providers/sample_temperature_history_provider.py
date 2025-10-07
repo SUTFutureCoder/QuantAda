@@ -5,6 +5,9 @@ from data_extra_providers.mysql_extra_provider import MysqlExtraProvider
 
 class TemperatureHistoryProvider:
 
+    def __init__(self):
+        self.db_provider = MysqlExtraProvider()
+
     def fetch(self) -> pd.DataFrame | None:
         """
         获取指定日期范围内的指数数据。
@@ -18,7 +21,7 @@ class TemperatureHistoryProvider:
                """
 
             # 使用 SQLAlchemy 引擎
-            df = MysqlExtraProvider().query(query, index_col='date')
+            df = self.db_provider.query(query, index_col='date')
             if df.empty:
                 return None
             return df
