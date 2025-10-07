@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+import pandas
+
 
 class BaseSelector(ABC):
     """
@@ -13,8 +15,8 @@ class BaseSelector(ABC):
         self.data_manager = data_manager
 
     @abstractmethod
-    def run_selection(self) -> list[str]:
+    def run_selection(self) -> list[str] | pandas.DataFrame:
         """
-        【核心】执行选股逻辑并返回一个包含标的代码字符串的列表。
+        【核心】执行选股逻辑并返回一个包含标的代码字符串的列表。如果返回DataFrame，需要将标的设置为index。
         """
         pass

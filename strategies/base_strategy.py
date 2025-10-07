@@ -54,10 +54,6 @@ class BaseStrategy(ABC):
         elif order.is_rejected():
             self.log(f'Order Canceled/Rejected/Margin')
 
-        # 重置order状态，允许下新单
-        if not order.is_pending():
-            self.order = None
-
     def notify_trade(self, trade):
         """
         交易成交通知

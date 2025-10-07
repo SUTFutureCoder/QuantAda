@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import os
+from collections import OrderedDict
 from datetime import datetime
 
 import pandas as pd
@@ -16,9 +17,10 @@ class DataManager:
         self.providers = self.auto_discover_and_sort_providers()
         self.data_path = DATA_PATH
         # 创建一个从字符串名称到提供者实例的映射
-        self.provider_map = {
-            p.__class__.__name__.replace('DataProvider', '').lower(): p for p in self.providers
-        }
+        self.provider_map = OrderedDict(
+            (p.__class__.__name__.replace('DataProvider', '').lower(), p)
+            for p in self.providers
+        )
         # 兼容 sxsc_tushare 这种带下划线的命名
         if 'sxsctushare' in self.provider_map:
             self.provider_map['sxsc_tushare'] = self.provider_map.pop('sxsctushare')
@@ -94,7 +96,10 @@ class DataManager:
     def _get_data_with_incremental_update(self, symbol, start_date, end_date):
         """默认的获取数据逻辑，包含检查和更新本地缓存。"""
         csv_provider = self.provider_map.get('csv')
-        online_providers = [p for name, p in self.provider_map.items() if name != 'csv']
+        online_providers = [
+            p for p in self.providers
+            if p.__class__.__name__.replace('DataProvider', '').lower() != 'csv'
+        ]
 
         # 1. 尝试从本地CSV加载完整数据以检查时效性
         df_local = csv_provider.get_data(symbol) if csv_provider else None

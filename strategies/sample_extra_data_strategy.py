@@ -24,7 +24,7 @@ class SampleExtraDataStrategy(BaseStrategy):
         self.sell_threshold = 0.3  # 卖出阈值
 
     def next(self):
-        if self.order and self.order.is_pending():
+        if self.order:
             return
 
         if not self.has_data:
@@ -45,3 +45,9 @@ class SampleExtraDataStrategy(BaseStrategy):
             # 卖出：多数股票下跌
             self.log(f'SELL - Up ratio: {up_ratio:.2%}')
             self.order = self.broker.close()
+
+    def notify_order(self, order):
+        super().notify_order(order)
+        if not order.is_pending():
+            self.order = None
+

@@ -2,6 +2,8 @@ import argparse
 import importlib
 import os
 
+import pandas
+
 from backtest.backtester import Backtester
 from data_providers.manager import DataManager
 
@@ -59,7 +61,11 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         print("--- Running Selection Phase ---")
         selector_class = get_class_from_file(selection_filename, ['stock_selectors'])
         selector_instance = selector_class(data_manager=data_manager)
-        symbols = selector_instance.run_selection()
+        selection_result = selector_instance.run_selection()
+        if isinstance(selection_result, list):
+            symbols = selection_result
+        if isinstance(selection_result, pandas.DataFrame):
+            symbols = selection_result.index.tolist()
 
         if not symbols:
             print("\nFatal: The selector did not return any symbols. Aborting.")

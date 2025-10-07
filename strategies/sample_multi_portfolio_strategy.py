@@ -9,11 +9,11 @@ class SampleMultiPortfolioStrategy(BaseStrategy):
 
     def init(self):
         self.log(f"Strategy initialized for {len(self.broker.datas)} assets.")
-        self.bought = False
+        self.order = False
 
     def next(self):
         # 确保只在第一个有效的bar执行一次
-        if self.bought:
+        if self.order:
             return
 
         # 计算每个标的应分配的目标百分比
@@ -25,4 +25,4 @@ class SampleMultiPortfolioStrategy(BaseStrategy):
         for data in self.broker.datas:
             self.broker.order_target_percent(data=data, target=target_percent)
 
-        self.bought = True  # 标记为已下单，防止重复执行
+        self.order = True  # 标记为已下单，防止重复执行

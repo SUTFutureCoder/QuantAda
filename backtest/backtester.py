@@ -1,6 +1,7 @@
 import backtrader as bt
 import pandas as pd
 
+import config
 from .indicators import CustomMACD, CustomCrossOver
 
 
@@ -72,8 +73,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
         self.strategy.init()
 
     def log(self, txt, dt=None):
-        dt = dt or self.datas[0].datetime.date(0)
-        print(f'{dt.isoformat()} {txt}')
+        if config.LOG:
+            dt = dt or self.datas[0].datetime.date(0)
+            print(f'{dt.isoformat()} {txt}')
 
     def next(self):
         self.strategy.next()

@@ -29,7 +29,7 @@ class SampleMacdCrossStrategy(BaseStrategy):
         self.order = None
 
     def next(self):
-        if self.order and self.order.is_pending():
+        if self.order:
             return
 
         if not self.broker.position:
@@ -41,3 +41,8 @@ class SampleMacdCrossStrategy(BaseStrategy):
             if rules.exit_signal_macd_dead_cross(self):
                 self.log(f'SELL SIGNAL: Closing position.')
                 self.order = self.broker.order_target_percent(target=0.0)
+
+    def notify_order(self, order):
+        super().notify_order(order)
+        if not order.is_pending():
+            self.order = None

@@ -61,7 +61,7 @@ python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000 -
 python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519 --data_source=tushare
 
 # 自定义选股策略
-python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519
+python ./run.py sample_multi_portfolio_strategy --selection sample_manual_selector
 
 # 使用额外数据源
 python ./run.py sample_extra_data_strategy --symbols=SZSE.000001
