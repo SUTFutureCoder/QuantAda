@@ -129,8 +129,110 @@ class Backtester:
         # 动态添加Sizer
         self.cerebro.addsizer(self.sizer_class, **self.sizer_params)
 
-        print(f"Initial Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
-        self.cerebro.run()
+        # PyFolio分析器用于提取详细的交易数据
+        self.cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
+        self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', riskfreerate=0.0,
+                                 timeframe=bt.TimeFrame.Days, compression=1)
+        self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+        self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+        self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')
+
+        print(f"Starting Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
+        self.results = self.cerebro.run()
         print(f"Final Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
 
+        self.display_results()
+
         self.cerebro.plot()
+
+    def display_results(self):
+        """
+        计算并展示详细的回测性能指标和图表。
+        """
+        if not self.results:
+            print("Please run the backtest first.")
+            return
+
+        # 从回测结果中提取第一个策略（我们只有一个）
+        strat = self.results[0]
+
+        # 提取分析器数据
+        pyfolio_analyzer = strat.analyzers.getbyname('pyfolio')
+        returns, positions, transactions, gross_leverage = pyfolio_analyzer.get_pf_items()
+
+        returns_analyzer = strat.analyzers.getbyname('returns')
+        drawdown_analyzer = strat.analyzers.getbyname('drawdown')
+        sharpe_analyzer = strat.analyzers.getbyname('sharpe')
+        trade_analyzer = strat.analyzers.getbyname('tradeanalyzer')
+
+        # --- 1. 计算核心指标 ---
+        # 时间范围
+        start_date_str = self.start_date if self.start_date else returns.index[0].strftime('%Y-%m-%d')
+        end_date_str = self.end_date if self.end_date else returns.index[-1].strftime('%Y-%m-%d')
+
+        # 总收益率
+        total_return = (self.cerebro.broker.getvalue() / self.cash) - 1
+
+        # 年化收益率
+        # 从returns分析器获取年化收益率 (rnorm100)
+        annual_return = returns_analyzer.get_analysis().get('rnorm100', 0.0)
+
+        # 夏普比率
+        sharpe_ratio = sharpe_analyzer.get_analysis().get('sharperatio', 0.0)
+        if sharpe_ratio is None: sharpe_ratio = 0.0
+
+        # 最大回撤
+        max_drawdown = drawdown_analyzer.get_analysis().max.drawdown / 100  # 转换为小数
+
+        # 卡玛比率 (年化收益 / 最大回撤)
+        calmar_ratio = annual_return / (abs(max_drawdown) * 100) if max_drawdown != 0 else 0.0
+
+        # 交易统计
+        trade_analysis = trade_analyzer.get_analysis()
+        total_trades = trade_analysis.get('total', {}).get('total', 0)
+
+        # 安全地获取盈利交易的统计数据
+        if 'won' in trade_analysis and trade_analysis.won.total > 0:
+            win_trades = trade_analysis.won.total
+            total_win_pnl = trade_analysis.won.pnl.total
+            avg_win_pnl = trade_analysis.won.pnl.average
+        else:
+            win_trades = 0
+            total_win_pnl = 0.0
+            avg_win_pnl = 0.0
+
+        # 安全地获取亏损交易的统计数据
+        if 'lost' in trade_analysis and trade_analysis.lost.total > 0:
+            loss_trades = trade_analysis.lost.total
+            total_loss_pnl = trade_analysis.lost.pnl.total
+            avg_loss_pnl = trade_analysis.lost.pnl.average
+        else:
+            loss_trades = 0
+            total_loss_pnl = 0.0
+            avg_loss_pnl = 0.0
+
+        # 在确保数据安全后进行计算
+        win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0.0
+        profit_factor = total_win_pnl / abs(total_loss_pnl) if total_loss_pnl != 0 else float('inf')
+        pnl_ratio = avg_win_pnl / abs(avg_loss_pnl) if avg_loss_pnl != 0 else float('inf')
+
+        # --- 2. 打印性能报告 ---
+        print("\n" + "=" * 50)
+        print("            Backtest Performance Metrics")
+        print("=" * 50)
+        print(f" Time Frame:           {start_date_str} to {end_date_str}")
+        print(f" Initial Portfolio:    {self.cash:,.2f}")
+        print(f" Final Portfolio:      {self.cerebro.broker.getvalue():,.2f}")
+        print("-" * 50)
+        print(f" Total Return:         {total_return: .2%}")
+        print(f" Annualized Return:    {annual_return / 100: .2%}")
+        print(f" Sharpe Ratio:         {sharpe_ratio: .2f}")
+        print(f" Max Drawdown:         {max_drawdown: .2%}")
+        print(f" Calmar Ratio:         {calmar_ratio: .2f}")
+        print("-" * 50)
+        print(f" Total Trades:         {total_trades}")
+        print(f" Win Rate:             {win_rate: .2f}%")
+        print(f" Profit Factor:        {profit_factor: .2f}")
+        print(f" Avg. Win / Avg. Loss: {pnl_ratio: .2f}")
+        print("=" * 50 + "\n")
+
