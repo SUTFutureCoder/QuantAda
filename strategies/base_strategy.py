@@ -10,13 +10,12 @@ class BaseStrategy(ABC):
 
     params = {}
 
-    def __init__(self, broker, indicators, params=None):
+    def __init__(self, broker, params=None):
         """
         初始化策略参数
         :param params:
         """
         self.broker = broker
-        self.indicators = indicators
         if params:
             self.params.update(params)
 

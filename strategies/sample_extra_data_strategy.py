@@ -50,4 +50,3 @@ class SampleExtraDataStrategy(BaseStrategy):
         super().notify_order(order)
         if not order.is_pending():
             self.order = None
-

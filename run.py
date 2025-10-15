@@ -37,8 +37,8 @@ def get_class_from_file(filename, search_paths):
             except AttributeError:
                 class_name_alt = module_name.replace('_', ' ').title().replace(' ', '')
                 return getattr(module, class_name_alt)
-        except (ImportError, AttributeError):
-            continue
+        except (ImportError, AttributeError) as e:
+            raise ImportError(f"Class internal error for '{filename}': {e}")
 
     raise ImportError(f"Could not find class for '{filename}' in paths: {search_paths}")
 
@@ -120,9 +120,11 @@ if __name__ == '__main__':
     )
 
     # 2. 添加命令行参数
-    parser.add_argument('strategy', type=str, help="要运行的策略文件名 (例如: sample_macd_cross_strategy.py 或 sample_macd_cross_strategy)")
+    parser.add_argument('strategy', type=str,
+                        help="要运行的策略文件名 (例如: sample_macd_cross_strategy.py 或 sample_macd_cross_strategy)")
     parser.add_argument('--selection', type=str, default=None, help="选股器文件名 (位于selectors目录)")
-    parser.add_argument('--data_source', type=str, default=None, help="指定数据源 (例如: csv akshare tushare sxsc_tushare)")
+    parser.add_argument('--data_source', type=str, default=None,
+                        help="指定数据源 (例如: csv akshare tushare sxsc_tushare)")
     parser.add_argument('--symbols', type=str, default='SHSE.510300', help="以,分割的回测标的代码 (默认: SHSE.510300)")
     parser.add_argument('--cash', type=float, default=100000.0, help="初始资金 (默认: 100000.0)")
     parser.add_argument('--commission', type=float, default=0.00015, help="手续费率 (默认: 0.00015)")

@@ -1,18 +1,11 @@
 import pandas as pd
 
-from common.indicators import CommonIndicators
 from .base_broker import BaseBroker
 
 try:
     from gm.api import order_target_percent, order_volume, get_positions, OrderSide_Buy, OrderSide_Sell
 except ImportError:
     print("警告：gm未安装。掘金实盘的交易将失败。")
-
-try:
-    import talib
-except ImportError:
-    print("警告：TA-Lib未安装。掘金实盘的指标计算将失败。")
-    talib = None
 
 
 class GMOrderProxy:
@@ -26,30 +19,6 @@ class GMOrderProxy:
         return self._order and self._order.status in [1, 2]
 
 
-class GMIndicatorFactory:
-    def __init__(self, broker):
-        self.broker = broker
-
-    class MACD:
-        def __init__(self, data):
-            # 直接调用公共静态方法
-            self.macd, self.signal, self.hist = CommonIndicators.macd(data)
-
-    class CrossOver:
-        def __init__(self, series1, series2):
-            # 直接调用公共静态方法预先计算好所有信号
-            self.signals = CommonIndicators.crossover(series1, series2)
-
-        def __getitem__(self, index):
-            # 策略中调用 a[0] 时，返回最新的信号值
-            if index != 0:
-                raise NotImplementedError("GM CrossOver only supports access via [0]")
-
-            if self.signals.empty:
-                return 0.0
-            return self.signals.iloc[-1]
-
-
 class GMBroker(BaseBroker):
     """掘金(GM)平台的Broker适配器"""
 
@@ -58,7 +27,6 @@ class GMBroker(BaseBroker):
         self.symbol = symbol
         self._position = None
         self._history_data = pd.DataFrame()
-        self.indicators = GMIndicatorFactory(self)
 
     def update(self):
         """每个bar开始时，由主循环调用，用以更新内部状态"""

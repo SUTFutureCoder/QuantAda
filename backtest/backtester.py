@@ -2,7 +2,6 @@ import backtrader as bt
 import pandas as pd
 
 import config
-from .indicators import CustomMACD, CustomCrossOver
 
 
 class OrderProxy:
@@ -46,19 +45,6 @@ class TradeProxy:
     def pnlcomm(self): return self._trade.pnlcomm
 
 
-class BacktraderIndicatorFactory:
-    """为Backtrader环境创建指标的工厂"""
-
-    def __init__(self, data):
-        self._data = data
-
-    def MACD(self):
-        return CustomMACD(self._data)
-
-    def CrossOver(self, a, b):
-        return CustomCrossOver(a, b)
-
-
 class BacktraderStrategyWrapper(bt.Strategy):
     """
     Backtrader的包装器策略
@@ -68,8 +54,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
     def __init__(self, strategy_class, strategy_params=None):
         self.dataclose = self.datas[0].close
 
-        indicator_factory = BacktraderIndicatorFactory(self.datas[0])
-        self.strategy = strategy_class(broker=self, indicators=indicator_factory, params=strategy_params)
+        self.strategy = strategy_class(broker=self, params=strategy_params)
         self.strategy.init()
 
     def log(self, txt, dt=None):
@@ -235,4 +220,3 @@ class Backtester:
         print(f" Profit Factor:        {profit_factor: .2f}")
         print(f" Avg. Win / Avg. Loss: {pnl_ratio: .2f}")
         print("=" * 50 + "\n")
-

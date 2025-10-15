@@ -34,4 +34,3 @@ class MysqlExtraProvider:
         except Exception as e:
             print(f"SQLAlchemy failed to query data: {e} query: {query}")
             return None
-
