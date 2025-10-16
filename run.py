@@ -69,14 +69,6 @@ def get_class_from_name(name_string: str, search_paths: list):
 
 def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date):
     """执行回测"""
-    print("--- Starting Backtest ---")
-    print(f"  Selection: {selection_filename}")
-    print(f"  Strategy: {strategy_filename}")
-    print(f"  Symbols: {symbols}")
-    print(f"  Backtest Period: {start_date} to {end_date}")
-    print(f"  Initial Cash: {cash:,.2f}")
-    print(f"  Commission: {commission:.4f}")
-
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
 
@@ -98,6 +90,14 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
     elif not symbols:
         print("\nFatal: You must provide either --selection or --symbols. Aborting.")
         return
+
+    print("--- Starting Backtest ---")
+    print(f"  Selection: {selection_filename}")
+    print(f"  Strategy: {strategy_filename}")
+    print(f"  Symbols: {symbols}")
+    print(f"  Backtest Period: {start_date} to {end_date}")
+    print(f"  Initial Cash: {cash:,.2f}")
+    print(f"  Commission: {commission:.4f}")
 
     # --- 3. 获取数据 ---
     print("\n--- Fetching Data ---")
@@ -131,7 +131,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         start_date=start_date,
         end_date=end_date,
         cash=cash,
-        commission=commission
+        commission=commission,
     )
     backtester.run()
 
@@ -151,7 +151,7 @@ if __name__ == '__main__':
                         help="指定数据源 (例如: csv akshare tushare sxsc_tushare)")
     parser.add_argument('--symbols', type=str, default='SHSE.510300', help="以,分割的回测标的代码 (默认: SHSE.510300)")
     parser.add_argument('--cash', type=float, default=100000.0, help="初始资金 (默认: 100000.0)")
-    parser.add_argument('--commission', type=float, default=0.00015, help="手续费率 (默认: 0.00015)")
+    parser.add_argument('--commission', type=float, default=0, help="手续费率，例如：万1.5为:0.00015 (默认：0)")
     parser.add_argument('--start_date', type=str, default=None, help="回测起始日期 (例如: 20241111)")
     parser.add_argument('--end_date', type=str, default=None, help="回测结束日期 (例如: 20250101)")
 

@@ -52,8 +52,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
     """
 
     def __init__(self, strategy_class, strategy_params=None):
+        # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
+        self.actual_start_date = None
         self.dataclose = self.datas[0].close
-
         self.strategy = strategy_class(broker=self, params=strategy_params)
         self.strategy.init()
 
@@ -63,6 +64,8 @@ class BacktraderStrategyWrapper(bt.Strategy):
             print(f'{dt.isoformat()} {txt}')
 
     def next(self):
+        if self.actual_start_date is None:
+            self.actual_start_date = self.datas[0].datetime.datetime(0)
         self.strategy.next()
 
     def notify_order(self, order):
@@ -75,8 +78,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
 class Backtester:
     # 回测执行器
     def __init__(self, datas, strategy_class, strategy_params=None, start_date=None, end_date=None, cash=100000.0,
-                 commission=0.00015
-                 , sizer_class=bt.sizers.PercentSizer, sizer_params={'percents': 95}):
+                 commission=0.0, sizer_class=None, sizer_params=None):
         self.cerebro = bt.Cerebro()
         self.datas = datas
         self.strategy_class = strategy_class
@@ -111,10 +113,13 @@ class Backtester:
         self.cerebro.broker.setcash(self.cash)
         self.cerebro.broker.setcommission(commission=self.commission)
 
-        # 动态添加Sizer
-        self.cerebro.addsizer(self.sizer_class, **self.sizer_params)
+        # 仅在 sizer_class 被提供时才添加全局 Sizer
+        if self.sizer_class:
+            # 使用 `**(self.sizer_params or {})` 以安全地处理 sizer_params 为 None 的情况
+            self.cerebro.addsizer(self.sizer_class, **(self.sizer_params or {}))
 
-        # PyFolio分析器用于提取详细的交易数据
+        # 添加性能分析器
+        # PyFolio分析器用于提取详细的交易数据，即使不使用pyfolio绘图，它也非常有用
         self.cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
         self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', riskfreerate=0.0,
                                  timeframe=bt.TimeFrame.Days, compression=1)
@@ -126,6 +131,7 @@ class Backtester:
         self.results = self.cerebro.run()
         print(f"Final Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
 
+        # --- 替换 cerebro.plot() 为我们自己的展示函数 ---
         self.display_results()
 
         self.cerebro.plot()
@@ -151,18 +157,29 @@ class Backtester:
         trade_analyzer = strat.analyzers.getbyname('tradeanalyzer')
 
         # --- 1. 计算核心指标 ---
-        # 时间范围
-        start_date_str = self.start_date if self.start_date else returns.index[0].strftime('%Y-%m-%d')
-        end_date_str = self.end_date if self.end_date else returns.index[-1].strftime('%Y-%m-%d')
+        # 1. 从策略实例中获取准确的开始日期
+        # 如果策略没有运行（没有交易和收益），则start_date可能不存在
+        if hasattr(strat, 'actual_start_date') and strat.actual_start_date is not None:
+            start_date = strat.actual_start_date
+        else:
+            # 回退方案：在没有实际开始日期的情况下使用returns的起始
+            if returns.empty:
+                print("Backtest generated no returns. Cannot calculate performance.")
+                return
+            start_date = returns.index[0].to_pydatetime().replace(tzinfo=None)
 
-        # 总收益率
+        end_date = returns.index[-1].to_pydatetime().replace(tzinfo=None)
+
+        # 2. 使用这个准确的日期来计算年化收益率
         total_return = (self.cerebro.broker.getvalue() / self.cash) - 1
+        time_period_years = (end_date - start_date).days / 365.25
 
-        # 年化收益率
-        # 从returns分析器获取年化收益率 (rnorm100)
-        annual_return = returns_analyzer.get_analysis().get('rnorm100', 0.0)
+        if time_period_years > 0:
+            annual_return = ((1 + total_return) ** (1 / time_period_years)) - 1
+        else:
+            annual_return = 0.0
 
-        # 夏普比率
+        # 夏普比率 (注意: 内置的SharpeRatio分析器也可能受时间跨度影响，但通常偏差不大)
         sharpe_ratio = sharpe_analyzer.get_analysis().get('sharperatio', 0.0)
         if sharpe_ratio is None: sharpe_ratio = 0.0
 
@@ -170,7 +187,7 @@ class Backtester:
         max_drawdown = drawdown_analyzer.get_analysis().max.drawdown / 100  # 转换为小数
 
         # 卡玛比率 (年化收益 / 最大回撤)
-        calmar_ratio = annual_return / (abs(max_drawdown) * 100) if max_drawdown != 0 else 0.0
+        calmar_ratio = (annual_return * 100) / (abs(max_drawdown) * 100) if max_drawdown != 0 else 0.0
 
         # 交易统计
         trade_analysis = trade_analyzer.get_analysis()
@@ -205,12 +222,12 @@ class Backtester:
         print("\n" + "=" * 50)
         print("            Backtest Performance Metrics")
         print("=" * 50)
-        print(f" Time Frame:           {start_date_str} to {end_date_str}")
+        print(f" Time Frame:           {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         print(f" Initial Portfolio:    {self.cash:,.2f}")
         print(f" Final Portfolio:      {self.cerebro.broker.getvalue():,.2f}")
         print("-" * 50)
         print(f" Total Return:         {total_return: .2%}")
-        print(f" Annualized Return:    {annual_return / 100: .2%}")
+        print(f" Annualized Return:    {annual_return: .2%}")
         print(f" Sharpe Ratio:         {sharpe_ratio: .2f}")
         print(f" Max Drawdown:         {max_drawdown: .2%}")
         print(f" Calmar Ratio:         {calmar_ratio: .2f}")

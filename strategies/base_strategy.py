@@ -1,6 +1,12 @@
 from abc import ABC, abstractmethod
 
 
+class _Params(object):
+    """一个简单的辅助类，用于将字典键转换为对象属性，以支持点操作符访问。"""
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
 class BaseStrategy(ABC):
     """
     策略抽象基类
@@ -16,8 +22,16 @@ class BaseStrategy(ABC):
         :param params:
         """
         self.broker = broker
+        # 1. 合并类级别定义的默认参数和实例化时传入的参数
+        final_params = self.params.copy()
         if params:
-            self.params.update(params)
+            final_params.update(params)
+
+        # 2. 使用辅助类将最终的参数字典转换为一个对象
+        self.params = _Params(**final_params)
+
+        # 3. 创建 'p' 作为 'params' 的快捷方式，以符合Backtrader的惯例
+        self.p = self.params
 
     def log(self, txt, dt=None):
         """
