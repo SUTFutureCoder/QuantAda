@@ -51,6 +51,9 @@ TUSHARE_TOKEN = 'your_tushare_token_here'
 # 运行示例MACD策略（使用默认参数）
 python ./run.py sample_macd_cross_strategy
 
+# 兼容驼峰类名
+python ./run.py SampleMacdCrossStrategy
+
 # 回测贵州茅台(SHSE.600519)，并设置50万初始资金
 python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000
 

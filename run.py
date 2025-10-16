@@ -1,6 +1,7 @@
 import argparse
 import importlib
 import os
+import re
 
 import pandas
 
@@ -17,30 +18,53 @@ os.environ['TCL_LIBRARY'] = tcl_library_path
 os.environ['TK_LIBRARY'] = tk_library_path
 
 
-def get_class_from_file(filename, search_paths):
+def _pascal_to_snake(name: str) -> str:
     """
-    通用的动态类导入函数。
-    :param filename: 文件名, e.g., 'manual_selector.py'
+    将 PascalCase (大驼峰) 字符串转换为 snake_case (下划线) 字符串。
+    例如: 'SampleMacdCrossStrategy' -> 'sample_macd_cross_strategy'
+    """
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+
+
+def get_class_from_name(name_string: str, search_paths: list):
+    """
+    根据给定的名称字符串（文件名或类名）动态导入类。
+    - 如果输入是 snake_case (e.g., 'sample_macd_cross_strategy'), 自动推断出类名 'SampleMacdCrossStrategy'。
+    - 如果输入是 PascalCase (e.g., 'SampleMacdCrossStrategy'), 自动推断出文件名 'sample_macd_cross_strategy'。
+
+    :param name_string: 文件名或类名字符串。
     :param search_paths: 搜索的目录列表, e.g., ['stock_selectors', 'strategies']
     :return: 动态导入的类
     """
-    module_name = filename.replace('.py', '')
-    class_name = "".join([s.capitalize() for s in module_name.split('_')])
+    # 清理输入，移除可能的 .py 后缀
+    name_string = name_string.replace('.py', '')
 
+    # 启发式判断输入格式
+    if '_' in name_string or name_string.islower():
+        # 认为是 snake_case 文件名
+        module_name = name_string
+        class_name = "".join(word.capitalize() for word in module_name.split('_'))
+    else:
+        # 认为是 PascalCase 类名
+        class_name = name_string
+        module_name = _pascal_to_snake(class_name)
+
+    # 遍历搜索路径尝试导入
     for path in search_paths:
         try:
             module_path = f'{path}.{module_name}'
             module = importlib.import_module(module_path)
-            # 兼容不同命名风格
-            try:
-                return getattr(module, class_name)
-            except AttributeError:
-                class_name_alt = module_name.replace('_', ' ').title().replace(' ', '')
-                return getattr(module, class_name_alt)
-        except (ImportError, AttributeError) as e:
-            raise ImportError(f"Class internal error for '{filename}': {e}")
+            return getattr(module, class_name)
+        except (ImportError, AttributeError):
+            # 如果在一个路径中找不到，继续在下一个路径中寻找
+            continue
 
-    raise ImportError(f"Could not find class for '{filename}' in paths: {search_paths}")
+    # 如果所有路径都尝试完毕仍未找到，则抛出异常
+    raise ImportError(
+        f"Could not find class '{class_name}' from module '{module_name}' "
+        f"derived from input '{name_string}' in any of the search paths: {search_paths}"
+    )
 
 
 def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date):
@@ -59,7 +83,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
     # --- 2. 执行选股 ---
     if selection_filename:
         print("--- Running Selection Phase ---")
-        selector_class = get_class_from_file(selection_filename, ['stock_selectors'])
+        selector_class = get_class_from_name(selection_filename, ['stock_selectors'])
         selector_instance = selector_class(data_manager=data_manager)
         selection_result = selector_instance.run_selection()
         if isinstance(selection_result, list):
@@ -99,7 +123,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
 
     # --- 4. 初始化回测器并运行 ---
     print("\n--- Initializing Backtester ---")
-    strategy_class = get_class_from_file(strategy_filename, ['strategies'])
+    strategy_class = get_class_from_name(strategy_filename, ['strategies'])
 
     backtester = Backtester(
         datas,
