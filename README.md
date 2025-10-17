@@ -75,11 +75,23 @@ python ./run.py --help
 
 #### 4. 部署实盘 (以掘金量化为例)
 
-1. 打开掘金客户端，并进入您的策略项目文件夹。
-2. 将本地的 `common/`，`strategies/` 和 `live/` 这三个文件夹**完整地复制**到掘金的策略项目文件夹中。
-3. 将本地 `live/gm_main.py` 文件的**全部内容**复制并覆盖到掘金策略的 `main.py` 文件中。
-4. 根据 `live/gm_main.py` 文件内的注释，修改要运行的策略类。
-5. 在掘金客户端重启并运行策略。
+框架通过 `live_trader` 模块实现与外部平台的松耦合对接，策略代码无需修改即可复用。
+
+1.  **配置PYTHONPATH**：在操作系统的 `高级系统设置→环境变量` 中，添加本框架的项目根目录到 `PYTHONPATH` 中。
+2.  **创建策略入口**：在掘金新建策略，参考 `live_trader/samples/gm_main_sample.py` 的代码，将 `if __name__ == '__main__'` 上方代码复制到掘金的 `main.py` 文件中。
+3.  **配置策略**：修改 `main.py` 中的 `config` 字典，使其与您的回测命令行参数对应。`config` 是连接框架与实盘的唯一“接头”。
+
+    ```python
+    # 示例: 对应回测命令 `python run.py MyStrategy --selection=MySelector --cash=500k`
+    config = {
+        'platform': 'gm',
+        'strategy_name': 'MyStrategy',
+        'selection_name': 'MySelector',
+        # 'cash': 500000.0,  # 选填，用于虚拟分仓，不填则使用账户全部资金
+        'params': { ... } # 策略自定义参数
+    }
+    ```
+4.  **运行**：保存 `main.py` 并启动掘金策略。
 
 ## 目录说明
 
@@ -111,11 +123,13 @@ QuantAda/
 │   ├── sample_macd_cross_strategy.py  # MACD样例策略
 │   ├── sample_extra_data_strategy.py  # 使用额外数据样例策略
 │   └── sample_multi_portfolio_strategy.py  # 多标的等权样例策略
-├── live/                   # 实盘模块
-│   ├── adapters/           # 实盘平台适配器
-│   │   ├── base_broker.py  # 实盘Broker抽象基类
-│   │   └── gm_broker.py    # 掘金量化Broker适配器
-│   └── gm_main.py          # 掘金量化实盘入口文件
+├── live_trader/            # 实盘交易模块
+│   ├── adapters/           # 平台适配器层 (将外部API统一)
+│   │   ├── base_broker.py  # Broker 抽象基类
+│   │   └── gm_broker.py    # 掘金(gm)平台具体实现
+│   ├── samples/            # 各平台实盘入口文件样例
+│   │   └── gm_main_sample.py
+│   └── engine.py           # 实盘交易引擎 (驱动策略运行)
 ├── requirements.txt        # Python依赖包
 └── run.py                  # 命令行回测启动器
     
