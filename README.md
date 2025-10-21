@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
 
-一个优雅、可扩展的量化交易框架，实现算法的分模块独立或协作开发。
+一个优雅、可扩展、可实盘的量化交易框架，实现算法的分模块独立或协作开发。
 
 `Ada` 是 `Adapter`（适配器）的缩写，也借此向计算机先驱**阿达·洛夫莱斯 (Ada Lovelace)** 及以她命名的Ada语言致敬。
 
