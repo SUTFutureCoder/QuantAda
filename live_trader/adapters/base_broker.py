@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+
 import pandas as pd
 
 
@@ -50,6 +51,14 @@ class BaseLiveBroker(ABC):
         self._commission_override = commission_override
         self._cash = self._init_cash()
         self._commission = self._init_commission()
+
+    @staticmethod
+    @abstractmethod
+    def is_live_mode(context) -> bool:
+        """
+        判断当前是否为实盘模式
+        """
+        pass
 
     @staticmethod
     def extract_run_config(context) -> dict:

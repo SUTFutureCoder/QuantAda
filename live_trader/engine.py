@@ -26,23 +26,34 @@ class LiveTrader:
     def init(self, context):
         print("--- LiveTrader Engine Initializing ---")
 
-        # 合并配置：平台配置为默认，用户配置有更高优先级
-        platform_config = self.BrokerClass.extract_run_config(context)
-        self.config = {**platform_config, **self.user_config}
+        # 1. 【核心改动】静态调用 is_live_mode 来判断模式
+        is_live = self.BrokerClass.is_live_mode(context)
 
+        # 2. 根据模式决定配置合并策略
+        if is_live:
+            print("[Engine] Live Trading Mode Detected.")
+            platform_config = {}
+        else:
+            print("[Engine] Platform Backtest Mode Detected.")
+            platform_config = self.BrokerClass.extract_run_config(context)
+
+        # 合并配置：平台配置为默认，用户配置有更高优先级
+        self.config = {**platform_config, **self.user_config}
         print("[Engine] Effective configuration:", self.config)
 
-        # 使用合并后的最终配置来加载类
+        # 3. 使用最终配置实例化所有组件
         self.strategy_class = get_class_from_name(self.config['strategy_name'], ['strategies'])
         if self.config.get('selection_name'):
             self.selector_class = get_class_from_name(self.config['selection_name'], ['stock_selectors'])
 
         # 后续流程使用 self.config
-        self.broker = self.BrokerClass(context, cash_override=self.config.get('cash'), commission_override=self.config.get('commission'))
+        self.broker = self.BrokerClass(context, cash_override=self.config.get('cash'),
+                                       commission_override=self.config.get('commission'))
         symbols = self._determine_symbols()
         if not symbols: raise ValueError("No symbols to trade.")
 
-        datas = self._fetch_all_history_data(symbols, context)
+        # 4. 传入 is_live 标志来获取数据
+        datas = self._fetch_all_history_data(symbols, context, is_live=is_live)
         self.broker.set_datas(list(datas.values()))
         params = self.config.get('params', {})
         self.strategy = self.strategy_class(broker=self.broker, params=params)
@@ -69,11 +80,21 @@ class LiveTrader:
             return symbols
         return self.config.get('symbols', [])
 
-    def _fetch_all_history_data(self, symbols: list, context) -> dict:
-        """为所有标的获取历史数据并创建代理对象"""
+    def _fetch_all_history_data(self, symbols: list, context, is_live: bool) -> dict:
+        """根据模式获取数据：实盘模式获取预热数据，回测模式获取全部历史"""
         datas = {}
-        start_date = self.config.get('start_date')
-        end_date = self.config.get('end_date')
+
+        if is_live:
+            # 实盘模式: 仅获取最近的预热数据，用于计算指标
+            end_date = context.now.strftime('%Y-%m-%d')
+            # 默认一个慷慨的预热期(约2年)以适应各种长周期指标，无需用户配置
+            start_date = (context.now - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
+            print(f"[Engine] Live mode data fetch (warm-up): from {start_date} to {end_date}")
+        else:
+            # 平台回测模式: 使用配置的完整时间段
+            start_date = self.config.get('start_date')
+            end_date = self.config.get('end_date')
+            print(f"[Engine] Backtest mode data fetch: from {start_date} to {end_date}")
 
         for symbol in symbols:
             df = self.data_provider.get_history(symbol, start_date, end_date)
