@@ -138,13 +138,13 @@ QuantAda/
 ## 样例截图
 
 ### 终端执行回测
-[!backtest_mode_in_terminal](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/backtest_mode_in_terminal.png?raw=true)
+![backtest_mode_in_terminal](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/backtest_mode_in_terminal.png?raw=true)
 
 ### 券商平台执行回测
-[!backtest_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/backtest_mode_in_broker.png?raw=true)
+![backtest_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/backtest_mode_in_broker.png?raw=true)
 
 ### 券商平台执行实盘
-[!live_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/live_mode_in_broker.png?raw=true)
+![live_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/live_mode_in_broker.png?raw=true)
 
 ## 免责声明 (Disclaimer)
 
