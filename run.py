@@ -10,7 +10,7 @@ from data_providers.manager import DataManager
 
 # 动态获取 Python 安装目录，并构建 Tcl/Tk 库路径
 python_install_dir = os.path.dirname(os.path.dirname(os.__file__))
-tcl_library_path = os.path.join(python_install_dir, 'tcl', 'tcl8.6')  # 版本号请根据实际情况调整
+tcl_library_path = os.path.join(python_install_dir, 'tcl', 'tcl8.6')
 tk_library_path = os.path.join(python_install_dir, 'tcl', 'tk8.6')
 
 # 设置环境变量
@@ -67,7 +67,7 @@ def get_class_from_name(name_string: str, search_paths: list):
     )
 
 
-def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date):
+def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date, risk_filename, risk_params_str):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
@@ -94,6 +94,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
     print("--- Starting Backtest ---")
     print(f"  Selection: {selection_filename}")
     print(f"  Strategy: {strategy_filename}")
+    print(f"  Risk Control: {risk_filename or 'None'}")
     print(f"  Symbols: {symbols}")
     print(f"  Backtest Period: {start_date} to {end_date}")
     print(f"  Initial Cash: {cash:,.2f}")
@@ -125,6 +126,20 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
     print("\n--- Initializing Backtester ---")
     strategy_class = get_class_from_name(strategy_filename, ['strategies'])
 
+    risk_control_class = None
+    risk_params_dict = {}
+    if risk_filename:
+        # 增加 'risk_controls' 到搜索路径
+        risk_control_class = get_class_from_name(risk_filename, ['risk_controls', 'strategies'])
+        if risk_params_str:
+            try:
+                for param in risk_params_str.split(','):
+                    key, value = param.split(':')
+                    risk_params_dict[key.strip()] = float(value.strip())
+                print(f"  Risk Control Params: {risk_params_dict}")
+            except Exception as e:
+                print(f"  Warning: Could not parse risk_params '{risk_params_str}'. Error: {e}")
+
     backtester = Backtester(
         datas,
         strategy_class,
@@ -132,6 +147,8 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         end_date=end_date,
         cash=cash,
         commission=commission,
+        risk_control_class=risk_control_class,
+        risk_control_params=risk_params_dict
     )
     backtester.run()
 
@@ -154,6 +171,9 @@ if __name__ == '__main__':
     parser.add_argument('--commission', type=float, default=0, help="手续费率，例如：万1.5为:0.00015 (默认：0)")
     parser.add_argument('--start_date', type=str, default=None, help="回测起始日期 (例如: 20241111)")
     parser.add_argument('--end_date', type=str, default=None, help="回测结束日期 (例如: 20250101)")
+    parser.add_argument('--risk', type=str, default=None, help="风控模块名称 (位于 risk_controls 目录)")
+    parser.add_argument('--risk_params', type=str, default=None,
+                        help="风控模块参数 (例如: 'stop_loss_pct:0.03,take_profit_pct:0.1')")
 
     # 3. 解析参数
     args = parser.parse_args()
@@ -171,6 +191,8 @@ if __name__ == '__main__':
         data_source=args.data_source,
         start_date=args.start_date,
         end_date=args.end_date,
+        risk_filename=args.risk,
+        risk_params_str=args.risk_params
     )
 
     print("\n--- Backtest Finished ---")

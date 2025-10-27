@@ -44,6 +44,9 @@ class TradeProxy:
     @property
     def pnlcomm(self): return self._trade.pnlcomm
 
+    @property
+    def data(self): return self._trade.data
+
 
 class BacktraderStrategyWrapper(bt.Strategy):
     """
@@ -51,11 +54,14 @@ class BacktraderStrategyWrapper(bt.Strategy):
     唯一职责是加载我们的纯策略，并将Backtrader的环境传递给它
     """
 
-    def __init__(self, strategy_class, strategy_params=None):
+    def __init__(self, strategy_class, strategy_params=None, risk_control_class=None, risk_control_params=None):
         # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
         self.actual_start_date = None
         self.dataclose = self.datas[0].close
         self.strategy = strategy_class(broker=self, params=strategy_params)
+        self.risk_control = None
+        if risk_control_class:
+            self.risk_control = risk_control_class(broker=self, params=risk_control_params)
         self.strategy.init()
 
     def log(self, txt, dt=None):
@@ -66,19 +72,69 @@ class BacktraderStrategyWrapper(bt.Strategy):
     def next(self):
         if self.actual_start_date is None:
             self.actual_start_date = self.datas[0].datetime.datetime(0)
+
+        # 检查策略是否有挂单。
+        # 假设策略在创建订单时会设置 self.strategy.order，并在 notify_order 中清除它
+        # (如 SampleMacdCrossStrategy 所示)
+        if hasattr(self.strategy, 'order') and self.strategy.order:
+            return  # 策略有挂单，跳过所有逻辑（包括风控）
+
+        # 执行风控检查
+        if self._check_risk_controls():
+                return
+
         self.strategy.next()
 
     def notify_order(self, order):
+        if self.risk_control:
+            self.risk_control.notify_order(OrderProxy(order))
+
         self.strategy.notify_order(OrderProxy(order))
 
     def notify_trade(self, trade):
+        if self.risk_control:
+            self.risk_control.notify_trade(TradeProxy(trade))
+
         self.strategy.notify_trade(TradeProxy(trade))
 
+    def _check_risk_controls(self) -> bool:
+        """
+        辅助方法：执行风控检查并采取行动。
+        封装了所有风控相关的循环和判断逻辑。
+
+        :return: True 如果风控被触发并执行了平仓, False 否则。
+        """
+        if not self.risk_control:
+            return False  # 没有风控模块，直接返回
+
+        for data in self.datas:
+            # 1. 检查是否有仓位 (使用卫语句优化)
+            if not self.getposition(data).size:
+                continue  # 没有仓位，检查下一个标的
+
+            # 2. 对持仓标的执行风控检查
+            action = self.risk_control.check(data)
+
+            # 3. 如果触发平仓
+            if action == 'SELL':
+                self.log(f"Risk module triggered SELL for {data._name}")
+
+                # 执行平仓
+                order = self.order_target_percent(data=data, target=0.0)
+
+                # 将订单句柄存入策略的 'order' 属性，以实现锁
+                if hasattr(self.strategy, 'order'):
+                    self.strategy.order = order
+
+                return True  # 【重要】风控已触发，停止检查并返回True
+
+        return False  # 所有标的检查完毕，未触发风控
 
 class Backtester:
     # 回测执行器
     def __init__(self, datas, strategy_class, strategy_params=None, start_date=None, end_date=None, cash=100000.0,
-                 commission=0.0, sizer_class=None, sizer_params=None):
+                 commission=0.0, sizer_class=None, sizer_params=None,
+                 risk_control_class=None, risk_control_params=None):
         self.cerebro = bt.Cerebro()
         self.datas = datas
         self.strategy_class = strategy_class
@@ -89,6 +145,8 @@ class Backtester:
         self.commission = commission
         self.sizer_class = sizer_class
         self.sizer_params = sizer_params
+        self.risk_control_class = risk_control_class
+        self.risk_control_params = risk_control_params
 
     def run(self):
         # 将数据添加到Cerebro
@@ -106,7 +164,9 @@ class Backtester:
         self.cerebro.addstrategy(
             BacktraderStrategyWrapper,
             strategy_class=self.strategy_class,
-            strategy_params=self.strategy_params
+            strategy_params=self.strategy_params,
+        risk_control_class = self.risk_control_class,
+        risk_control_params = self.risk_control_params
         )
 
         # 设置初始资金和手续费
