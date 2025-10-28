@@ -4,7 +4,8 @@
 from __future__ import print_function, absolute_import
 
 try:
-    from gm.api import schedule, run, MODE_LIVE
+    from gm.api import schedule, run
+    from gm.api import MODE_LIVE, ADJUST_PREV # 引入默认回测常量，避免复制后报错
 except ImportError:
     print("This script is intended to be run within the GM Quant platform.")
 
@@ -21,6 +22,13 @@ config = {
     'selection_name': 'ReverseTraderMultipleActionsSelector',
     # 'symbols': ['SHSE.600519', 'SZSE.000001'], # 如果不用选股器，则手动指定
 
+    # --- 风控配置 (与回测命令一致) ---
+    'risk': 'SampleStopLossTakeProfit',
+    'risk_params': {
+        'stop_loss_pct': 0.05,  # 5% 止损
+        'take_profit_pct': 0.10 # 10% 止盈
+    },
+
     # --- 资金与佣金 (与回测命令一致) ---
     # 'cash': 500000.0, # 【虚拟分仓】若指定，则使用此金额作为策略资金；若注释掉，则使用真实账户全部可用资金(实盘)或run函数初始资金(回测)
     'commission': 0.0001,  # 由于框架无法获取掘金框架的backtest_commission_ratio，因此如果回测有佣金，也请设置同样的数值
@@ -30,7 +38,7 @@ config = {
 
     # --- 策略自定义参数 ---
     'params': {
-        'selectTopK': 2,
+        'selectTopK': 1,
         'target_buffer': 0.98,
     }
 }

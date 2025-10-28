@@ -44,7 +44,9 @@ class GmDataProvider(BaseLiveDataProvider):
     """掘金平台的数据提供者实现"""
 
     def get_history(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        if history is None: raise ImportError("'gm' module is required for GmDataProvider.")
+        if history is None:
+            raise ImportError("'gm' module is required for GmDataProvider.")
+
         df = history(symbol=symbol, frequency='1d', start_time=start_date, end_time=end_date,
                      fields='open,high,low,close,volume,eob', df=True)
         if df.empty: return df
@@ -95,13 +97,18 @@ class GmBrokerAdapter(BaseLiveBroker):
     def get_position(self, data):
         class Pos:
             size = 0
+            # 持仓均价
+            price = 0.0
 
         if not hasattr(self._context, 'account'):
             print("Warning: context object in GmBrokerAdapter is not valid or missing 'account' attribute.")
-            return Pos
+            return Pos()
+
         positions = self._context.account().positions()
         for p in positions:
             if p.symbol == data._name:
-                Pos.size = p.volume
-                return Pos
-        return Pos
+                pos_obj = Pos()
+                pos_obj.size = p.volume
+                pos_obj.price = p.vwap
+                return pos_obj
+        return Pos()
