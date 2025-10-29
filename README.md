@@ -1,7 +1,7 @@
 # QuantAda
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
+[](https://opensource.org/licenses/MIT)
+[](https://www.python.org/downloads/release/python-380/)
 
 一个优雅、可扩展、可实盘的量化交易框架，实现算法的分模块独立或协作开发。
 
@@ -11,16 +11,17 @@
 
 ## 核心特性
 
-- **策略与引擎解耦**：得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `backtrader` 回测引擎和掘金量化等实盘环境中。
-- **模块化与可扩展**：
-    - **数据层**：支持指定主数据源和额外数据源。默认采用责任链模式，按 `PRIORITY` 优先级获取数据，并实现自动增量更新与本地缓存，保证数据获取的稳定与高效。
-    - **策略层**：支持将指标计算（`common/indicators`）抽象为公共模块，集成MyTT、Ta-Lib的同时，方便团队成员共享和组合，避免重复造轮子。
-    - **引擎层**：通过适配器模式清晰地隔离了回测与实盘，您可以轻松添加对QMT、VN.PY等其他平台的适配器，而无需改动任何策略代码。
-- **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的灵活性和透明度。
+  - **策略与引擎解耦**：得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `backtrader` 回测引擎和掘金量化等实盘环境中。
+  - **模块化与可扩展**：
+      - **数据层**：支持指定主数据源和额外数据源。默认采用责任链模式，按 `PRIORITY` 优先级获取数据，并实现自动增量更新与本地缓存，保证数据获取的稳定与高效。
+      - **策略层**：支持将指标计算（`common/indicators`）抽象为公共模块，集成MyTT、Ta-Lib的同时，方便团队成员共享和组合，避免重复造轮子。
+      - **引擎层**：通过适配器模式清晰地隔离了回测与实盘，您可以轻松添加对QMT、VN.PY等其他平台的适配器，而无需改动任何策略代码。
+  - **插件化开发 (SDK模式)**：支持将框架作为SDK依赖。您可以在自己的代码库中编写策略，并通过`PYTHONPATH`引用，实现业务代码与框架代码的物理隔离，便于版本管理和独立开发。
+  - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的 flexibilidad 和透明度。
 
 ## 快速开始
 
-#### 1. 环境准备
+#### 1\. 环境准备
 
 ```bash
 # 克隆项目
@@ -35,7 +36,7 @@ source .venv/bin/activate  # on Windows, use `.venv\Scripts\activate`
 pip install -r requirements.txt
 ```
 
-#### 2. 配置API密钥
+#### 2\. 配置API密钥
 
 打开 `config.py` 文件，并填入您的 `TUSHARE_TOKEN`。如果您没有，可以前往 [Tushare Pro](https://tushare.pro/user/token)
 免费注册获取。
@@ -45,7 +46,9 @@ pip install -r requirements.txt
 TUSHARE_TOKEN = 'your_tushare_token_here'
 ```
 
-#### 3. 运行回测
+#### 3.a. 运行回测 (内部模式)
+
+此模式适用于直接在框架的 `strategies/`、`stock_selectors/` 等目录中编写逻辑。
 
 使用 `run.py` 脚本执行回测。您可以通过命令行参数灵活地选择策略、标的、资金和手续费。
 
@@ -81,27 +84,86 @@ python ./run.py sample_extra_data_strategy --symbols=SZSE.000001
 python ./run.py --help
 ```
 
-#### 4. 部署实盘 (以掘金量化为例)
+#### 3.b. 运行回测 (SDK/插件化模式)
+
+此模式支持将策略、选股器等逻辑放在框架目录之外的独立项目中，实现“依赖倒置”。
+
+
+1.  **目录结构示例**：
+
+    ```
+    /path/to/QuantAda/ (框架目录 A)
+    └── run.py
+
+    /path/to/MyProject/ (您的代码库 B)
+    └── my_strategies/
+        ├── __init__.py
+        └── my_cool_strategy.py
+            # 假设文件内容如下:
+            # from strategies.base_strategy import BaseStrategy
+            # class MyCoolStrategy(BaseStrategy):
+            #     ...
+    ```
+
+2.  **设置 PYTHONPATH**：将框架目录(A)和您的项目目录(B)都添加到 `PYTHONPATH` 环境变量中。
+
+    ```bash
+    # (Linux/macOS)
+    export PYTHONPATH=/path/to/QuantAda:/path/to/MyProject
+
+    # (Windows CMD)
+    set PYTHONPATH=C:\path\to\QuantAda;C:\path\to\MyProject
+    ```
+
+3.  **运行外部策略**：在 `run.py` 中使用**带点号的全限定名**来指定您的策略。
+
+    ```bash
+    # 切换到框架目录
+    cd /path/to/QuantAda
+
+    # 方式1: 提供模块和类的全名 (推荐)
+    python ./run.py my_strategies.my_cool_strategy.MyCoolStrategy
+
+    # 方式2: 提供模块名 (my_strategies.my_cool_strategy)，自动推断类名 (MyCoolStrategy)
+    python ./run.py my_strategies.my_cool_strategy
+    ```
+
+    这种方式同样适用于 `--selection` 和 `--risk` 参数。
+	
+	
+4.  **注意事项**
+
+- 文件夹/包命名**请勿**和框架相同，建议添加```my_```前缀或```_custom```后缀。
+
+- 如果有自定义指标算法，请新建自定义py脚本，并通过```from common.indicators import *```引入框架的指标算法库。
+
+
+
+#### 4\. 部署实盘 (以掘金量化为例)
 
 框架通过 `live_trader` 模块实现与外部平台的松耦合对接，策略代码无需修改即可复用。
 
-1.  **配置PYTHONPATH**：在操作系统的 `高级系统设置→环境变量` 中，添加本框架的项目根目录到 `PYTHONPATH` 中。
+1.  **配置PYTHONPATH**：在操作系统的 `高级系统设置→环境变量` 中，添加本框架的项目根目录到 `PYTHONPATH` 中。 （如果使用SDK模式，还需添加您自己的项目目录）。
+
 2.  **创建策略入口**：在掘金新建策略，参考 `live_trader/samples/gm_main_sample.py` 的代码，将 `if __name__ == '__main__'` 上方代码复制到掘金的 `main.py` 文件中。
+
 3.  **配置策略**：修改 `main.py` 中的 `config` 字典，使其与您的回测命令行参数对应。`config` 是连接框架与实盘的唯一“接头”。
 
     ```python
     # 示例: 对应回测命令 `python run.py MyStrategy --selection=MySelector --cash=500k`
+    # 如果使用SDK模式，strategy_name 和 selection_name 也应使用全限定名
     config = {
         'platform': 'gm',
-        'strategy_name': 'MyStrategy',
-        'selection_name': 'MySelector',
+        'strategy_name': 'MyStrategy', # 或 'my_strategies.my_cool_strategy.MyCoolStrategy'
+        'selection_name': 'MySelector', # 或 'my_selectors.my_selector_file.MySelector'
         # 'cash': 500000.0,  # 选填，用于虚拟分仓，不填则使用账户全部资金
         'params': { ... } # 策略自定义参数
     }
     ```
+
 4.  **运行**：保存 `main.py` 并启动掘金策略。
 
-## 目录说明
+## 框架目录说明
 
 ```
 QuantAda/

@@ -30,16 +30,48 @@ def _pascal_to_snake(name: str) -> str:
 def get_class_from_name(name_string: str, search_paths: list):
     """
     根据给定的名称字符串（文件名或类名）动态导入类。
-    - 如果输入是 snake_case (e.g., 'sample_macd_cross_strategy'), 自动推断出类名 'SampleMacdCrossStrategy'。
-    - 如果输入是 PascalCase (e.g., 'SampleMacdCrossStrategy'), 自动推断出文件名 'sample_macd_cross_strategy'。
 
-    :param name_string: 文件名或类名字符串。
-    :param search_paths: 搜索的目录列表, e.g., ['stock_selectors', 'strategies']
+    支持两种模式:
+    1. 内部模式 (无点号): e.g., 'sample_macd_cross_strategy'
+       - 在框架的 'search_paths' (如 'strategies/') 中查找。
+    2. 外部模式 (有点号): e.g., 'my_external_strategies.my_strategy.MyStrategyClass'
+       - 直接从 PYTHONPATH 导入，忽略 'search_paths'。
+
+    :param name_string: 文件名/类名 (e.g., 'sample_macd_cross_strategy') 或
+                        全限定名 (e.g., 'my_strategies.my_strategy_file.MyStrategyClass')
+    :param search_paths: 内部搜索的目录列表, e.g., ['stock_selectors', 'strategies']
     :return: 动态导入的类
     """
-    # 清理输入，移除可能的 .py 后缀
     name_string = name_string.replace('.py', '')
 
+    # 1. 检查是否为全限定路径 (包含点号)
+    if '.' in name_string:
+        try:
+            # 尝试 Case 1: 'my_package.my_module.MyClass'
+            # 假设用户提供了模块和类的全名
+            module_path, class_name = name_string.rsplit('.', 1)
+            module = importlib.import_module(module_path)
+            return getattr(module, class_name)
+        except (ImportError, AttributeError, ValueError) as e_class:
+            # 导入失败，尝试 Case 2
+            # Case 2: 'my_package.my_module_file' (snake_case)
+            # 假设用户提供了模块名，我们推断类名 (e.g., MyModuleFile)
+            try:
+                module_name = name_string
+                class_name_base = module_name.split('.')[-1]
+                class_name = "".join(word.capitalize() for word in class_name_base.split('_'))
+
+                module = importlib.import_module(module_name)
+                return getattr(module, class_name)
+            except (ImportError, AttributeError) as e_module:
+                # 两次尝试都失败
+                raise ImportError(
+                    f"Could not import '{name_string}' as a fully qualified path. \n"
+                    f"  Attempt 1 (as ...MyClass) failed: {e_class} \n"
+                    f"  Attempt 2 (as ...my_module) failed: {e_module}"
+                )
+
+    # 2. 原始逻辑 (如果 name_string 不含点号，则在内部搜索)
     # 启发式判断输入格式
     if '_' in name_string or name_string.islower():
         # 认为是 snake_case 文件名
@@ -67,7 +99,8 @@ def get_class_from_name(name_string: str, search_paths: list):
     )
 
 
-def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date, risk_filename, risk_params_str):
+def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date,
+                 risk_filename, risk_params_str):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
