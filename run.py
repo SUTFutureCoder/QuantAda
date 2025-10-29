@@ -195,8 +195,8 @@ if __name__ == '__main__':
 
     # 2. 添加命令行参数
     parser.add_argument('strategy', type=str,
-                        help="要运行的策略文件名 (例如: sample_macd_cross_strategy.py 或 sample_macd_cross_strategy)")
-    parser.add_argument('--selection', type=str, default=None, help="选股器文件名 (位于selectors目录)")
+                        help="要运行的策略文件名 (例如: sample_macd_cross_strategy.py 或 sample_macd_cross_strategy 或 my_pkg.my_strategy.MyStrategyClass)")
+    parser.add_argument('--selection', type=str, default=None, help="选股器文件名 (位于selectors目录 或 自定义包路径)")
     parser.add_argument('--data_source', type=str, default=None,
                         help="指定数据源 (例如: csv akshare tushare sxsc_tushare)")
     parser.add_argument('--symbols', type=str, default='SHSE.510300', help="以,分割的回测标的代码 (默认: SHSE.510300)")
@@ -204,7 +204,7 @@ if __name__ == '__main__':
     parser.add_argument('--commission', type=float, default=0, help="手续费率，例如：万1.5为:0.00015 (默认：0)")
     parser.add_argument('--start_date', type=str, default=None, help="回测起始日期 (例如: 20241111)")
     parser.add_argument('--end_date', type=str, default=None, help="回测结束日期 (例如: 20250101)")
-    parser.add_argument('--risk', type=str, default=None, help="风控模块名称 (位于 risk_controls 目录)")
+    parser.add_argument('--risk', type=str, default=None, help="风控模块名称 (位于 risk_controls目录 或 自定义包路径)")
     parser.add_argument('--risk_params', type=str, default=None,
                         help="风控模块参数 (例如: 'stop_loss_pct:0.03,take_profit_pct:0.1')")
 

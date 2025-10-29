@@ -15,12 +15,21 @@ except ImportError:
 class GmOrderProxy(BaseOrderProxy):
     """掘金平台的订单代理具体实现"""
 
-    def __init__(self, platform_order):
+    def __init__(self, platform_order, is_live: bool):
         self.platform_order = platform_order
+        self.is_live = is_live  # 保存模式
 
-    # 因为回测框架不负责实盘的回测，在实盘环境下仅触发信号，因此暂且放行OrderStatus_PendingNew挂单状态
-    def is_completed(self) -> bool: return self.platform_order.status == OrderStatus_Filled \
-        or self.platform_order.status == OrderStatus_PendingNew
+    # 根据模式动态判断
+    def is_completed(self) -> bool:
+        if self.is_live:
+            # 实盘模式：必须是最终成交
+            return self.platform_order.status == OrderStatus_Filled
+        else:
+            # 回测模式：放行 PendingNew (兼容掘金回测)
+            # 因为回测框架不负责实盘的回测，且掘金的下单是异步过程无法实时获取订单状态，因此修改is_completed检查的常量。
+            # 在实盘环境下仅触发信号，因此暂且放行OrderStatus_PendingNew挂单状态
+            return self.platform_order.status == OrderStatus_Filled \
+                or self.platform_order.status == OrderStatus_PendingNew
 
     def is_canceled(self) -> bool: return self.platform_order.status == OrderStatus_Canceled
 
@@ -58,6 +67,10 @@ class GmDataProvider(BaseLiveDataProvider):
 class GmBrokerAdapter(BaseLiveBroker):
     """掘金平台的交易执行器实现"""
 
+    def __init__(self, context, cash_override=None, commission_override=None):
+        super().__init__(context, cash_override, commission_override)
+        self.is_live = self.is_live_mode(context)  # 保存当前是否为实盘
+
     @staticmethod
     def is_live_mode(context) -> bool:
         """掘金平台实盘模式的具体判断逻辑"""
@@ -92,7 +105,7 @@ class GmBrokerAdapter(BaseLiveBroker):
         platform_order_list = order_target_percent(symbol=symbol, percent=target, order_type=OrderType_Market,
                                                    position_side=1)
         # 2. 将原生订单对象包装成我们自己的代理并返回
-        return GmOrderProxy(platform_order_list[-1]) if platform_order_list else None
+        return GmOrderProxy(platform_order_list[-1], self.is_live) if platform_order_list else None
 
     def get_position(self, data):
         class Pos:
