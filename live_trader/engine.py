@@ -82,41 +82,51 @@ class LiveTrader:
         print(f"--- LiveTrader Running at {context.now.strftime('%Y-%m-%d %H:%M:%S')} ---")
         self.broker.set_datetime(context.now)
 
-        # 1. 检查策略是否有挂单
-        strategy_order = getattr(self.strategy, 'order', None)
+        # 顶层异常捕获，防止策略因单次错误而崩溃
+        try:
+            # 1. 检查策略是否有挂单
+            strategy_order = getattr(self.strategy, 'order', None)
 
-        if strategy_order:
-            print("[Engine] Strategy has a pending order. Notifying and skipping logic.")
-            if self.risk_control:
-                self.risk_control.notify_order(strategy_order)
-            self.strategy.notify_order(strategy_order)
-            print("--- LiveTrader Run Finished (Pending Order) ---")
-            return
-
-        # 2. 执行风控检查
-        if self.risk_control and self._check_risk_controls():
-            # 风控已触发平仓
-            print("[Engine] Risk control triggered an exit. Skipping strategy.next().")
-            # 检查风控是否设置了 self.strategy.order
-            risk_order = getattr(self.strategy, 'order', None)
-            if risk_order:
-                print("[Engine] Notifying about risk-triggered order...")
+            if strategy_order:
+                print("[Engine] Strategy has a pending order. Notifying and skipping logic.")
                 if self.risk_control:
-                    self.risk_control.notify_order(risk_order)
-                self.strategy.notify_order(risk_order)
-            print("--- LiveTrader Run Finished (Risk Triggered) ---")
-            return
+                    self.risk_control.notify_order(strategy_order)
+                self.strategy.notify_order(strategy_order)
+                print("--- LiveTrader Run Finished (Pending Order) ---")
+                return
 
-        # 3. 执行策略的 'next'
-        self.strategy.next()
+            # 2. 执行风控检查
+            if self.risk_control and self._check_risk_controls():
+                # 风控已触发平仓
+                print("[Engine] Risk control triggered an exit. Skipping strategy.next().")
+                # 检查风控是否设置了 self.strategy.order
+                risk_order = getattr(self.strategy, 'order', None)
+                if risk_order:
+                    print("[Engine] Notifying about risk-triggered order...")
+                    if self.risk_control:
+                        self.risk_control.notify_order(risk_order)
+                    self.strategy.notify_order(risk_order)
+                print("--- LiveTrader Run Finished (Risk Triggered) ---")
+                return
 
-        # 4. 通知策略的新订单
-        strategy_order = getattr(self.strategy, 'order', None)  # 重新获取，策略可能已创建新订单
-        if strategy_order:
-            print("[Engine] New order created by strategy. Notifying...")
-            if self.risk_control:
-                self.risk_control.notify_order(strategy_order)
-            self.strategy.notify_order(strategy_order)
+            # 3. 执行策略的 'next'
+            self.strategy.next()
+
+            # 4. 通知策略的新订单
+            strategy_order = getattr(self.strategy, 'order', None)  # 重新获取，策略可能已创建新订单
+            if strategy_order:
+                print("[Engine] New order created by strategy. Notifying...")
+                if self.risk_control:
+                    self.risk_control.notify_order(strategy_order)
+                self.strategy.notify_order(strategy_order)
+
+        except Exception as e:
+            # 捕获所有异常，打印错误，然后安全退出当前bar
+            # 这样策略在下一个bar才能继续运行
+            self.broker.log(f"CRITICAL ERROR in engine.run: {e}", dt=context.now)
+            import traceback
+            self.broker.log(traceback.format_exc())
+            # 即使出错，也打印 "Finished"，表示此bar安全退出
 
         print("--- LiveTrader Run Finished ---")
 

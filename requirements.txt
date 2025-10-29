@@ -5,3 +5,8 @@ tushare
 akshare
 ta-lib
 requests
+sqlalchemy
+numpy
+
+# --- 实盘平台 ---
+# gm.api  # 掘金量化
