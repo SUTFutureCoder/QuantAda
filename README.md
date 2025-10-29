@@ -216,6 +216,14 @@ QuantAda/
 ### 券商平台执行实盘
 ![live_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/live_mode_in_broker.png?raw=true)
 
+### 框架和自定义策略工程分离
+![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/public_private_split.png?raw=true)  
+
+
+在框架执行自定义策略命令样例  
+
+```python ./run.py strategies_custom.reverse_trader_multiple_actions_strategy --selection=stock_selectors_custom.reverse_trader_multiple_actions_selector```
+
 ## 免责声明 (Disclaimer)
 
 **使用本框架进行任何真实交易操作前，请务必仔细阅读、理解并同意以下所有条款。**
