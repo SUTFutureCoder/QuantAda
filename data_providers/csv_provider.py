@@ -17,9 +17,20 @@ class CsvDataProvider(BaseDataProvider):
         if not os.path.exists(self.data_path):
             os.mkdir(self.data_path)
 
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
-        csv_filename = f"{symbol.replace('.', '_')}.csv"
-        csv_filepath = os.path.join(self.data_path, csv_filename)
+    def _get_cache_filepath(self, symbol: str, timeframe: str, compression: int) -> str:
+        """辅助函数：根据时间框架生成唯一的缓存文件名"""
+        if timeframe == 'Days' and compression == 1:
+            tf_str = ""
+        else:
+            tf_str = f"_{timeframe}_{compression}"
+
+        csv_filename = f"{symbol.replace('.', '_')}{tf_str}.csv"
+        return os.path.join(self.data_path, csv_filename)
+
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
+
+        csv_filepath = self._get_cache_filepath(symbol, timeframe, compression)
 
         if not os.path.exists(csv_filepath):
             return None

@@ -52,11 +52,41 @@ class GmOrderProxy(BaseOrderProxy):
 class GmDataProvider(BaseLiveDataProvider):
     """掘金平台的数据提供者实现"""
 
-    def get_history(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    def _map_gm_frequency(self, timeframe: str, compression: int) -> str:
+        """将Backtrader时间框架映射到掘金的frequency参数"""
+        if timeframe == 'Days':
+            if compression == 1:
+                return '1d'
+            else:
+                #
+                print(f"Warning: GM Provider: {compression} Days timeframe not directly supported. Using '1d'.")
+                return '1d'
+
+        if timeframe == 'Minutes':
+            #
+            supported_compressions = [1, 5, 15, 30, 60]
+            if compression in supported_compressions:
+                return f'{compression}m'
+            else:
+                print(f"Warning: GM Provider: Unsupported compression {compression} for Minutes. Defaulting to '60m'.")
+                return '60m'
+
+        if timeframe == 'Weeks':
+            return '1w'
+        if timeframe == 'Months':
+            return '1M'
+
+        print(f"Warning: GM Provider: Unsupported timeframe {timeframe}. Defaulting to '1d'.")
+        return '1d'
+
+    def get_history(self, symbol: str, start_date: str, end_date: str,
+                    timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
         if history is None:
             raise ImportError("'gm' module is required for GmDataProvider.")
 
-        df = history(symbol=symbol, frequency='1d', start_time=start_date, end_time=end_date,
+        frequency = self._map_gm_frequency(timeframe, compression)
+
+        df = history(symbol=symbol, frequency=frequency, start_time=start_date, end_time=end_date,
                      fields='open,high,low,close,volume,eob', df=True)
         if df.empty: return df
         df.rename(columns={'eob': 'datetime'}, inplace=True)

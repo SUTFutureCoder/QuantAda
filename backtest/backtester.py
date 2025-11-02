@@ -134,7 +134,8 @@ class Backtester:
     # 回测执行器
     def __init__(self, datas, strategy_class, strategy_params=None, start_date=None, end_date=None, cash=100000.0,
                  commission=0.0, sizer_class=None, sizer_params=None,
-                 risk_control_class=None, risk_control_params=None):
+                 risk_control_class=None, risk_control_params=None,
+                 timeframe: str = 'Days', compression: int = 1):
         self.cerebro = bt.Cerebro()
         self.datas = datas
         self.strategy_class = strategy_class
@@ -147,6 +148,20 @@ class Backtester:
         self.sizer_params = sizer_params
         self.risk_control_class = risk_control_class
         self.risk_control_params = risk_control_params
+        self.timeframe_str = timeframe
+        self.compression = compression
+        self.timeframe = self._get_bt_timeframe(timeframe)
+
+    def _get_bt_timeframe(self, timeframe_str: str) -> int:
+        """将字符串时间维度映射到backtrader的TimeFrame枚举值"""
+        mapping = {
+            'Days': bt.TimeFrame.Days,
+            'Weeks': bt.TimeFrame.Weeks,
+            'Months': bt.TimeFrame.Months,
+            'Minutes': bt.TimeFrame.Minutes,
+            'Seconds': bt.TimeFrame.Seconds,
+        }
+        return mapping.get(timeframe_str, bt.TimeFrame.Days)
 
     def run(self):
         # 将数据添加到Cerebro
@@ -155,7 +170,9 @@ class Backtester:
                 dataname=df,
                 fromdate=pd.to_datetime(self.start_date),
                 todate=pd.to_datetime(self.end_date),
-                name=symbol  # 为每个数据源命名，方便策略内部通过名称访问
+                name=symbol,  # 为每个数据源命名，方便策略内部通过名称访问
+                timeframe = self.timeframe,
+                compression = self.compression
             )
             self.cerebro.adddata(feed)
             print(f"  Data feed for '{symbol}' added.")
@@ -165,8 +182,8 @@ class Backtester:
             BacktraderStrategyWrapper,
             strategy_class=self.strategy_class,
             strategy_params=self.strategy_params,
-        risk_control_class = self.risk_control_class,
-        risk_control_params = self.risk_control_params
+            risk_control_class = self.risk_control_class,
+            risk_control_params = self.risk_control_params
         )
 
         # 设置初始资金和手续费
@@ -182,7 +199,7 @@ class Backtester:
         # PyFolio分析器用于提取详细的交易数据，即使不使用pyfolio绘图，它也非常有用
         self.cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
         self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', riskfreerate=0.0,
-                                 timeframe=bt.TimeFrame.Days, compression=1)
+                                 timeframe=self.timeframe, compression=self.compression)
         self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
         self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
         self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')

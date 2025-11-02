@@ -25,12 +25,17 @@ class SxscTushareDataProvider(BaseDataProvider):
         else:
             self.token = token
 
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
         """
         使用 sxsc-tushare 代理的 query 方法获取股票或ETF数据。
         """
         if not self.token:
             return None
+
+        if timeframe != 'Days' or compression != 1:
+            print(f"Warning: SxscTushareDataProvider current implementation only supports daily data. "
+                  f"Ignoring timeframe/compression. Intraday API 'daily_mins' not implemented.")
 
         try:
             # 1. 转换symbol格式, e.g., 'SHSE.600519' -> '600519.SH'

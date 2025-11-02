@@ -100,7 +100,7 @@ def get_class_from_name(name_string: str, search_paths: list):
 
 
 def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date,
-                 risk_filename, risk_params_str):
+                 risk_filename, risk_params_str, timeframe, compression):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
@@ -144,7 +144,9 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
             symbol,
             start_date=start_date,
             end_date=end_date,
-            specified_sources=data_source
+            specified_sources=data_source,
+            timeframe=timeframe,
+            compression=compression
         )
         if df is not None and not df.empty:
             datas[symbol] = df
@@ -181,7 +183,9 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         cash=cash,
         commission=commission,
         risk_control_class=risk_control_class,
-        risk_control_params=risk_params_dict
+        risk_control_params=risk_params_dict,
+        timeframe=timeframe,
+        compression=compression
     )
     backtester.run()
 
@@ -208,6 +212,12 @@ if __name__ == '__main__':
     parser.add_argument('--risk_params', type=str, default=None,
                         help="风控模块参数 (例如: 'stop_loss_pct:0.03,take_profit_pct:0.1')")
 
+    bt_timeframes = ['Days', 'Weeks', 'Months', 'Minutes', 'Seconds']
+    parser.add_argument('--timeframe', type=str, default='Days', choices=bt_timeframes,
+                        help=f"K线时间维度 (默认: Days). 支持: {', '.join(bt_timeframes)}")
+    parser.add_argument('--compression', type=int, default=1,
+                        help="K线时间周期 (默认: 1). 结合 timeframe, 例如 30 Minutes")
+
     # 3. 解析参数
     args = parser.parse_args()
 
@@ -225,7 +235,9 @@ if __name__ == '__main__':
         start_date=args.start_date,
         end_date=args.end_date,
         risk_filename=args.risk,
-        risk_params_str=args.risk_params
+        risk_params_str=args.risk_params,
+        timeframe=args.timeframe,
+        compression=args.compression
     )
 
     print("\n--- Backtest Finished ---")

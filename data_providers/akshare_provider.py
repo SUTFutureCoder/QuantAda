@@ -7,7 +7,28 @@ from .base_provider import BaseDataProvider
 class AkshareDataProvider(BaseDataProvider):
     PRIORITY = 40  # 优先级低于CSV
 
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
+    def _map_akshare_period(self, timeframe: str, compression: int) -> str:
+        """将Backtrader的时间框架映射到Akshare的period参数"""
+        if timeframe == 'Days':
+            return 'daily'
+        if timeframe == 'Weeks':
+            return 'weekly'
+        if timeframe == 'Months':
+            return 'monthly'
+        if timeframe == 'Minutes':
+            # Akshare 支持 '1', '5', '15', '30', '60'
+            supported_compressions = [1, 5, 15, 30, 60]
+            if compression in supported_compressions:
+                return str(compression)
+            else:
+                print(f"Warning: AkshareProvider: Unsupported compression {compression} for Minutes. Defaulting to 60.")
+                return '60'
+
+        print(f"Warning: AkshareProvider: Unsupported timeframe {timeframe}. Defaulting to 'daily'.")
+        return 'daily'
+
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
         try:
             # 1. 对symbol进行更健壮的解析
             if '.' in symbol:
@@ -15,11 +36,13 @@ class AkshareDataProvider(BaseDataProvider):
             else:
                 ak_symbol = symbol
 
+            period = self._map_akshare_period(timeframe, compression)
+
             # 2. 优雅地构建API参数字典
             # 仅当start_date或end_date不为None时，才将其添加到参数字典中
             api_params = {
                 'symbol': ak_symbol,
-                'period': 'daily',
+                'period': period,
                 'adjust': 'hfq'
             }
             if start_date:
@@ -33,6 +56,11 @@ class AkshareDataProvider(BaseDataProvider):
                 df = ak.stock_zh_a_hist(**api_params)
             else:
                 print(f"Akshare: Detected ETF/fund symbol '{ak_symbol}'. Using 'fund_etf_hist_em'.")
+                # fund_etf_hist_em 不支持 period 参数, 这是一个限制
+                if period != 'daily':
+                    print(
+                        f"Warning: Akshare 'fund_etf_hist_em' does not support non-daily periods. Fetching daily data.")
+                    api_params['period'] = 'daily'
                 df = ak.fund_etf_hist_em(**api_params)
 
             if df is None or df.empty:

@@ -53,8 +53,13 @@ class LiveTrader:
         symbols = self._determine_symbols()
         if not symbols: raise ValueError("No symbols to trade.")
 
+        # 获取 timeframe 和 compression
+        timeframe = self.config.get('timeframe', 'Days')
+        compression = self.config.get('compression', 1)
+        print(f"[Engine] Using timeframe: {compression} {timeframe}")
+
         # 4. 传入 is_live 标志来获取数据
-        datas = self._fetch_all_history_data(symbols, context, is_live=is_live)
+        datas = self._fetch_all_history_data(symbols, context, is_live=is_live, timeframe=timeframe, compression=compression)
         self.broker.set_datas(list(datas.values()))
         params = self.config.get('params', {})
         self.strategy = self.strategy_class(broker=self.broker, params=params)
@@ -139,7 +144,8 @@ class LiveTrader:
             return symbols
         return self.config.get('symbols', [])
 
-    def _fetch_all_history_data(self, symbols: list, context, is_live: bool) -> dict:
+    def _fetch_all_history_data(self, symbols: list, context, is_live: bool,
+                                timeframe: str, compression: int) -> dict:
         """根据模式获取数据：实盘模式获取预热数据，回测模式获取全部历史"""
         datas = {}
 
@@ -156,7 +162,8 @@ class LiveTrader:
             print(f"[Engine] Backtest mode data fetch: from {start_date} to {end_date}")
 
         for symbol in symbols:
-            df = self.data_provider.get_history(symbol, start_date, end_date)
+            df = self.data_provider.get_history(symbol, start_date, end_date,
+                                                timeframe=timeframe, compression=compression)
             if df is not None and not df.empty:
                 class DataFeedProxy:
                     def __init__(self, df, name):

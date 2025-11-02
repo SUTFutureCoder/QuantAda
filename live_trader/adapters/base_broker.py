@@ -35,7 +35,8 @@ class BaseLiveDataProvider(ABC):
     """数据提供者适配器的抽象基类"""
 
     @abstractmethod
-    def get_history(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    def get_history(self, symbol: str, start_date: str, end_date: str,
+                    timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
         """获取指定标的的历史日线数据"""
         pass
 

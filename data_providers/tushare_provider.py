@@ -19,9 +19,14 @@ class TushareDataProvider(BaseDataProvider):
             ts.set_token(token)
             self.pro = ts.pro_api()
 
-    def get_data(self, symbol: str, start_date: str = None, end_date: str = None) -> pd.DataFrame | None:
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
         if not self.pro:
             return None
+
+        if timeframe != 'Days' or compression != 1:
+            print(f"Warning: TushareProvider (TushareDataProvider) current implementation only supports daily data. "
+                  f"Ignoring timeframe/compression. Use 'pro.stk_mins' for intraday.")
 
         try:
             # 转换symbol格式, e.g., 'SHSE.600519' -> '600519.SH'
