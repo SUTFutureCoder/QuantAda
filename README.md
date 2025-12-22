@@ -17,7 +17,7 @@
       - **策略层**：支持将指标计算（`common/indicators`）抽象为公共模块，集成MyTT、Ta-Lib的同时，方便团队成员共享和组合，避免重复造轮子。
       - **引擎层**：通过适配器模式清晰地隔离了回测与实盘，您可以轻松添加对QMT、VN.PY等其他平台的适配器，而无需改动任何策略代码。
   - **插件化开发 (SDK模式)**：支持将框架作为SDK依赖。您可以在自己的代码库中编写策略，并通过`PYTHONPATH`引用，实现业务代码与框架代码的物理隔离，便于版本管理和独立开发。
-  - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的 flexibilidad 和透明度。
+  - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的灵活性和透明度。
 
 ## 快速开始
 
@@ -226,7 +226,7 @@ QuantAda/
 
 ```python ./run.py strategies_custom.reverse_trader_multiple_actions_strategy --selection=stock_selectors_custom.reverse_trader_multiple_actions_selector```
 
-## 免责声明 (Disclaimer)
+## 免责声明
 
 **使用本框架进行任何真实交易操作前，请务必仔细阅读、理解并同意以下所有条款。**
 
