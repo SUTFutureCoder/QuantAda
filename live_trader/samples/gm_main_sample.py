@@ -4,8 +4,7 @@
 from __future__ import print_function, absolute_import
 
 try:
-    from gm.api import schedule, run
-    from gm.api import MODE_LIVE, ADJUST_PREV # 引入默认回测常量，避免复制后报错
+    from gm.api import schedule, run, MODE_LIVE, MODE_BACKTEST, ADJUST_PREV # 引入默认回测常量，避免复制后报错
 except ImportError:
     print("This script is intended to be run within the GM Quant platform.")
 

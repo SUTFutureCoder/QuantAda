@@ -43,7 +43,7 @@ class AkshareDataProvider(BaseDataProvider):
             api_params = {
                 'symbol': ak_symbol,
                 'period': period,
-                'adjust': 'hfq'
+                'adjust': 'qfq'
             }
             if start_date:
                 api_params['start_date'] = start_date

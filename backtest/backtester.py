@@ -64,6 +64,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
             self.risk_control = risk_control_class(broker=self, params=risk_control_params)
         self.strategy.init()
 
+    def getvalue(self):
+        return self.broker.getvalue()
+
     def log(self, txt, dt=None):
         if config.LOG:
             dt = dt or self.datas[0].datetime.date(0)
