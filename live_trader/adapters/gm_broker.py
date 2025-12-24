@@ -3,7 +3,7 @@ import pandas as pd
 from .base_broker import BaseLiveBroker, BaseLiveDataProvider, BaseOrderProxy
 
 try:
-    from gm.api import history, order_target_percent, order_target_volume, get_cash, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
+    from gm.api import history, order_target_percent, get_cash, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
         OrderStatus_New, OrderStatus_PartiallyFilled, OrderStatus_Filled, \
         OrderStatus_Canceled, OrderStatus_Rejected, OrderStatus_PendingNew, \
         OrderSide_Buy, OrderSide_Sell
@@ -128,58 +128,13 @@ class GmBrokerAdapter(BaseLiveBroker):
         """
         下单，并返回一个包装好的 GmOrderProxy 实例。
         """
-        if order_target_volume is None: raise ImportError("'gm' is required.")
-
+        if order_target_percent is None: raise ImportError("'gm' is required.")
         symbol = data._name
-
-        # 1. 获取账户总资产 (NAV)
-        # 掘金 context.account().cash.nav 包含了 现金 + 持仓市值
-        # 这是计算 percent 的分母
-        try:
-            nav = self._context.account().cash.nav
-        except Exception as e:
-            print(f"[Error] Failed to get account NAV: {e}")
-            return None
-
-        # 2. 计算目标持仓市值
-        target_value = nav * target
-
-        # 3. 获取当前价格
-        # 使用 data.close[0] 获取策略当前看到的最新价格
-        price = data.close[0]
-
-        if price <= 0:
-            print(f"[Error] Invalid price {price} for {symbol}, cannot place order.")
-            return None
-
-        # 4. 计算目标股数 (Volume)
-        target_volume = target_value / price
-
-        # 5. A股整手处理
-        # 只有 SHSE (上交所) 和 SZSE (深交所) 需要整手
-        if symbol.startswith('SHSE') or symbol.startswith('SZSE'):
-            # 向下取整到 100 的倍数
-            # 例如: 198.5 股 -> 1.985 -> int(1) -> 100 股
-            # math.floor 的朴素实现
-            target_volume = int(target_volume / 100) * 100
-        else:
-            # 美股/港股等其他品种可能只需要取整
-            target_volume = int(target_volume)
-
-        # 6. 打印日志方便调试
-        real_target_pct = (target_volume * price) / nav if nav > 0 else 0
-        print(
-            f"[Live Trade] {symbol} Target: {target * 100:.2f}% -> A股修正: {target_volume}股 (约{real_target_pct * 100:.2f}%) Price: {price:.2f}")
-
-        if target_volume == 0 and target > 0.01:
-            print(f"[Warning] Target volume is 0 (Funds insufficient for 1 hand?). Target Value: {target_value}")
-
-        # 7. 调用 order_target_volume (按股数调仓)
-        # order_target_volume 会自动计算 买入/卖出 的差额
-        # position_side=1 (多头仓位), order_type=Market (市价单)
-        platform_order_list = order_target_volume(symbol=symbol, volume=target_volume,
-                                                  order_type=OrderType_Market, position_side=1)
-
+        print(f"[Live Trade] Placing order: target {target * 100:.2f}% for {symbol}")
+        # 1. 调用真实API下单，获取平台原生的订单对象
+        platform_order_list = order_target_percent(symbol=symbol, percent=target, order_type=OrderType_Market,
+                                                   position_side=1)
+        # 2. 将原生订单对象包装成我们自己的代理并返回
         return GmOrderProxy(platform_order_list[-1], self.is_live) if platform_order_list else None
 
     def get_position(self, data):

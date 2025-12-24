@@ -100,33 +100,6 @@ class LiveTrader:
                 print("--- LiveTrader Run Finished (Pending Order) ---")
                 return
 
-            # 实盘数据热更新：如果是实盘模式，每天运行前必须重新获取包含"今天"的最新K线，并重算指标
-            is_live = self.BrokerClass.is_live_mode(context)
-            if is_live:
-                print("[Engine] Live Mode: Updating data and indicators...")
-
-                # A. 重新获取标的 (防止实盘中途换了池子)
-                symbols = self._determine_symbols()
-                if not symbols:
-                    print("[Error] No symbols found during update.")
-                    return
-
-                # B. 重新获取数据 (预热 + 今天)
-                timeframe = self.config.get('timeframe', 'Days')
-                compression = self.config.get('compression', 1)
-
-                # 这一步会从交易所获取最新的 DataFrame
-                datas = self._fetch_all_history_data(symbols, context, is_live=True,
-                                                     timeframe=timeframe, compression=compression)
-
-                # C. 更新 Broker 数据源
-                self.broker.set_datas(list(datas.values()))
-
-                # D. 【最重要】重新初始化策略
-                # 你的策略在 init() 里做向量化计算，必须重跑 init() 才能把新数据的指标算出来
-                print("[Engine] Re-initializing strategy to recalculate indicators...")
-                self.strategy.init()
-
             # 2. 执行风控检查
             if self.risk_control and self._check_risk_controls():
                 # 风控已触发平仓
