@@ -1,4 +1,5 @@
 import pandas as pd
+import traceback
 
 from run import get_class_from_name
 from .adapters.gm_broker import GmBrokerAdapter, GmDataProvider
@@ -89,6 +90,12 @@ class LiveTrader:
 
         # 顶层异常捕获，防止策略因单次错误而崩溃
         try:
+            # --- 实盘数据热更新逻辑 ---
+            # 只有在实盘模式下，每次 schedule 触发 run 时，才需要重新拉取数据
+            if self.broker.is_live:
+                print("[Engine] Live Mode: Refreshing data...")
+                self._refresh_live_data(context)
+
             # 1. 检查策略是否有挂单
             strategy_order = getattr(self.strategy, 'order', None)
 
@@ -172,6 +179,40 @@ class LiveTrader:
 
                 datas[symbol] = DataFeedProxy(df, symbol)
         return datas
+
+    def _refresh_live_data(self, context):
+        """
+        实盘数据刷新
+        重新获取包含最新 K 线的数据，并【原地更新】策略中的 DataFeed 对象
+        """
+        # 获取配置
+        timeframe = self.config.get('timeframe', 'Days')
+        compression = self.config.get('compression', 1)
+
+        # 重新计算时间窗口 (Warmup ~ Now)
+        end_date = context.now.strftime('%Y-%m-%d')
+        # 保持与 init 一致的预热长度
+        start_date = (context.now - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
+
+        # 遍历 Broker 中已有的 DataFeed
+        for data_feed in self.broker.datas:
+            symbol = data_feed._name
+
+            # 重新拉取数据
+            new_df = self.data_provider.get_history(symbol, start_date, end_date,
+                                                    timeframe=timeframe, compression=compression)
+
+            if new_df is not None and not new_df.empty:
+                # 原地更新：不创建新对象，而是替换对象内部的 DataFrame
+                # 这样 self.strategy.datas 中的引用会自动指向新数据
+                # 假设 DataFeedProxy 使用 .p.dataname 存储数据 (参考 _fetch_all_history_data)
+                if hasattr(data_feed, 'p') and hasattr(data_feed.p, 'dataname'):
+                    data_feed.p.dataname = new_df
+                    print(f"  Data refreshed for {symbol}: {len(new_df)} bars (Last: {new_df.index[-1]})")
+                else:
+                    print(f"  Warning: Cannot update data for {symbol}. Structure mismatch.")
+            else:
+                print(f"  Warning: No new data fetched for {symbol} during refresh.")
 
     # 风控检查辅助方法
     def _check_risk_controls(self) -> bool:
@@ -262,3 +303,39 @@ class LiveTrader:
                 return True  # 风控已触发，停止检查并返回True
 
         return False  # 所有标的检查完毕，未触发风控
+
+def on_order_status_callback(context, order):
+    """
+    掘金实盘的订单状态回调函数。
+    当订单状态发生变化（部成、全成、撤单、废单）时触发。
+    """
+    if hasattr(context, 'strategy_instance') and context.strategy_instance:
+        try:
+            from .adapters.gm_broker import GmOrderProxy
+
+            # 【修复 1】不再依赖 context.mode，而是直接问 broker
+            # 之前的逻辑可能导致 is_live=False，从而把 PendingNew (status 10) 误判为 Completed
+            broker = context.strategy_instance.broker
+            is_live = broker.is_live if hasattr(broker, 'is_live') else True
+
+            # 将掘金的原生 order 包装成 Proxy
+            order_proxy = GmOrderProxy(order, is_live)
+
+            # 调用策略通知
+            context.strategy_instance.notify_order(order_proxy)
+
+            # 【修复 2】安全访问 statusMsg，防止 AttributeError
+            # 掘金 order 对象可能是动态属性，statusMsg 不一定存在
+            msg = getattr(order, 'statusMsg', None)
+            if not msg:
+                msg = getattr(order, 'ord_rej_reason_detail', '')  # 尝试获取拒单原因
+
+            print(f"[Engine Callback] Notified strategy of order status: {order.status} ({msg})")
+
+        except Exception as e:
+            # 打印完整的堆栈以便调试
+            import traceback
+            print(f"[Engine Callback Error] Failed to notify strategy: {e}")
+            traceback.print_exc()
+    else:
+        print("[Engine Callback Warning] No strategy_instance found in context.")

@@ -97,6 +97,78 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
         self.strategy.notify_trade(TradeProxy(trade))
 
+    def order_target_percent(self, data=None, target=0.0, **kwargs):
+        """
+        重写 Backtrader 的 order_target_percent 方法。
+        增加了对 'lot_size' (手数) 的支持，并严格根据现金检查是否可买，
+        防止因资金微小差异导致的拒单，同时符合 A股 100股为1手的限制。
+        """
+        data = data or self.datas[0]
+        # 获取 lot_size，默认为 100 (适应 A股)，如果需要美股等可传入 1
+        lot_size = kwargs.get('lot_size', 100)
+
+        # 1. 获取当前持仓和价格
+        pos_size = self.getposition(data).size
+        price = data.close[0]
+
+        if price <= 0:
+            return None  # 价格异常，不操作
+
+        # 2. 获取账户总价值 (现金 + 持仓市值)
+        # self.broker.getvalue() 返回的是当前回测时刻的总资产
+        portfolio_value = self.broker.getvalue()
+
+        # 3. 计算目标市值和目标股数
+        target_value = portfolio_value * target
+        expected_shares = target_value / price
+
+        # 4. 计算需要变化的股数
+        delta_shares = expected_shares - pos_size
+
+        # 5. 执行下单逻辑
+        if delta_shares > 0:  # 买入
+            # 获取可用现金
+            cash = self.broker.getcash()
+
+            # 计算现金允许购买的最大股数 (不考虑手续费的简化计算，留少量余地更好)
+            # 这里简单处理：向下取整到 lot_size 也是一种变相的 buffer
+            max_buy_by_cash = cash / price
+
+            # 取 目标买入量 和 现金最大买入量 的较小值
+            shares_to_buy = min(delta_shares, max_buy_by_cash)
+
+            # 向下取整到 lot_size
+            if lot_size > 1:
+                shares_to_buy = int(shares_to_buy // lot_size) * lot_size
+            else:
+                shares_to_buy = int(shares_to_buy)  # 即使是美股也通常是整数股
+
+            if shares_to_buy > 0:
+                # 打印日志方便调试
+                # self.log(f"ORDER TARGET: Target% {target:.2f}, Cash {cash:.0f}, Buying {shares_to_buy}")
+                return self.buy(data=data, size=shares_to_buy)
+
+        elif delta_shares < 0:  # 卖出
+            shares_to_sell = abs(delta_shares)
+
+            # 如果目标是 0，通常意味着清仓
+            if target == 0.0:
+                # 如果是清仓，直接使用 close()，它会处理所有持仓
+                # 注意：self.close() 内部逻辑可能不保证 100 整手，但在清仓时通常需要卖出所有零股
+                # 如果需要严格整手卖出，可以使用下面的逻辑，但会残留零股
+                return self.close(data=data)
+
+            # 向下取整到 lot_size
+            if lot_size > 1:
+                shares_to_sell = int(shares_to_sell // lot_size) * lot_size
+            else:
+                shares_to_sell = int(shares_to_sell)
+
+            if shares_to_sell > 0:
+                return self.sell(data=data, size=shares_to_sell)
+
+        return None
+
     def _check_risk_controls(self) -> bool:
         """
         辅助方法：执行风控检查并采取行动。

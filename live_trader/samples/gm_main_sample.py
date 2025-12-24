@@ -9,7 +9,7 @@ except ImportError:
     print("This script is intended to be run within the GM Quant platform.")
 
 # 1. 引入实盘引擎 (需先配置好PYTHONPATH)
-from live_trader.engine import LiveTrader
+from live_trader.engine import LiveTrader, on_order_status_callback
 
 # 2. 定义交易配置 (与回测时的命令行参数几乎完全对应)
 # 对应命令为：python ./run.py ReverseTraderMultipleActionsStrategy --selection=ReverseTraderMultipleActionsSelector --cash=500000 --start_date=20230101
@@ -53,9 +53,16 @@ trader = LiveTrader(config)
 # 4. 对接掘金的生命周期函数
 def init(context):
     trader.init(context)
+    context.strategy_instance = trader.strategy
     # 设置策略执行频率
     schedule(schedule_func=trader.run, date_rule='1d', time_rule='14:45:00')
 
+def on_order_status(context, order):
+    """
+    掘金 SDK 要求的标准回调函数签名
+    """
+    # 代理给 Engine 中定义的通用回调逻辑
+    on_order_status_callback(context, order)
 
 # 掘金平台默认的回测/实盘运行入口，创建策略时由掘金平台自动创建，无需修改
 if __name__ == '__main__':
