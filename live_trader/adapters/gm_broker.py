@@ -163,7 +163,6 @@ class GmBrokerAdapter(BaseLiveBroker):
         lot_size = kwargs.get('lot_size', 100)  # 默认为A股 100股
 
         # 1. 获取最新价格
-        # 使用 gm.api.current 获取实时 Tick 数据
         tick_list = current(symbols=symbol)
         if not tick_list:
             print(f"[Live Trade Error] Cannot get current price for {symbol}")
@@ -175,27 +174,18 @@ class GmBrokerAdapter(BaseLiveBroker):
             return None
 
         # 2. 获取当前持仓量
-        # 注意：需要从 account 对象中获取，而不是 self.get_position(data) 的缓存，确保实时性
-        # 或者直接使用我们封装的 get_position
         pos_obj = self.get_position(data)
         current_pos_size = pos_obj.size
 
         # 3. 计算账户总资产 (现金 + 持仓市值)
-        # 掘金 account 对象通常包含 total_assets 或 net_assets，但为了稳健，我们手动累加或使用 available cash + pos value
-        # 这里为了计算 target amount，我们需要 Total Portfolio Value
-        # 简化计算：Total = Available Cash + Sum(Position Value)
-
         acct = self._context.account()
         cash = acct.cash.available
 
-        # 获取所有持仓计算市值（为了准确计算 target 对应的金额）
-        # 也可以尝试直接使用 acct.cash.nav (净值)，如果存在
         if hasattr(acct.cash, 'nav'):
             portfolio_value = acct.cash.nav
         else:
-            # 回退：手动计算
             positions = acct.positions()
-            market_value = sum([p.volume * p.price for p in positions])  # p.price 是最新价
+            market_value = sum([p.volume * p.price for p in positions])
             portfolio_value = cash + market_value
 
         # 4. 计算目标市值和目标股数
@@ -207,13 +197,14 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         final_volume = 0
         side = 0  # 1=Buy, 2=Sell
+        # 定义开平仓标志 1=Open, 2=Close
+        position_effect = 1
 
         if delta_shares > 0:  # Buy
             # 现金约束
             max_buy_by_cash = cash / price
             shares_to_buy = min(delta_shares, max_buy_by_cash)
 
-            # Lot Size 整手
             if lot_size > 1:
                 shares_to_buy = int(shares_to_buy // lot_size) * lot_size
             else:
@@ -222,16 +213,15 @@ class GmBrokerAdapter(BaseLiveBroker):
             if shares_to_buy > 0:
                 final_volume = shares_to_buy
                 side = OrderSide_Buy
+                position_effect = 1  # 买入开仓
 
         elif delta_shares < 0:  # Sell
             shares_to_sell = abs(delta_shares)
 
             if target == 0.0:
-                # 清仓逻辑：直接卖出所有持仓，包括零股
                 final_volume = current_pos_size
                 side = OrderSide_Sell
             else:
-                # 调仓逻辑：通常也按整手卖出
                 if lot_size > 1:
                     shares_to_sell = int(shares_to_sell // lot_size) * lot_size
                 else:
@@ -241,14 +231,29 @@ class GmBrokerAdapter(BaseLiveBroker):
                     final_volume = shares_to_sell
                     side = OrderSide_Sell
 
+            # 卖出平仓
+            position_effect = 2
+
         # 6. 下单
         if final_volume > 0 and side != 0:
             print(
                 f"[Live Trade] Placing order: {symbol} {'BUY' if side == OrderSide_Buy else 'SELL'} {final_volume} (Target% {target:.2f})")
-            # position_side=1 (多仓)，order_type=Market
-            platform_order_list = order_volume(symbol=symbol, volume=final_volume, side=side,
-                                               order_type=OrderType_Market, position_effect=1)
-            return GmOrderProxy(platform_order_list[-1], self.is_live) if platform_order_list else None
+
+            try:
+                # 动态传入 position_effect，并增加 position_side=1 (多头仓位) 显式声明
+                platform_order_list = order_volume(
+                    symbol=symbol,
+                    volume=final_volume,
+                    side=side,
+                    order_type=OrderType_Market,
+                    position_effect=position_effect,  # 1=Open, 2=Close
+                )
+                return GmOrderProxy(platform_order_list[-1], self.is_live) if platform_order_list else None
+
+            except Exception as e:
+                # 捕获 API 报错 (如 1018 或 无效标的)，防止炸毁整个回测
+                print(f"[Live Trade Error] GM Order Failed: {e}")
+                return None
 
         return None
 
