@@ -15,9 +15,10 @@ except ImportError:
 class GmOrderProxy(BaseOrderProxy):
     """掘金平台的订单代理具体实现"""
 
-    def __init__(self, platform_order, is_live: bool):
+    def __init__(self, platform_order, is_live: bool, data=None):
         self.platform_order = platform_order
         self.is_live = is_live  # 保存模式
+        self.data = data  # 存储对应的 Backtrader 数据源对象
 
     @property
     def executed(self):
@@ -248,7 +249,7 @@ class GmBrokerAdapter(BaseLiveBroker):
                     order_type=OrderType_Market,
                     position_effect=position_effect,  # 1=Open, 2=Close
                 )
-                return GmOrderProxy(platform_order_list[-1], self.is_live) if platform_order_list else None
+                return GmOrderProxy(platform_order_list[-1], self.is_live, data=data) if platform_order_list else None
 
             except Exception as e:
                 # 捕获 API 报错 (如 1018 或 无效标的)，防止炸毁整个回测

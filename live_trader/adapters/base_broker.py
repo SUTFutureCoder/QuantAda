@@ -88,7 +88,7 @@ class BaseLiveBroker(ABC):
     def _init_commission(self):
         """初始化：使用费率"""
         if self._commission_override is not None:
-            print(f"[Live Broker] Using custom commission override: {self._commission_override:,.2f}")
+            print(f"[Live Broker] Using custom commission override: {self._commission_override:,.5f}")
             return self._commission_override
         return 0.0
 

@@ -313,18 +313,31 @@ def on_order_status_callback(context, order):
         try:
             from .adapters.gm_broker import GmOrderProxy
 
-            # 【修复 1】不再依赖 context.mode，而是直接问 broker
+            # 不再依赖 context.mode，而是直接问 broker
             # 之前的逻辑可能导致 is_live=False，从而把 PendingNew (status 10) 误判为 Completed
             broker = context.strategy_instance.broker
             is_live = broker.is_live if hasattr(broker, 'is_live') else True
 
-            # 将掘金的原生 order 包装成 Proxy
-            order_proxy = GmOrderProxy(order, is_live)
+            # 反向查找 Data Feed 对象
+            # 策略中存储的 self.orders 的 key 是 data 对象，而不是 symbol 字符串
+            # 所以我们必须在这里找到 data 对象，赋值给 Proxy
+            target_symbol = order.symbol
+            matched_data = None
+
+            if hasattr(broker, 'datas'):
+                for d in broker.datas:
+                    # 在 engine.py 中创建的 DataFeedProxy 有 _name 属性
+                    if hasattr(d, '_name') and d._name == target_symbol:
+                        matched_data = d
+                        break
+
+            # 将掘金的原生 order 包装成 Proxy，并传入 data
+            order_proxy = GmOrderProxy(order, is_live, data=matched_data)
 
             # 调用策略通知
             context.strategy_instance.notify_order(order_proxy)
 
-            # 【修复 2】安全访问 statusMsg，防止 AttributeError
+            # 安全访问 statusMsg，防止 AttributeError
             # 掘金 order 对象可能是动态属性，statusMsg 不一定存在
             msg = getattr(order, 'statusMsg', None)
             if not msg:
