@@ -168,7 +168,12 @@ class GmBrokerAdapter(BaseLiveBroker):
         if not tick_list:
             print(f"[Live Trade Error] Cannot get current price for {symbol}")
             return None
-        price = tick_list[0]['price']
+        tick = tick_list[0]
+        price = tick['price']
+
+        # 获取涨跌停价用于市价单保护
+        upper_limit = tick.get('upper_limit', 0.0)
+        lower_limit = tick.get('lower_limit', 0.0)
 
         if price <= 0:
             print(f"[Live Trade Error] Invalid price {price} for {symbol}")
@@ -201,9 +206,18 @@ class GmBrokerAdapter(BaseLiveBroker):
         # 定义开平仓标志 1=Open, 2=Close
         position_effect = 1
 
+        # --- 提前计算保护价变量，供后续逻辑使用 ---
+        buy_protection_price = upper_limit if upper_limit > 0 else price * 1.25
+        sell_protection_price = lower_limit if lower_limit > 0 else price * 0.75
+
         if delta_shares > 0:  # Buy
             # 现金约束
-            max_buy_by_cash = cash / price
+            # 使用买入保护价(涨停价)计算最大可买股数
+            # 如果按当前价计算，市价单冻结涨停价资金时会不足
+            # 增加 0.0002 的手续费缓冲
+            safe_price_for_calculation = buy_protection_price * 1.0005
+            max_buy_by_cash = cash / safe_price_for_calculation
+
             shares_to_buy = min(delta_shares, max_buy_by_cash)
 
             if lot_size > 1:
@@ -230,6 +244,10 @@ class GmBrokerAdapter(BaseLiveBroker):
 
                 if shares_to_sell > 0:
                     final_volume = shares_to_sell
+                    # 如果要卖出的量 > 可用量
+                    if final_volume > pos_obj.available:
+                        print(f"[Warn] T+1 Limit: Try to sell {final_volume}, but only {pos_obj.available} available.")
+                        final_volume = pos_obj.available  # 强制降级为卖出可用部分
                     side = OrderSide_Sell
 
             # 卖出平仓
@@ -237,6 +255,9 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         # 6. 下单
         if final_volume > 0 and side != 0:
+            # 根据方向选择之前算好的保护价
+            actual_protection_price = buy_protection_price if side == OrderSide_Buy else sell_protection_price
+
             print(
                 f"[Live Trade] Placing order: {symbol} {'BUY' if side == OrderSide_Buy else 'SELL'} {final_volume} (Target% {target:.2f})")
 
@@ -248,6 +269,7 @@ class GmBrokerAdapter(BaseLiveBroker):
                     side=side,
                     order_type=OrderType_Market,
                     position_effect=position_effect,  # 1=Open, 2=Close
+                    price=actual_protection_price
                 )
                 return GmOrderProxy(platform_order_list[-1], self.is_live, data=data) if platform_order_list else None
 
@@ -263,6 +285,7 @@ class GmBrokerAdapter(BaseLiveBroker):
             size = 0
             # 持仓均价
             price = 0.0
+            available = 0
 
         if not hasattr(self._context, 'account'):
             print("Warning: context object in GmBrokerAdapter is not valid or missing 'account' attribute.")
@@ -274,5 +297,6 @@ class GmBrokerAdapter(BaseLiveBroker):
                 pos_obj = Pos()
                 pos_obj.size = p.volume
                 pos_obj.price = p.vwap
+                pos_obj.available = p.available
                 return pos_obj
         return Pos()
