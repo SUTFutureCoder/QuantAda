@@ -174,6 +174,8 @@ class GmBrokerAdapter(BaseLiveBroker):
         # 获取涨跌停价用于市价单保护
         upper_limit = tick.get('upper_limit', 0.0)
         lower_limit = tick.get('lower_limit', 0.0)
+        pre_close = tick.get('pre_close', 0.0)
+        open_price = tick.get('open', 0.0)
 
         if price <= 0:
             print(f"[Live Trade Error] Invalid price {price} for {symbol}")
@@ -207,8 +209,21 @@ class GmBrokerAdapter(BaseLiveBroker):
         position_effect = 1
 
         # --- 提前计算保护价变量，供后续逻辑使用 ---
-        buy_protection_price = upper_limit if upper_limit > 0 else price * 1.25
-        sell_protection_price = lower_limit if lower_limit > 0 else price * 0.75
+        # 确定计算基准价：优先昨收，其次开盘，最后现价
+        base_price_for_calc = pre_close if pre_close > 0 else (open_price if open_price > 0 else price)
+
+        # 估算/确定保护价
+        if upper_limit > 0:
+            buy_protection_price = upper_limit
+        else:
+            # 只有当拿不到 upper_limit 时才估算，使用 1.1 (10%) 比较稳妥
+            buy_protection_price = base_price_for_calc * 1.1
+
+        if lower_limit > 0:
+            sell_protection_price = lower_limit
+        else:
+            # 只有当拿不到 lower_limit 时才估算，使用 0.9 (10%) 比较稳妥
+            sell_protection_price = base_price_for_calc * 0.9
 
         if delta_shares > 0:  # Buy
             # 现金约束

@@ -74,15 +74,22 @@ class BacktraderStrategyWrapper(bt.Strategy):
             self.actual_start_date = self.datas[0].datetime.datetime(0)
 
         # 检查策略是否有挂单。
-        # 假设策略在创建订单时会设置 self.strategy.order，并在 notify_order 中清除它
-        # (如 SampleMacdCrossStrategy 所示)
+        # 注意：如果策略逻辑是多标的并发的，建议策略内部维护一个订单列表或字典，
+        # 而不是依赖单一的 self.strategy.order 锁。
+        # 这里保留原逻辑的兼容性，但建议您后续在策略类中改进订单管理。
         if hasattr(self.strategy, 'order') and self.strategy.order:
-            return  # 策略有挂单，跳过所有逻辑（包括风控）
+            return  # 策略有全局挂单锁，跳过逻辑
 
-        # 执行风控检查
-        if self._check_risk_controls():
-                return
+        # 1. 执行风控检查 (获取被风控接管的标的列表)
+        risk_handled_symbols = self._check_risk_controls()
 
+        # 2. 将风控状态注入策略
+        # 策略在 next() 中可以通过 checking self.risk_handled_symbols 来决定
+        # 是否要跳过对某些标的的操作
+        self.strategy.risk_handled_symbols = risk_handled_symbols
+
+        # 3. 始终执行策略逻辑
+        # 即使 A 标的触发了止损，B 标的依然可能有信号需要处理
         self.strategy.next()
 
     def notify_order(self, order):
@@ -98,14 +105,14 @@ class BacktraderStrategyWrapper(bt.Strategy):
         self.strategy.notify_trade(TradeProxy(trade))
 
     def order_target_percent(self, data=None, target=0.0, **kwargs):
-        """
-        重写 Backtrader 的 order_target_percent 方法。
-        增加了对 'lot_size' (手数) 的支持，并严格根据现金检查是否可买，
-        防止因资金微小差异导致的拒单，同时符合 A股 100股为1手的限制。
-        """
         data = data or self.datas[0]
-        # 获取 lot_size，默认为 100 (适应 A股)，如果需要美股等可传入 1
-        lot_size = kwargs.get('lot_size', 100)
+        lot_size = kwargs.get('lot_size', config.DEFAULT_LOT_SIZE)
+
+        # 防守逻辑：如果该标的正在被风控接管，且策略试图买入，则拦截
+        if hasattr(self.strategy, 'risk_handled_symbols'):
+            if data._name in self.strategy.risk_handled_symbols and target > 0:
+                self.log(f"IGNORED BUY order for {data._name} due to Risk Control Lock.")
+                return None
 
         # 1. 获取当前持仓和价格
         pos_size = self.getposition(data).size
@@ -130,9 +137,8 @@ class BacktraderStrategyWrapper(bt.Strategy):
             # 获取可用现金
             cash = self.broker.getcash()
 
-            # 计算现金允许购买的最大股数 (不考虑手续费的简化计算，留少量余地更好)
-            # 这里简单处理：向下取整到 lot_size 也是一种变相的 buffer
-            max_buy_by_cash = cash / price
+            # 估算包含手续费的最大购买量 (假设 commission 是比例，如 0.0003)
+            max_buy_by_cash = cash / (price * (1 + self.broker.getcommissioninfo(data).p.commission))
 
             # 取 目标买入量 和 现金最大买入量 的较小值
             shares_to_buy = min(delta_shares, max_buy_by_cash)
@@ -169,15 +175,17 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
         return None
 
-    def _check_risk_controls(self) -> bool:
+    def _check_risk_controls(self) -> list:
         """
-        辅助方法：执行风控检查并采取行动。
+        辅助方法：检查所有标的，执行风控检查并采取行动。
         封装了所有风控相关的循环和判断逻辑。
 
-        :return: True 如果风控被触发并执行了平仓, False 否则。
+        :return: list 返回所有触发了风控操作的 symbol 名称列表。
         """
+        triggered_symbols = []
+
         if not self.risk_control:
-            return False  # 没有风控模块，直接返回
+            return triggered_symbols
 
         for data in self.datas:
             # 1. 检查是否有仓位 (使用卫语句优化)
@@ -194,13 +202,15 @@ class BacktraderStrategyWrapper(bt.Strategy):
                 # 执行平仓
                 order = self.order_target_percent(data=data, target=0.0)
 
-                # 将订单句柄存入策略的 'order' 属性，以实现锁
+                # 将订单句柄存入策略的 'order' 属性 (注意：多标的同时触发时，这里只存了最后一个)
+                # 这是一个简化的锁机制，如果策略需要精细控制，应该维护一个 order 列表
                 if hasattr(self.strategy, 'order'):
                     self.strategy.order = order
 
-                return True  # 【重要】风控已触发，停止检查并返回True
+                # 记录触发风控的标的
+                triggered_symbols.append(data._name)
 
-        return False  # 所有标的检查完毕，未触发风控
+        return triggered_symbols
 
 class Backtester:
     # 回测执行器

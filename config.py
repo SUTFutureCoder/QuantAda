@@ -1,3 +1,6 @@
+# 股数取整（A股100，IBKR、国际市场或加密货币1）
+DEFAULT_LOT_SIZE = 100
+
 # 数据缓存路径
 DATA_PATH = 'data'
 

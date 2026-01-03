@@ -74,7 +74,7 @@ class DataManager:
             if not providers_to_use:
                 print(f"Error: None of the specified sources '{specified_sources}' are valid.")
                 return None
-            final_df = self._fetch_from_providers(symbol, start_date, end_date, providers_to_use, timeframe, compressio)
+            final_df = self._fetch_from_providers(symbol, start_date, end_date, providers_to_use, timeframe, compression)
 
         # 路径二: 执行默认的责任链逻辑
         else:

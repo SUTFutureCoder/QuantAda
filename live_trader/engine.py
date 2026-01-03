@@ -216,33 +216,88 @@ class LiveTrader:
 
     # 风控检查辅助方法
     def _check_risk_controls(self) -> bool:
-        """
-        辅助方法：执行风控检查并采取行动。
-        :return: True 如果风控被触发并执行了平仓, False 否则。
-        """
-        current_dt = self.broker.datetime.datetime()  # 获取当前模拟时间
+        current_dt = self.broker.datetime.datetime()
+        triggered_action = False
 
-        for data_feed in self.broker.datas:  # data_feed 是 DataFeedProxy
-            df = data_feed.p.dataname
+        # 1. 初始化风控订单跟踪字典 (如果尚未存在)
+        if not hasattr(self, '_pending_risk_orders'):
+            self._pending_risk_orders = {}
+
+        for data_feed in self.broker.datas:
+            data_name = data_feed._name
+
+            # --- A. 仓位检查与状态重置 ---
+            # 无论之前状态如何，只要当前仓位为 0，就说明风控已完成或无风险
+            position = self.broker.getposition(data_feed)
+
+            if not position.size:
+                # 如果有遗留的风控状态，清理掉
+                if data_name in self._pending_risk_orders:
+                    self.broker.log(f"[Risk] Position is closed for {data_name}. Clearing pending risk status.")
+                    del self._pending_risk_orders[data_name]
+
+                # 同步清理 risk_control 内部可能存在的标记 (兼容旧有的 exit_triggered 逻辑)
+                if hasattr(self.risk_control, 'exit_triggered') and isinstance(self.risk_control.exit_triggered, set):
+                    if data_name in self.risk_control.exit_triggered:
+                        self.risk_control.exit_triggered.remove(data_name)
+                continue
+
+            # --- B. 检查是否存在正在进行的风控订单 (异步处理核心) ---
+            if data_name in self._pending_risk_orders:
+                pending_order = self._pending_risk_orders[data_name]
+
+                # 使用 BaseOrderProxy 的标准接口检查状态
+                # 注意：这里依赖 callback 或 broker 自动更新 pending_order 对象的内部状态
+
+                if pending_order.is_pending() or pending_order.is_accepted():
+                    # 关键点：订单正在交易所排队或处理中。
+                    # 此时绝对不能再次发送订单，也不能清除状态。
+                    self.broker.log(f"[Risk] Pending exit order for {data_name} is active. Waiting for execution...")
+                    triggered_action = True  # 标记为 True，告诉 engine 跳过 strategy.next()
+                    continue
+
+                elif pending_order.is_completed():
+                    # 订单已完成
+                    # 理论上仓位会在下一次循环被判定为 0，从而走入 A 步骤清理状态。
+                    # 这里先移除追踪，允许逻辑继续
+                    self.broker.log(f"[Risk] Exit order for {data_name} reported Completed.")
+                    del self._pending_risk_orders[data_name]
+                    # 不 return，允许本次循环继续检查（双重保险）
+
+                elif pending_order.is_rejected() or pending_order.is_canceled():
+                    # 订单失败或被撤销
+                    # 清除状态，这样下一行代码就会重新执行 risk_control.check()
+                    # 从而尝试再次发起平仓
+                    self.broker.log(
+                        f"[Risk] Exit order for {data_name} failed (Rejected/Canceled). Resetting to retry.")
+                    del self._pending_risk_orders[data_name]
+
+                else:
+                    # 其他未知状态，保守起见视为 Pending
+                    triggered_action = True
+                    continue
+
+            # --- C. 准备数据代理 (保持原逻辑) ---
             feed_proxy = None
             try:
-                # 查找当前时间或之前的最新K线数据
+                df = data_feed.p.dataname
+                # 优化：实盘模式下，DataFrame 的最后一行通常即为最新数据
+                # 依然做时间过滤以防万一
                 current_bar_data = df.loc[df.index <= current_dt]
                 if current_bar_data.empty:
                     continue
 
-                # 获取最新的K线
                 bar = current_bar_data.iloc[-1]
 
-                # 创建一个模拟 backtrader feed 的代理对象，以支持 data.close[0] 访问
                 class BtFeedProxy:
                     def __init__(self, name, bar_data):
                         self._name = name
-                        # 仅支持 [0] 索引，返回当前K线的值
                         self.close = {0: bar_data['close']}
                         self.open = {0: bar_data['open']}
                         self.high = {0: bar_data['high']}
                         self.low = {0: bar_data['low']}
+                        # 补充 datetime，部分风控指标可能需要时间
+                        self.datetime = {0: pd.Timestamp(bar_data.name)}
 
                 feed_proxy = BtFeedProxy(data_feed._name, bar)
 
@@ -250,59 +305,35 @@ class LiveTrader:
                 self.broker.log(f"[Risk] Error creating bar proxy for {data_feed._name}: {e}")
                 continue
 
-            # 1. 检查是否有仓位
-            position = self.broker.getposition(data_feed)
-            data_name = data_feed._name
+            # --- D. 执行风控逻辑检查 ---
+            # 只有在当前该标的没有 Pending 订单时，才执行检查
+            if data_name not in self._pending_risk_orders:
+                action = self.risk_control.check(feed_proxy)
 
-            if not position.size:
-                # 如果没有仓位，清理风控的"已触发"状态 (模拟notify_trade)
-                if hasattr(self.risk_control, 'exit_triggered') and data_name in self.risk_control.exit_triggered:
-                    self.broker.log(f"[Risk] Clearing trigger for {data_name} as position is zero.")
-                    self.risk_control.exit_triggered.remove(data_name)
-                continue
+                if action == 'SELL':
+                    self.broker.log(f"Risk module triggered SELL for {data_feed._name}")
 
-            # 仓位存在
-            # 2. 模拟 notify_trade(trade.is_open) 逻辑：
-            # 如果仓位存在，但风控模块认为它已被触发（例如，上一个平仓单尚未成交）
-            # 我们需要一种方式来重置它，以防这是一个*新*的开仓。
-            if hasattr(self.risk_control, 'exit_triggered') and data_name in self.risk_control.exit_triggered:
-                # 这是一个HACK：我们检查当前价格是否已*脱离*止损区
-                # 如果脱离了，我们假定这是一个新仓，并清除触发器
-                entry_price = position.price
-                current_price = feed_proxy.close[0]
-                stop_loss_pct = getattr(self.risk_control.p, 'stop_loss_pct', 0)
+                    # 执行平仓
+                    order = self.broker.order_target_percent(data=data_feed, target=0.0)
 
-                if stop_loss_pct > 0:
-                    stop_loss_price = entry_price * (1 - stop_loss_pct)
-                    if current_price > stop_loss_price:
-                        self.broker.log(
-                            f"[Risk] Position {data_name} exists and is not stopped. Clearing stale trigger.")
-                        self.risk_control.exit_triggered.remove(data_name)
+                    if order:
+                        # 记录订单对象，而不是依赖价格
+                        self._pending_risk_orders[data_name] = order
+
+                        # 同步给策略（可选，保持兼容性）
+                        if hasattr(self.strategy, 'order'):
+                            self.strategy.order = order
+
+                        triggered_action = True
+
+                        # 记录到 risk_control 内部 (兼容)
+                        if hasattr(self.risk_control, 'exit_triggered') and isinstance(self.risk_control.exit_triggered,
+                                                                                       set):
+                            self.risk_control.exit_triggered.add(data_name)
                     else:
-                        # 触发器仍然有效（价格仍在止损区或更低）
-                        self.broker.log(f"[Risk] Trigger for {data_name} is active. Waiting for exit.")
-                        continue  # 跳过检查，等待平仓单成交
-                else:
-                    # 止损未启用，也清除触发器
-                    self.risk_control.exit_triggered.remove(data_name)
+                        self.broker.log(f"[Risk] Error: Failed to submit sell order for {data_name}")
 
-            # 3. 对持仓标的执行风控检查
-            action = self.risk_control.check(feed_proxy)
-
-            # 4. 如果触发平仓
-            if action == 'SELL':
-                self.broker.log(f"Risk module triggered SELL for {data_feed._name}")
-
-                # 执行平仓
-                order = self.broker.order_target_percent(data=data_feed, target=0.0)
-
-                # 将订单句柄存入策略的 'order' 属性，以实现锁
-                if hasattr(self.strategy, 'order'):
-                    self.strategy.order = order
-
-                return True  # 风控已触发，停止检查并返回True
-
-        return False  # 所有标的检查完毕，未触发风控
+        return triggered_action
 
 def on_order_status_callback(context, order):
     """
