@@ -54,11 +54,11 @@ class BacktraderStrategyWrapper(bt.Strategy):
     唯一职责是加载我们的纯策略，并将Backtrader的环境传递给它
     """
 
-    def __init__(self, strategy_class, strategy_params=None, risk_control_class=None, risk_control_params=None):
+    def __init__(self, strategy_class, params=None, risk_control_class=None, risk_control_params=None):
         # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
         self.actual_start_date = None
         self.dataclose = self.datas[0].close
-        self.strategy = strategy_class(broker=self, params=strategy_params)
+        self.strategy = strategy_class(broker=self, params=params)
         self.risk_control = None
         if risk_control_class:
             self.risk_control = risk_control_class(broker=self, params=risk_control_params)
@@ -214,14 +214,14 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
 class Backtester:
     # 回测执行器
-    def __init__(self, datas, strategy_class, strategy_params=None, start_date=None, end_date=None, cash=100000.0,
+    def __init__(self, datas, strategy_class, params=None, start_date=None, end_date=None, cash=100000.0,
                  commission=0.0, sizer_class=None, sizer_params=None,
                  risk_control_class=None, risk_control_params=None,
                  timeframe: str = 'Days', compression: int = 1):
         self.cerebro = bt.Cerebro()
         self.datas = datas
         self.strategy_class = strategy_class
-        self.strategy_params = strategy_params
+        self.params = params
         self.start_date = start_date
         self.end_date = end_date
         self.cash = cash
@@ -263,7 +263,7 @@ class Backtester:
         self.cerebro.addstrategy(
             BacktraderStrategyWrapper,
             strategy_class=self.strategy_class,
-            strategy_params=self.strategy_params,
+            params=self.params,
             risk_control_class = self.risk_control_class,
             risk_control_params = self.risk_control_params
         )

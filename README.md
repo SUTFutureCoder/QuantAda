@@ -69,7 +69,7 @@ python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000 -
 python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit
 
 # 使用风控策略并传入自定义参数
-python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit --risk_params "stop_loss_pct:0.03,take_profit_pct:0.08"
+python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit --risk_params "{'stop_loss_pct':0.03,'take_profit_pct':0.08}"
 
 # 设置多个标的及指定数据源
 python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519 --data_source=tushare

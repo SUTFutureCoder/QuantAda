@@ -2,6 +2,7 @@ import argparse
 import importlib
 import os
 import re
+import ast
 
 import pandas
 
@@ -100,7 +101,7 @@ def get_class_from_name(name_string: str, search_paths: list):
 
 
 def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date,
-                 risk_filename, risk_params_str, timeframe, compression):
+                 risk_filename, risk_params, params, timeframe, compression):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
@@ -162,28 +163,20 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
     strategy_class = get_class_from_name(strategy_filename, ['strategies'])
 
     risk_control_class = None
-    risk_params_dict = {}
     if risk_filename:
-        # 增加 'risk_controls' 到搜索路径
         risk_control_class = get_class_from_name(risk_filename, ['risk_controls', 'strategies'])
-        if risk_params_str:
-            try:
-                for param in risk_params_str.split(','):
-                    key, value = param.split(':')
-                    risk_params_dict[key.strip()] = float(value.strip())
-                print(f"  Risk Control Params: {risk_params_dict}")
-            except Exception as e:
-                print(f"  Warning: Could not parse risk_params '{risk_params_str}'. Error: {e}")
+        print(f"  Risk Control Params: {risk_params}")
 
     backtester = Backtester(
         datas,
         strategy_class,
+        params=params,
         start_date=start_date,
         end_date=end_date,
         cash=cash,
         commission=commission,
         risk_control_class=risk_control_class,
-        risk_control_params=risk_params_dict,
+        risk_control_params=risk_params,
         timeframe=timeframe,
         compression=compression
     )
@@ -200,6 +193,8 @@ if __name__ == '__main__':
     # 2. 添加命令行参数
     parser.add_argument('strategy', type=str,
                         help="要运行的策略文件名 (例如: sample_macd_cross_strategy.py 或 sample_macd_cross_strategy 或 my_pkg.my_strategy.MyStrategyClass)")
+    parser.add_argument('--params', type=str, default='{}',
+                        help="策略参数 (JSON字符串, 例如: \"{\'selectTopK\': 2, \'target_buffer\': 0.95}\")")
     parser.add_argument('--selection', type=str, default=None, help="选股器文件名 (位于selectors目录 或 自定义包路径)")
     parser.add_argument('--data_source', type=str, default=None,
                         help="指定数据源 (例如: csv akshare tushare sxsc_tushare)")
@@ -209,9 +204,8 @@ if __name__ == '__main__':
     parser.add_argument('--start_date', type=str, default=None, help="回测起始日期 (例如: 20241111)")
     parser.add_argument('--end_date', type=str, default=None, help="回测结束日期 (例如: 20250101)")
     parser.add_argument('--risk', type=str, default=None, help="风控模块名称 (位于 risk_controls目录 或 自定义包路径)")
-    parser.add_argument('--risk_params', type=str, default=None,
-                        help="风控模块参数 (例如: 'stop_loss_pct:0.03,take_profit_pct:0.1')")
-
+    parser.add_argument('--risk_params', type=str, default='{}',
+                        help="风控参数 (JSON字符串, 例如: \"{\'stop_loss\': 0.05}\")")
     bt_timeframes = ['Days', 'Weeks', 'Months', 'Minutes', 'Seconds']
     parser.add_argument('--timeframe', type=str, default='Days', choices=bt_timeframes,
                         help=f"K线时间维度 (默认: Days). 支持: {', '.join(bt_timeframes)}")
@@ -224,6 +218,19 @@ if __name__ == '__main__':
     # 将逗号分隔的字符串转换为列表
     symbol_list = [s.strip() for s in args.symbols.split(',')]
 
+    # 在这里解析 JSON 字符串为字典
+    try:
+        s_params = ast.literal_eval(args.params)
+    except (ValueError, SyntaxError) as e:
+        print(f"Error parsing params JSON: {e}")
+        s_params = {}
+
+    try:
+        r_params = ast.literal_eval(args.risk_params)
+    except (ValueError, SyntaxError) as e:
+        print(f"Error parsing risk_params JSON: {e}")
+        r_params = {}
+
     # 4. 调用回测函数
     run_backtest(
         selection_filename=args.selection,
@@ -235,7 +242,8 @@ if __name__ == '__main__':
         start_date=args.start_date,
         end_date=args.end_date,
         risk_filename=args.risk,
-        risk_params_str=args.risk_params,
+        risk_params=r_params,
+        params=s_params,
         timeframe=args.timeframe,
         compression=args.compression
     )
