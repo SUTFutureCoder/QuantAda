@@ -250,6 +250,9 @@ QuantAda/
 ### 框架和自定义策略工程分离
 ![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/public_private_split.png?raw=true)  
 
+### 参数优化启动器
+![optimizer](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optimizer.png?raw=true)  
+
 
 在框架执行自定义策略命令样例  
 
