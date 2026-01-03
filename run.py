@@ -182,6 +182,8 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
     )
     backtester.run()
 
+    return backtester
+
 
 if __name__ == '__main__':
     # 1. 创建命令行解析器

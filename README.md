@@ -18,6 +18,7 @@
       - **引擎层**：通过适配器模式清晰地隔离了回测与实盘，您可以轻松添加对QMT、VN.PY等其他平台的适配器，而无需改动任何策略代码。
   - **插件化开发 (SDK模式)**：支持将框架作为SDK依赖。您可以在自己的代码库中编写策略，并通过`PYTHONPATH`引用，实现业务代码与框架代码的物理隔离，便于版本管理和独立开发。
   - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的灵活性和透明度。
+  - **科学的参数优化**：拒绝“暴力穷举”和“过拟合”。集成 Optuna 贝叶斯优化框架，内置严格的样本内训练与样本外验证切分机制。支持Calmar比率等机构级指标作为优化目标，并提供热力图与参数平原可视化，助您寻找真正穿越牛熊的稳健参数。
 
 ## 快速开始
 
@@ -77,6 +78,9 @@ python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.00000
 # 自定义选股策略
 python ./run.py sample_multi_portfolio_strategy --selection sample_manual_selector
 
+# 命令行覆盖策略params参数
+python ./run.py sample_momentum_strategy --symbols SHSE.600519 --params "{'momentum_period': 10}"
+
 # 使用额外数据源
 python ./run.py sample_extra_data_strategy --symbols=SZSE.000001
 
@@ -129,8 +133,7 @@ python ./run.py --help
     ```
 
     这种方式同样适用于 `--selection` 和 `--risk` 参数。
-	
-	
+
 4.  **注意事项**
 
 - 建议将解释器指向本框架，并在框架的requirements.txt管理依赖，并在本框架环境中执行策略
@@ -140,6 +143,31 @@ python ./run.py --help
 - 如果有自定义指标算法，请新建自定义py脚本，并通过```from common.indicators import *```引入框架的指标算法库。
 
 
+#### 3.c. 参数优化 (进阶)
+
+告别“看图说话”的手动调参。使用 `optimize.py` 脚本，您可以定义参数搜索空间，利用 AI 算法自动寻找最优解。
+
+为了防止过拟合，框架强制推荐使用**训练集/测试集分离**模式。
+
+#### 3.c. 参数优化 (进阶)
+
+告别“看图说话”的手动调参。使用 `optimize.py` 脚本，您可以定义参数搜索空间，利用 AI 算法自动寻找最优解。
+
+为了防止过拟合，框架强制推荐使用**训练集/测试集分离**模式，并默认开启**“地狱模式”**——即默认在 2018 年熊市训练生存能力（Calmar），在 2019-2020 年牛市验证盈利能力。
+
+```bash
+# 1. 默认模式 (推荐)：
+# 不指定时间参数时，自动使用默认的“抗过拟合”周期 (2018训练/2019-2020测试) 和 Calmar 目标
+python ./optimize.py sample_momentum_strategy --symbols SHSE.510300 --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60, 'step': 1}}" --n_trials 50
+```
+
+```bash
+# 2. 自定义周期：
+# 如果您需要针对特定时间段（例如近期行情）进行优化，请显式覆盖时间参数
+# 示例：在 2021-2022 年训练，2023 年测试
+python ./optimize.py sample_momentum_strategy --symbols SHSE.510300 --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60}}" --train_period 20210101-20221231 --test_period 20230101-20231231 --n_trials 50
+```
+运行结束后，浏览器将自动弹出交互式的**参数优化历史**、**参数切片 (寻找参数平原)** 等图表，助您一眼看穿策略的稳定性。
 
 #### 4\. 部署实盘 (以掘金量化为例)
 
@@ -203,6 +231,7 @@ QuantAda/
 │   │   └── gm_main_sample.py
 │   └── engine.py           # 实盘交易引擎 (驱动策略运行)
 ├── requirements.txt        # Python依赖包
+├── optimize.py             # 参数优化启动器 (Optuna)
 └── run.py                  # 命令行回测启动器
     
 ```

@@ -295,6 +295,34 @@ class Backtester:
 
         self.cerebro.plot()
 
+    def get_performance_metric(self, metric_name='sharpe'):
+        """
+        供外部调用的获取回测结果接口 (专为 Optuna 设计)
+        """
+        if not hasattr(self, 'results') or not self.results:
+            return -999.0
+
+        strat = self.results[0]
+
+        if metric_name == 'sharpe':
+            # 获取夏普比率
+            sharpe_analyzer = strat.analyzers.getbyname('sharpe')
+            # get_analysis() 返回字典 {'sharperatio': float}
+            s = sharpe_analyzer.get_analysis().get('sharperatio')
+            # 如果夏普计算失败(如无交易或波动为0)，返回负值惩罚
+            return s if s is not None else -999.0
+
+        elif metric_name == 'return':
+            # 获取总收益率
+            initial_value = self.cash
+            final_value = self.cerebro.broker.getvalue()
+            return (final_value / initial_value) - 1.0
+
+        elif metric_name == 'final_value':
+            return self.cerebro.broker.getvalue()
+
+        return 0.0
+
     def display_results(self):
         """
         计算并展示详细的回测性能指标和图表。
