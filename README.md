@@ -130,6 +130,9 @@ python ./run.py --help
 
     # 方式2: 提供模块名 (my_strategies.my_cool_strategy)，自动推断类名 (MyCoolStrategy)
     python ./run.py my_strategies.my_cool_strategy
+    
+    # 样例：运行策略和选择标的
+    python ./run.py my_strategies.reverse_trader_multiple_actions_strategy --selection=my_selectors.reverse_trader_multiple_actions_selector
     ```
 
     这种方式同样适用于 `--selection` 和 `--risk` 参数。
@@ -141,13 +144,6 @@ python ./run.py --help
 - 文件夹/包命名**请勿**和框架相同，建议添加```my_```前缀或```_custom```后缀。
 
 - 如果有自定义指标算法，请新建自定义py脚本，并通过```from common.indicators import *```引入框架的指标算法库。
-
-
-#### 3.c. 参数优化 (进阶)
-
-告别“看图说话”的手动调参。使用 `optimize.py` 脚本，您可以定义参数搜索空间，利用 AI 算法自动寻找最优解。
-
-为了防止过拟合，框架强制推荐使用**训练集/测试集分离**模式。
 
 #### 3.c. 参数优化 (进阶)
 
@@ -250,13 +246,9 @@ QuantAda/
 ### 框架和自定义策略工程分离
 ![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/public_private_split.png?raw=true)  
 
-### 参数优化启动器
+### 基于Optuna优化策略参数
 ![optimizer](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optimizer.png?raw=true)  
 
-
-在框架执行自定义策略命令样例  
-
-```python ./run.py strategies_custom.reverse_trader_multiple_actions_strategy --selection=stock_selectors_custom.reverse_trader_multiple_actions_selector```
 
 ## 免责声明
 
