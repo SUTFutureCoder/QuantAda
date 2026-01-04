@@ -352,7 +352,7 @@ class OptimizationJob:
             return metric_val
 
         except Exception as e:
-            # print(f"Trial failed: {e}")
+            print(f"Trial failed: {e}")
             return -9999.0
 
     def run(self):
