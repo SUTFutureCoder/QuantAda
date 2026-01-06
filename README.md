@@ -232,6 +232,8 @@ QuantAda/
     
 ```
 
+![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
+
 ## 样例截图
 
 ### 终端执行回测
