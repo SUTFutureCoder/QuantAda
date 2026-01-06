@@ -20,6 +20,8 @@
   - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的灵活性和透明度。
   - **科学的参数优化**：拒绝“暴力穷举”和“过拟合”。集成 Optuna 贝叶斯优化框架，内置严格的样本内训练与样本外验证切分机制。支持Calmar比率等机构级指标作为优化目标，并提供热力图与参数平原可视化，助您寻找真正穿越牛熊的稳健参数。
 
+![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
+
 ## 快速开始
 
 #### 1\. 环境准备
@@ -231,8 +233,6 @@ QuantAda/
 └── run.py                  # 命令行回测启动器
     
 ```
-
-![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
 
 ## 样例截图
 
