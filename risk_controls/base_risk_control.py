@@ -1,10 +1,5 @@
 from abc import ABC, abstractmethod
-
-
-class _Params(object):
-    """一个简单的辅助类，用于将字典键转换为对象属性，以支持点操作符访问。"""
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
+from types import SimpleNamespace
 
 
 class BaseRiskControl(ABC):
@@ -28,7 +23,7 @@ class BaseRiskControl(ABC):
             final_params.update(params)
 
         # 2. 使用辅助类将最终的参数字典转换为一个对象
-        self.params = _Params(**final_params)
+        self.params = SimpleNamespace(**final_params)
 
         # 3. 创建 'p' 作为 'params' 的快捷方式
         self.p = self.params

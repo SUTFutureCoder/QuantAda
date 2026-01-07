@@ -1,3 +1,5 @@
+import datetime
+
 import pandas as pd
 
 from .base_broker import BaseLiveBroker, BaseLiveDataProvider, BaseOrderProxy
@@ -171,11 +173,12 @@ class GmBrokerAdapter(BaseLiveBroker):
         tick = tick_list[0]
         price = tick['price']
 
-        # 获取涨跌停价用于市价单保护
-        upper_limit = tick.get('upper_limit', 0.0)
-        lower_limit = tick.get('lower_limit', 0.0)
-        pre_close = tick.get('pre_close', 0.0)
-        open_price = tick.get('open', 0.0)
+        # 获取前一天收盘价用于市价单保护
+        current_dt = self._datetime
+        lastday_dt = data.p.dataname.asof(current_dt - datetime.timedelta(days=1))
+        pre_close = 0.0
+        if not lastday_dt.empty:
+            pre_close = lastday_dt.close
 
         if price <= 0:
             print(f"[Live Trade Error] Invalid price {price} for {symbol}")
@@ -210,27 +213,14 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         # --- 提前计算保护价变量，供后续逻辑使用 ---
         # 确定计算基准价：优先昨收，其次开盘，最后现价
-        base_price_for_calc = pre_close if pre_close > 0 else (open_price if open_price > 0 else price)
+        base_price_for_calc = pre_close if pre_close > 0 else price
 
         # 估算/确定保护价
-        if upper_limit > 0:
-            buy_protection_price = upper_limit
-        else:
-            # 只有当拿不到 upper_limit 时才估算，使用 1.1 (10%) 比较稳妥
-            buy_protection_price = base_price_for_calc * 1.1
-
-        if lower_limit > 0:
-            sell_protection_price = lower_limit
-        else:
-            # 只有当拿不到 lower_limit 时才估算，使用 0.9 (10%) 比较稳妥
-            sell_protection_price = base_price_for_calc * 0.9
+        buy_protection_price = base_price_for_calc * 1.09
+        sell_protection_price = base_price_for_calc * 0.9
 
         if delta_shares > 0:  # Buy
-            # 现金约束
-            # 使用买入保护价(涨停价)计算最大可买股数
-            # 如果按当前价计算，市价单冻结涨停价资金时会不足
-            # 增加 0.0002 的手续费缓冲
-            safe_price_for_calculation = buy_protection_price * 1.0005
+            safe_price_for_calculation = buy_protection_price * 0.9
             max_buy_by_cash = cash / safe_price_for_calculation
 
             shares_to_buy = min(delta_shares, max_buy_by_cash)

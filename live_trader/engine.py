@@ -1,5 +1,5 @@
 import pandas as pd
-import traceback
+from types import SimpleNamespace
 
 from run import get_class_from_name
 from .adapters.gm_broker import GmBrokerAdapter, GmDataProvider
@@ -174,7 +174,7 @@ class LiveTrader:
             if df is not None and not df.empty:
                 class DataFeedProxy:
                     def __init__(self, df, name):
-                        self.p = type('Params', (), {'dataname': df})()
+                        self.p = SimpleNamespace(dataname=df)
                         self._name = name
 
                 datas[symbol] = DataFeedProxy(df, symbol)
