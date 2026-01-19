@@ -57,6 +57,8 @@ class BacktraderStrategyWrapper(bt.Strategy):
     def __init__(self, strategy_class, params=None, risk_control_class=None, risk_control_params=None):
         # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
         self.actual_start_date = None
+        # 用于记录单次 next 循环中，卖单预计释放的资金
+        self.expected_freed_cash = 0.0
         self.dataclose = self.datas[0].close
         self.strategy = strategy_class(broker=self, params=params)
         self.risk_control = None
@@ -70,6 +72,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
             print(f'{dt.isoformat()} {txt}')
 
     def next(self):
+        # 每次进入新的 K 线周期，重置预计释放资金为 0
+        self.expected_freed_cash = 0.0
+
         if self.actual_start_date is None:
             self.actual_start_date = self.datas[0].datetime.datetime(0)
 
@@ -135,10 +140,13 @@ class BacktraderStrategyWrapper(bt.Strategy):
         # 5. 执行下单逻辑
         if delta_shares > 0:  # 买入
             # 获取可用现金
-            cash = self.broker.getcash()
+            # 可用现金 = 账户当前现金 + 本次循环中卖单预计回笼的资金
+            current_cash = self.broker.getcash()
+            total_purchasing_power = current_cash + self.expected_freed_cash
 
             # 估算包含手续费的最大购买量 (假设 commission 是比例，如 0.0003)
-            max_buy_by_cash = cash / (price * (1 + self.broker.getcommissioninfo(data).p.commission))
+            commission_ratio = self.broker.getcommissioninfo(data).p.commission
+            max_buy_by_cash = total_purchasing_power / (price * (1 + commission_ratio))
 
             # 取 目标买入量 和 现金最大买入量 的较小值
             shares_to_buy = min(delta_shares, max_buy_by_cash)
@@ -156,6 +164,11 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
         elif delta_shares < 0:  # 卖出
             shares_to_sell = abs(delta_shares)
+
+            # 无论是否清仓，都要先计算预计释放的资金
+            if shares_to_sell > 0:
+                estimated_value = shares_to_sell * price
+                self.expected_freed_cash += estimated_value
 
             # 如果目标是 0，通常意味着清仓
             if target == 0.0:

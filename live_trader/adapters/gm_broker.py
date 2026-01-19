@@ -118,10 +118,76 @@ class GmDataProvider(BaseLiveDataProvider):
         frequency = self._map_gm_frequency(timeframe, compression)
 
         df = history(symbol=symbol, frequency=frequency, start_time=start_date, end_time=end_date,
-                     fields='open,high,low,close,volume,eob', df=True)
+                     fields='open,high,low,close,volume,eob', adjust=1, df=True)
         if df.empty: return df
         df.rename(columns={'eob': 'datetime'}, inplace=True)
         df.set_index('datetime', inplace=True)
+        df.index = pd.to_datetime(df.index)
+
+        if frequency == '1d':
+            try:
+                ticks = current(symbols=symbol)
+                if ticks:
+                    tick = ticks[0]
+                    tick_price = tick['price']
+
+                    # tick['created_at'] 通常已经是带时区的 datetime 对象
+                    tick_time = tick['created_at']
+                    if isinstance(tick_time, str):
+                        tick_time = pd.to_datetime(tick_time)
+
+                    # 获取日期用于比较 (date() 对象是无时区的，可以直接比)
+                    tick_date = tick_time.date() if hasattr(tick_time, 'date') else tick_time.date()
+
+                    # 构造当日 Bar
+                    open_p = tick['open'] if tick['open'] > 0 else tick_price
+                    high_p = tick['high'] if tick['high'] > 0 else tick_price
+                    low_p = tick['low'] if tick['low'] > 0 else tick_price
+
+                    # 先创建一个初始 DataFrame
+                    today_bar = pd.DataFrame({
+                        'open': [open_p],
+                        'high': [high_p],
+                        'low': [low_p],
+                        'close': [tick_price],
+                        'volume': [tick['cum_volume']],
+                        'datetime': [tick_time]  # 直接使用原始带时区时间，或后续处理
+                    })
+                    today_bar.set_index('datetime', inplace=True)
+
+                    # 【核心修正】：对齐时区 (Timezone Alignment)
+                    if not df.empty:
+                        # 获取历史数据的时区
+                        target_tz = df.index.tz
+
+                        if target_tz is not None:
+                            # 如果 today_bar 也是带时区的，则转换；如果是 naive 的，则本地化
+                            if today_bar.index.tz is None:
+                                today_bar.index = today_bar.index.tz_localize(target_tz)
+                            else:
+                                today_bar.index = today_bar.index.tz_convert(target_tz)
+
+                        # 归一化时间到 00:00:00 (保持时区不变)
+                        # 掘金历史数据通常是 00:00:00+08:00
+                        today_bar.index = today_bar.index.normalize()
+
+                    # --- 拼接判断 ---
+                    should_append = False
+                    if df.empty:
+                        should_append = True
+                    else:
+                        # 比较日期 (使用 .date() 安全比较)
+                        last_hist_date = df.index[-1].date()
+                        if tick_date > last_hist_date:
+                            should_append = True
+
+                    if should_append:
+                        df = pd.concat([df, today_bar])
+                        # print(f"[Data] Stitched real-time bar for {symbol} (TZ-Aware)")
+
+            except Exception as e:
+                print(f"[GmDataProvider] Warning: Failed to stitch real-time data for {symbol}: {e}")
+
         return df
 
 
@@ -220,7 +286,7 @@ class GmBrokerAdapter(BaseLiveBroker):
         sell_protection_price = base_price_for_calc * 0.9
 
         if delta_shares > 0:  # Buy
-            safe_price_for_calculation = buy_protection_price * 0.9
+            safe_price_for_calculation = buy_protection_price
             max_buy_by_cash = cash / safe_price_for_calculation
 
             shares_to_buy = min(delta_shares, max_buy_by_cash)
