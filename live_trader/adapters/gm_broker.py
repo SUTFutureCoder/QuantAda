@@ -17,10 +17,18 @@ except ImportError:
 class GmOrderProxy(BaseOrderProxy):
     """掘金平台的订单代理具体实现"""
 
-    def __init__(self, platform_order, is_live: bool, data=None):
-        self.platform_order = platform_order
-        self.is_live = is_live  # 保存模式
-        self.data = data  # 存储对应的 Backtrader 数据源对象
+    def __init__(self, order, is_live, data=None):
+        self.platform_order = order
+        self.is_live = is_live
+        self.data = data
+
+    @property
+    def id(self):
+        return self.platform_order.cl_ord_id
+
+    @property
+    def status(self):
+        return self.platform_order.status
 
     @property
     def executed(self):
@@ -217,28 +225,70 @@ class GmBrokerAdapter(BaseLiveBroker):
             return config
         return {}
 
-    def _fetch_real_cash(self) -> float:
-        if get_cash is None: raise ImportError("'gm' module is required for GmBrokerAdapter.")
+    # 1. 查钱
+    def _fetch_real_cash(self):
         return get_cash().available
 
-    def order_target_percent(self, data, target, **kwargs) -> GmOrderProxy | None:
-        """
-        下单，并返回一个包装好的 GmOrderProxy 实例。
-        替代原生的 order_target_percent 以支持 lot_size 和现金向下取整。
-        """
-        if order_volume is None: raise ImportError("'gm' is required.")
+    # 2. 查持仓
+    def get_position(self, data):
+        class Pos:
+            size = 0; price = 0.0
 
-        symbol = data._name
-        lot_size = kwargs.get('lot_size', 100)  # 默认为A股 100股
+        if hasattr(self._context, 'account'):
+            for p in self._context.account().positions():
+                if p.symbol == data._name:
+                    o = Pos();
+                    o.size = p.volume;
+                    o.price = p.vwap;
+                    return o
+        return Pos()
 
-        # 1. 获取最新价格
-        tick_list = current(symbols=symbol)
-        if not tick_list:
-            print(f"[Live Trade Error] Cannot get current price for {symbol}")
+    # 3. 查价
+    def _get_current_price(self, data):
+        ticks = current(symbols=data._name)
+        return ticks[0]['price'] if ticks else 0.0
+
+    # 4. 发单
+    def _submit_order(self, data, volume, side, price):
+        gm_side = OrderSide_Buy if side == 'BUY' else OrderSide_Sell
+
+        upper_limit, lower_limit = self._get_upper_lower_limit(data, price)
+        actual_price = upper_limit if side == 'BUY' else lower_limit
+
+        # 资金预检查，防止资金不足
+        if side == 'BUY':
+            available_cash = self._fetch_real_cash()
+            # 预估冻结资金 (加 0.05% 缓冲)
+            estimated_cost = volume * actual_price * 1.0005
+
+            if estimated_cost > available_cash:
+                # 资金不够覆盖涨停价冻结，自动降仓
+                old_volume = volume
+                volume = int(available_cash / (actual_price * 1.0005) // 100) * 100
+
+                if volume < 100:
+                    print(
+                        f"[GmBroker] Skip Buy {data._name}: Cash {available_cash:.2f} < LimitCost {estimated_cost:.2f}")
+                    return None
+
+                print(f"[GmBroker] Auto-Downsize {data._name}: {old_volume} -> {volume} (Reason: LimitPrice Freeze)")
+
+        if volume <= 0: return None
+
+        try:
+            # 1=Open, 2=Close
+            effect = 1 if side == 'BUY' else 2
+            ords = order_volume(
+                symbol=data._name, volume=volume, side=gm_side,
+                order_type=OrderType_Market, position_effect=effect, price=actual_price
+            )
+            return GmOrderProxy(ords[-1], self.is_live, data=data) if ords else None
+        except Exception as e:
+            print(f"[GM Error] {e}")
             return None
-        tick = tick_list[0]
-        price = tick['price']
 
+    # 计算涨停和跌停保护价
+    def _get_upper_lower_limit(self, data, price):
         # 获取前一天收盘价用于市价单保护
         current_dt = self._datetime
         lastday_dt = data.p.dataname.asof(current_dt - datetime.timedelta(days=1))
@@ -246,128 +296,14 @@ class GmBrokerAdapter(BaseLiveBroker):
         if not lastday_dt.empty:
             pre_close = lastday_dt.close
 
-        if price <= 0:
-            print(f"[Live Trade Error] Invalid price {price} for {symbol}")
-            return None
-
-        # 2. 获取当前持仓量
-        pos_obj = self.get_position(data)
-        current_pos_size = pos_obj.size
-
-        # 3. 计算账户总资产 (现金 + 持仓市值)
-        acct = self._context.account()
-        cash = acct.cash.available
-
-        if hasattr(acct.cash, 'nav'):
-            portfolio_value = acct.cash.nav
-        else:
-            positions = acct.positions()
-            market_value = sum([p.volume * p.price for p in positions])
-            portfolio_value = cash + market_value
-
-        # 4. 计算目标市值和目标股数
-        target_value = portfolio_value * target
-        expected_shares = target_value / price
-
-        # 5. 计算差额
-        delta_shares = expected_shares - current_pos_size
-
-        final_volume = 0
-        side = 0  # 1=Buy, 2=Sell
-        # 定义开平仓标志 1=Open, 2=Close
-        position_effect = 1
-
-        # --- 提前计算保护价变量，供后续逻辑使用 ---
         # 确定计算基准价：优先昨收，其次开盘，最后现价
         base_price_for_calc = pre_close if pre_close > 0 else price
 
         # 估算/确定保护价
-        buy_protection_price = base_price_for_calc * 1.09
-        sell_protection_price = base_price_for_calc * 0.9
+        limit_ratio = 0.20 if data._name.startswith(('SHSE.688', 'SZSE.300')) else 0.10
 
-        if delta_shares > 0:  # Buy
-            safe_price_for_calculation = buy_protection_price
-            max_buy_by_cash = cash / safe_price_for_calculation
+        upper_limit = base_price_for_calc * (1 + limit_ratio - 0.015)
+        lower_limit = base_price_for_calc * (1 - limit_ratio + 0.015)
 
-            shares_to_buy = min(delta_shares, max_buy_by_cash)
+        return upper_limit, lower_limit
 
-            if lot_size > 1:
-                shares_to_buy = int(shares_to_buy // lot_size) * lot_size
-            else:
-                shares_to_buy = int(shares_to_buy)
-
-            if shares_to_buy > 0:
-                final_volume = shares_to_buy
-                side = OrderSide_Buy
-                position_effect = 1  # 买入开仓
-
-        elif delta_shares < 0:  # Sell
-            shares_to_sell = abs(delta_shares)
-
-            if target == 0.0:
-                final_volume = current_pos_size
-                side = OrderSide_Sell
-            else:
-                if lot_size > 1:
-                    shares_to_sell = int(shares_to_sell // lot_size) * lot_size
-                else:
-                    shares_to_sell = int(shares_to_sell)
-
-                if shares_to_sell > 0:
-                    final_volume = shares_to_sell
-                    # 如果要卖出的量 > 可用量
-                    if final_volume > pos_obj.available:
-                        print(f"[Warn] T+1 Limit: Try to sell {final_volume}, but only {pos_obj.available} available.")
-                        final_volume = pos_obj.available  # 强制降级为卖出可用部分
-                    side = OrderSide_Sell
-
-            # 卖出平仓
-            position_effect = 2
-
-        # 6. 下单
-        if final_volume > 0 and side != 0:
-            # 根据方向选择之前算好的保护价
-            actual_protection_price = buy_protection_price if side == OrderSide_Buy else sell_protection_price
-
-            print(
-                f"[Live Trade] Placing order: {symbol} {'BUY' if side == OrderSide_Buy else 'SELL'} {final_volume} (Target% {target:.2f})")
-
-            try:
-                # 动态传入 position_effect，并增加 position_side=1 (多头仓位) 显式声明
-                platform_order_list = order_volume(
-                    symbol=symbol,
-                    volume=final_volume,
-                    side=side,
-                    order_type=OrderType_Market,
-                    position_effect=position_effect,  # 1=Open, 2=Close
-                    price=actual_protection_price
-                )
-                return GmOrderProxy(platform_order_list[-1], self.is_live, data=data) if platform_order_list else None
-
-            except Exception as e:
-                # 捕获 API 报错 (如 1018 或 无效标的)，防止炸毁整个回测
-                print(f"[Live Trade Error] GM Order Failed: {e}")
-                return None
-
-        return None
-
-    def get_position(self, data):
-        class Pos:
-            size = 0
-            # 持仓均价
-            price = 0.0
-            available = 0
-
-        if not hasattr(self._context, 'account'):
-            print("Warning: context object in GmBrokerAdapter is not valid or missing 'account' attribute.")
-            return Pos()
-
-        positions = self._context.account().positions()
-        for p in positions:
-            if p.symbol == data._name:
-                pos_obj = Pos()
-                pos_obj.size = p.volume
-                pos_obj.price = p.vwap
-                pos_obj.available = p.available
-                return pos_obj
-        return Pos()

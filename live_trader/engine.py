@@ -1,3 +1,5 @@
+import sys
+
 import pandas as pd
 from types import SimpleNamespace
 
@@ -365,6 +367,10 @@ def on_order_status_callback(context, order):
             # 将掘金的原生 order 包装成 Proxy，并传入 data
             order_proxy = GmOrderProxy(order, is_live, data=matched_data)
 
+            # 2. 【核心】喂给 Broker，让它去维护在途单
+            if hasattr(broker, 'on_order_status'):
+                broker.on_order_status(order_proxy)
+
             # 调用策略通知
             context.strategy_instance.notify_order(order_proxy)
 
@@ -376,8 +382,30 @@ def on_order_status_callback(context, order):
 
             print(f"[Engine Callback] Notified strategy of order status: {order.status} ({msg})")
 
+            # 3. 如果卖单成交（有钱回笼），触发重试
+            if order_proxy.is_sell() and order_proxy.executed.size > 0:
+                # 再次确认不是撤单导致的 size>0 (虽然撤单通常 size=0，但为了严谨)
+                if not order_proxy.is_canceled() and not order_proxy.is_rejected():
+                    if hasattr(broker, 'sync_balance'):
+                        broker.sync_balance()
+                    if hasattr(broker, 'process_deferred_orders'):
+                        broker.process_deferred_orders()
+
+        except RuntimeError as re:
+            # 专门捕获 BaseBroker 抛出的死锁熔断异常
+            if "CRITICAL" in str(re):
+                print(f"\n{'!' * 40}")
+                print(f"[FATAL ERROR] {re}")
+                print(f"{'!' * 40}\n")
+                print("Terminating execution immediately to prevent Ghost Orders.")
+                sys.exit(1)  # 直接终止进程，不再让 GM SDK 继续运行
+            else:
+                # 其他 RuntimeError 照常打印但不退出
+                import traceback
+                print(f"[Engine Callback Error] {re}")
+                traceback.print_exc()
+
         except Exception as e:
-            # 打印完整的堆栈以便调试
             import traceback
             print(f"[Engine Callback Error] Failed to notify strategy: {e}")
             traceback.print_exc()
