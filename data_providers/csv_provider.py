@@ -28,7 +28,7 @@ class CsvDataProvider(BaseDataProvider):
         return os.path.join(self.data_path, csv_filename)
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
 
         csv_filepath = self._get_cache_filepath(symbol, timeframe, compression)
 

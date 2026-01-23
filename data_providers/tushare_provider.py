@@ -20,7 +20,7 @@ class TushareDataProvider(BaseDataProvider):
             self.pro = ts.pro_api()
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
         if not self.pro:
             return None
 

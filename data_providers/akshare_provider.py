@@ -28,7 +28,7 @@ class AkshareDataProvider(BaseDataProvider):
         return 'daily'
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
         try:
             # 1. 对symbol进行更健壮的解析
             if '.' in symbol:

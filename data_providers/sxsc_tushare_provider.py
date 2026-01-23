@@ -26,7 +26,7 @@ class SxscTushareDataProvider(BaseDataProvider):
             self.token = token
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
         """
         使用 sxsc-tushare 代理的 query 方法获取股票或ETF数据。
         """

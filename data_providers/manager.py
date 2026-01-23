@@ -58,7 +58,7 @@ class DataManager:
         return discovered_providers
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                 specified_sources: str = None, timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
+                 specified_sources: str = None, timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
         """
         智能获取数据。
         - 如果指定了 specified_sources，则按指定顺序尝试。

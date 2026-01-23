@@ -14,7 +14,7 @@ class BaseDataProvider(ABC):
 
     @abstractmethod
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame | None:
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
         """
         获取指定交易标的的历史行情数据
 
