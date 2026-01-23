@@ -141,7 +141,7 @@ class QuietBacktester(Backtester):
             BacktraderStrategyWrapper,
             strategy_class=self.strategy_class,
             params=self.params,
-            risk_control_class=self.risk_control_class,
+            risk_control_classes=self.risk_control_classes,
             risk_control_params=self.risk_control_params
         )
 
@@ -221,9 +221,15 @@ class OptimizationJob:
         self.opt_params_def = opt_params_def
         self.risk_params = risk_params
         self.strategy_class = get_class_from_name(args.strategy, ['strategies'])
-        self.risk_control_class = None
+        self.risk_control_classes = []
         if args.risk:
-            self.risk_control_class = get_class_from_name(args.risk, ['risk_controls', 'strategies'])
+            # 支持逗号分隔
+            risk_names = args.risk.split(',')
+            for r_name in risk_names:
+                r_name = r_name.strip()
+                if r_name:
+                    cls = get_class_from_name(r_name, ['risk_controls', 'strategies'])
+                    self.risk_control_classes.append(cls)
 
         self.data_manager = DataManager()
         self.raw_datas = self._fetch_all_data()
@@ -333,7 +339,7 @@ class OptimizationJob:
                 end_date=self.train_range[1],
                 cash=self.args.cash,
                 commission=self.args.commission,
-                risk_control_class=self.risk_control_class,
+                risk_control_classes=self.risk_control_classes,
                 risk_control_params=self.risk_params,
                 timeframe=self.args.timeframe,
                 compression=self.args.compression
@@ -389,7 +395,7 @@ class OptimizationJob:
                 end_date=self.test_range[1],
                 cash=self.args.cash,
                 commission=self.args.commission,
-                risk_control_class=self.risk_control_class,
+                risk_control_classes=self.risk_control_classes,
                 risk_control_params=self.risk_params,
                 timeframe=self.args.timeframe,
                 compression=self.args.compression

@@ -84,7 +84,7 @@ python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000 -
 python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit
 
 # 使用风控策略并传入自定义参数
-python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit --risk_params "{'stop_loss_pct':0.03,'take_profit_pct':0.08}"
+python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit,trend_protection --risk_params "{'stop_loss_pct':0.03,'take_profit_pct':0.08,'method':'ma','period':120}"
 
 # 设置多个标的及指定数据源
 python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519 --data_source=tushare
@@ -101,6 +101,8 @@ python ./run.py sample_extra_data_strategy --symbols=SZSE.000001
 # 查看所有可用参数
 python ./run.py --help
 ```
+
+`--symbols`和`--risk`可传入多个逗号分隔的标的及风控策略。
 
 #### 3.b. 运行回测 (SDK/插件化模式)
 

@@ -166,9 +166,16 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
     print("\n--- Initializing Backtester ---")
     strategy_class = get_class_from_name(strategy_filename, ['strategies'])
 
-    risk_control_class = None
+    risk_control_classes = []
     if risk_filename:
-        risk_control_class = get_class_from_name(risk_filename, ['risk_controls', 'strategies'])
+        # 支持逗号分隔的多个风控策略
+        risk_names = risk_filename.split(',')
+        for r_name in risk_names:
+            r_name = r_name.strip()
+            if r_name:
+                cls = get_class_from_name(r_name, ['risk_controls', 'strategies'])
+                risk_control_classes.append(cls)
+        print(f"  Risk Control Modules: {risk_names}")
         print(f"  Risk Control Params: {risk_params}")
 
     backtester = Backtester(
@@ -179,7 +186,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         end_date=end_date,
         cash=cash,
         commission=commission,
-        risk_control_class=risk_control_class,
+        risk_control_classes=risk_control_classes,
         risk_control_params=risk_params,
         timeframe=timeframe,
         compression=compression,

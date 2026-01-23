@@ -56,7 +56,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
     唯一职责是加载我们的纯策略，并将Backtrader的环境传递给它
     """
 
-    def __init__(self, strategy_class, params=None, risk_control_class=None, risk_control_params=None, recorder=None):
+    def __init__(self, strategy_class, params=None, risk_control_classes=None, risk_control_params=None, recorder=None):
         self.recorder = recorder
         # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
         self.actual_start_date = None
@@ -64,9 +64,16 @@ class BacktraderStrategyWrapper(bt.Strategy):
         self.expected_freed_cash = 0.0
         self.dataclose = self.datas[0].close
         self.strategy = strategy_class(broker=self, params=params)
-        self.risk_control = None
-        if risk_control_class:
-            self.risk_control = risk_control_class(broker=self, params=risk_control_params)
+        self.risk_controls = []
+        if risk_control_classes:
+            # 如果传入的是单个类（兼容旧代码），转为列表
+            if not isinstance(risk_control_classes, list):
+                risk_control_classes = [risk_control_classes]
+
+            for rc_cls in risk_control_classes:
+                # 所有风控模块共享同一套 params (risk_control_params)
+                # 它们会各自提取自己需要的参数
+                self.risk_controls.append(rc_cls(broker=self, params=risk_control_params))
         self.strategy.init()
 
     def log(self, txt, dt=None):
@@ -119,14 +126,14 @@ class BacktraderStrategyWrapper(bt.Strategy):
         return order
 
     def notify_order(self, order):
-        if self.risk_control:
-            self.risk_control.notify_order(OrderProxy(order))
+        for rc in self.risk_controls:
+            rc.notify_order(OrderProxy(order))
 
         self.strategy.notify_order(OrderProxy(order))
 
     def notify_trade(self, trade):
-        if self.risk_control:
-            self.risk_control.notify_trade(TradeProxy(trade))
+        for rc in self.risk_controls:
+            rc.notify_trade(TradeProxy(trade))
 
         self.strategy.notify_trade(TradeProxy(trade))
 
@@ -211,37 +218,39 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
     def _check_risk_controls(self) -> list:
         """
-        辅助方法：检查所有标的，执行风控检查并采取行动。
-        封装了所有风控相关的循环和判断逻辑。
-
-        :return: list 返回所有触发了风控操作的 symbol 名称列表。
+        辅助方法：检查所有标的，循环执行所有风控检查。
         """
         triggered_symbols = []
 
-        if not self.risk_control:
+        # 如果没有风控模块，直接返回
+        if not self.risk_controls:
             return triggered_symbols
 
         for data in self.datas:
-            # 1. 检查是否有仓位 (使用卫语句优化)
+            # 1. 检查是否有仓位
             if not self.getposition(data).size:
-                continue  # 没有仓位，检查下一个标的
+                continue
 
-            # 2. 对持仓标的执行风控检查
-            action = self.risk_control.check(data)
+            # 2. 对持仓标的循环执行风控检查
+            final_action = None
+            for rc in self.risk_controls:
+                action = rc.check(data)
+
+                # 如果任意一个风控模块要求卖出
+                if action == 'SELL':
+                    final_action = 'SELL'
+                    self.log(f"Risk module '{rc.__class__.__name__}' triggered SELL for {data._name}")
+                    # 一旦触发平仓，通常不需要再问其他风控模块了，直接 Break
+                    break
 
             # 3. 如果触发平仓
-            if action == 'SELL':
-                self.log(f"Risk module triggered SELL for {data._name}")
-
+            if final_action == 'SELL':
                 # 执行平仓
                 order = self.order_target_percent(data=data, target=0.0)
 
-                # 将订单句柄存入策略的 'order' 属性 (注意：多标的同时触发时，这里只存了最后一个)
-                # 这是一个简化的锁机制，如果策略需要精细控制，应该维护一个 order 列表
                 if hasattr(self.strategy, 'order'):
                     self.strategy.order = order
 
-                # 记录触发风控的标的
                 triggered_symbols.append(data._name)
 
         return triggered_symbols
@@ -291,7 +300,7 @@ class Backtester:
     # 回测执行器
     def __init__(self, datas, strategy_class, params=None, start_date=None, end_date=None, cash=100000.0,
                  commission=0.0, sizer_class=None, sizer_params=None,
-                 risk_control_class=None, risk_control_params=None,
+                 risk_control_classes=None, risk_control_params=None,
                  timeframe: str = 'Days', compression: int = 1,
                  recorder = None, enable_plot = True):
         self.cerebro = bt.Cerebro()
@@ -304,7 +313,7 @@ class Backtester:
         self.commission = commission
         self.sizer_class = sizer_class
         self.sizer_params = sizer_params
-        self.risk_control_class = risk_control_class
+        self.risk_control_classes = risk_control_classes
         self.risk_control_params = risk_control_params
         self.timeframe_str = timeframe
         self.compression = compression
@@ -342,7 +351,7 @@ class Backtester:
             BacktraderStrategyWrapper,
             strategy_class=self.strategy_class,
             params=self.params,
-            risk_control_class=self.risk_control_class,
+            risk_control_classes=self.risk_control_classes,
             risk_control_params=self.risk_control_params,
             recorder=self.recorder,
         )
