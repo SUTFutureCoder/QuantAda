@@ -6,8 +6,12 @@ import ast
 
 import pandas
 
+import config
 from backtest.backtester import Backtester
 from data_providers.manager import DataManager
+from recorders.db_recorder import DBRecorder
+from recorders.http_recorder import HttpRecorder
+from recorders.manager import RecorderManager
 
 # 动态获取 Python 安装目录，并构建 Tcl/Tk 库路径
 python_install_dir = os.path.dirname(os.path.dirname(os.__file__))
@@ -101,7 +105,7 @@ def get_class_from_name(name_string: str, search_paths: list):
 
 
 def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date,
-                 risk_filename, risk_params, params, timeframe, compression):
+                 risk_filename, risk_params, params, timeframe, compression, recorder=None):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
@@ -178,7 +182,8 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         risk_control_class=risk_control_class,
         risk_control_params=risk_params,
         timeframe=timeframe,
-        compression=compression
+        compression=compression,
+        recorder=recorder,
     )
     backtester.run()
 
@@ -213,9 +218,18 @@ if __name__ == '__main__':
                         help=f"K线时间维度 (默认: Days). 支持: {', '.join(bt_timeframes)}")
     parser.add_argument('--compression', type=int, default=1,
                         help="K线时间周期 (默认: 1). 结合 timeframe, 例如 30 Minutes")
+    parser.add_argument('--desc', type=str, default=None,
+                        help="本次回测的描述信息 (默认为不带 .py 的策略文件名)")
 
     # 3. 解析参数
     args = parser.parse_args()
+
+    # 处理 desc 默认值
+    description = args.desc
+    if not description:
+        # 移除路径和扩展名，只保留文件名作为描述
+        basename = os.path.basename(args.strategy)
+        description = os.path.splitext(basename)[0]
 
     # 将逗号分隔的字符串转换为列表
     symbol_list = [s.strip() for s in args.symbols.split(',')]
@@ -233,6 +247,30 @@ if __name__ == '__main__':
         print(f"Error parsing risk_params JSON: {e}")
         r_params = {}
 
+    # --- 组装 Recorder ---
+    # 创建管理器
+    recorder_manager = RecorderManager()
+
+    # 如果开启了 DB，添加 DB Recorder
+    if config.DB_ENABLED:
+        try:
+            db_recorder = DBRecorder(
+                strategy_name=args.strategy,
+                description=description,
+                params=s_params,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                initial_cash=args.cash
+            )
+            recorder_manager.add_recorder(db_recorder)
+        except Exception as e:
+            print(f"Failed to init DBRecorder: {e}")
+
+    # 如果配置了 HTTP (假设 config 中有配置)，添加 HTTP Recorder
+    if hasattr(config, 'HTTP_LOG_URL') and config.HTTP_LOG_URL:
+        http_recorder = HttpRecorder(endpoint_url=config.HTTP_LOG_URL)
+        recorder_manager.add_recorder(http_recorder)
+
     # 4. 调用回测函数
     run_backtest(
         selection_filename=args.selection,
@@ -247,7 +285,8 @@ if __name__ == '__main__':
         risk_params=r_params,
         params=s_params,
         timeframe=args.timeframe,
-        compression=args.compression
+        compression=args.compression,
+        recorder=recorder_manager,
     )
 
     print("\n--- Backtest Finished ---")

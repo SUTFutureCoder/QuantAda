@@ -18,3 +18,11 @@ TUSHARE_TOKEN = 'your_tushare_token_here'
 # 用于演示快速接入数据源
 SXSC_TUSHARE_TOKEN = 'your_sxsc_tushare_token_here'
 
+# 是否开启数据库记录
+DB_ENABLED = True
+
+# 数据库连接字符串
+# 格式: dialect+driver://username:password@host:port/database
+# 示例 (MySQL): 'mysql+pymysql://root:123456@localhost:3306/quantada_db'
+# 示例 (SQLite): 'sqlite:///quantada_logs.db'
+DB_URL = 'mysql+pymysql://root:yourpassword@localhost:3306/quant'

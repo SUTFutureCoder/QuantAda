@@ -6,7 +6,10 @@ akshare
 ta-lib
 requests
 sqlalchemy
-numpy
+sqlalchemy-utils
+pymysql
+cryptography
+numpy==2.3.5
 numba
 optuna
 plotly

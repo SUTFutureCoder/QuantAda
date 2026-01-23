@@ -1,3 +1,5 @@
+import datetime
+
 import backtrader as bt
 import pandas as pd
 
@@ -54,7 +56,8 @@ class BacktraderStrategyWrapper(bt.Strategy):
     唯一职责是加载我们的纯策略，并将Backtrader的环境传递给它
     """
 
-    def __init__(self, strategy_class, params=None, risk_control_class=None, risk_control_params=None):
+    def __init__(self, strategy_class, params=None, risk_control_class=None, risk_control_params=None, recorder=None):
+        self.recorder = recorder
         # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
         self.actual_start_date = None
         # 用于记录单次 next 循环中，卖单预计释放的资金
@@ -102,6 +105,29 @@ class BacktraderStrategyWrapper(bt.Strategy):
             self.risk_control.notify_order(OrderProxy(order))
 
         self.strategy.notify_order(OrderProxy(order))
+
+        # --- 数据记录逻辑 ---
+        # 只记录 Completed 的订单，即实际发生的交易
+        if self.recorder and order.status == order.Completed:
+            action = 'BUY' if order.isbuy() else 'SELL'
+
+            # 记录交易时刻的快照
+            # 注意: order.executed.value 是该笔交易的市值，不是账户总值
+            # broker.getvalue() 获取的是包含该笔交易变动后的当前账户总市值
+            current_cash = self.broker.getcash()
+            current_value = self.broker.getvalue()
+
+            self.recorder.log_trade(
+                dt=bt.num2date(order.executed.dt),
+                symbol=order.data._name,
+                action=action,
+                price=order.executed.price,
+                size=order.executed.size,
+                comm=order.executed.comm,
+                order_ref=order.ref,  # Backtrader 内部唯一引用 ID
+                cash=current_cash,
+                value=current_value
+            )
 
     def notify_trade(self, trade):
         if self.risk_control:
@@ -230,7 +256,8 @@ class Backtester:
     def __init__(self, datas, strategy_class, params=None, start_date=None, end_date=None, cash=100000.0,
                  commission=0.0, sizer_class=None, sizer_params=None,
                  risk_control_class=None, risk_control_params=None,
-                 timeframe: str = 'Days', compression: int = 1):
+                 timeframe: str = 'Days', compression: int = 1,
+                 recorder = None):
         self.cerebro = bt.Cerebro()
         self.datas = datas
         self.strategy_class = strategy_class
@@ -245,6 +272,7 @@ class Backtester:
         self.risk_control_params = risk_control_params
         self.timeframe_str = timeframe
         self.compression = compression
+        self.recorder = recorder
         self.timeframe = self._get_bt_timeframe(timeframe)
 
     def _get_bt_timeframe(self, timeframe_str: str) -> int:
@@ -263,8 +291,8 @@ class Backtester:
         for symbol, df in self.datas.items():
             feed = bt.feeds.PandasData(
                 dataname=df,
-                fromdate=pd.to_datetime(self.start_date),
-                todate=pd.to_datetime(self.end_date),
+                fromdate=pd.to_datetime(self.start_date) if self.start_date else None,
+                todate=pd.to_datetime(self.end_date) if self.end_date else None,
                 name=symbol,  # 为每个数据源命名，方便策略内部通过名称访问
                 timeframe = self.timeframe,
                 compression = self.compression
@@ -277,8 +305,9 @@ class Backtester:
             BacktraderStrategyWrapper,
             strategy_class=self.strategy_class,
             params=self.params,
-            risk_control_class = self.risk_control_class,
-            risk_control_params = self.risk_control_params
+            risk_control_class=self.risk_control_class,
+            risk_control_params=self.risk_control_params,
+            recorder=self.recorder,
         )
 
         # 设置初始资金和手续费
@@ -301,7 +330,36 @@ class Backtester:
 
         print(f"Starting Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
         self.results = self.cerebro.run()
+        final_val = self.cerebro.broker.getvalue()
         print(f"Final Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
+
+        if self.recorder and self.recorder.active:
+            # 复用 display_results 中的计算逻辑，或者简单提取
+            # 这里为了简洁，重新提取关键指标，你也可以重构 display_results 返回这些值
+            strat = self.results[0]
+            sharpe_analyzer = strat.analyzers.getbyname('sharpe')
+            sharpe = sharpe_analyzer.get_analysis().get('sharperatio', 0.0)
+            if sharpe is None: sharpe = 0.0
+
+            drawdown_analyzer = strat.analyzers.getbyname('drawdown')
+            max_dd = drawdown_analyzer.get_analysis().max.drawdown / 100
+
+            total_ret = (final_val / self.cash) - 1
+            # 简单的年化估算，详细逻辑参考 display_results
+            start_dt = pd.to_datetime(self.start_date) if self.start_date else datetime.datetime.now()  # 简化
+            end_dt = pd.to_datetime(self.end_date) if self.end_date else datetime.datetime.now()
+            days = (end_dt - start_dt).days
+            ann_ret = 0.0
+            if days > 0:
+                ann_ret = ((1 + total_ret) ** (365.0 / days)) - 1
+
+            self.recorder.finish_execution(
+                final_value=final_val,
+                total_return=total_ret,
+                sharpe=sharpe,
+                max_drawdown=max_dd,
+                annual_return=ann_ret
+            )
 
         # --- 替换 cerebro.plot() 为我们自己的展示函数 ---
         self.display_results()
