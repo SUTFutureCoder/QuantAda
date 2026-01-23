@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Union
 
 import pandas
 
@@ -16,7 +17,7 @@ class BaseSelector(ABC):
         self.data_manager = data_manager
 
     @abstractmethod
-    def run_selection(self) -> list[str] | pandas.DataFrame:
+    def run_selection(self) -> Union[list[str], pandas.DataFrame]:
         """
         【核心】执行选股逻辑并返回一个包含标的代码字符串的列表。如果返回DataFrame，需要将标的设置为index。
         """

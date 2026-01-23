@@ -8,7 +8,7 @@ class TemperatureHistoryProvider:
     def __init__(self):
         self.db_provider = MysqlExtraProvider()
 
-    def fetch(self) -> pd.DataFrame | None:
+    def fetch(self) -> pd.DataFrame:
         """
         获取指定日期范围内的指数数据。
         :return: 以datetime为索引的DataFrame，或在失败时返回None。

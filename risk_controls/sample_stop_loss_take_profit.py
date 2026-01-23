@@ -43,7 +43,7 @@ class SampleStopLossTakeProfit(BaseRiskControl):
             if data_name in self.exit_triggered:
                 self.exit_triggered.remove(data_name)
 
-    def check(self, data) -> str | None:
+    def check(self, data) -> str:
         """
         在每个 bar 上检查止盈止损条件。
         """

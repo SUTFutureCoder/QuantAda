@@ -24,7 +24,7 @@ class HttpExtraProvider:
         从东方财富接口获取股票数据并解析为DataFrame
 
         Returns:
-            pd.DataFrame | None: 包含股票数据的DataFrame，如果请求失败则返回None
+            pd.DataFrame: 包含股票数据的DataFrame，如果请求失败则返回None
         """
         try:
             # 发送HTTP请求

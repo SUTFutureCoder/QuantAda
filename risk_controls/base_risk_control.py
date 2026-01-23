@@ -29,7 +29,7 @@ class BaseRiskControl(ABC):
         self.p = self.params
 
     @abstractmethod
-    def check(self, data) -> str | None:
+    def check(self, data) -> str:
         """
         【核心】对指定的数据执行风控检查。
         如果策略持有该 'data' 的仓位，此方法将在每个 'next' bar 被调用。
