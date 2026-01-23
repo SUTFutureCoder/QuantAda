@@ -100,34 +100,29 @@ class BacktraderStrategyWrapper(bt.Strategy):
         # 即使 A 标的触发了止损，B 标的依然可能有信号需要处理
         self.strategy.next()
 
+    def buy(self, *args, **kwargs):
+        """
+        重写 buy 方法，在下单瞬间记录决策
+        """
+        order = super().buy(*args, **kwargs)
+        if order:
+            self._log_decision(order)
+        return order
+
+    def sell(self, *args, **kwargs):
+        """
+        重写 sell 方法，在下单瞬间记录决策
+        """
+        order = super().sell(*args, **kwargs)
+        if order:
+            self._log_decision(order)
+        return order
+
     def notify_order(self, order):
         if self.risk_control:
             self.risk_control.notify_order(OrderProxy(order))
 
         self.strategy.notify_order(OrderProxy(order))
-
-        # --- 数据记录逻辑 ---
-        # 只记录 Completed 的订单，即实际发生的交易
-        if self.recorder and order.status == order.Completed:
-            action = 'BUY' if order.isbuy() else 'SELL'
-
-            # 记录交易时刻的快照
-            # 注意: order.executed.value 是该笔交易的市值，不是账户总值
-            # broker.getvalue() 获取的是包含该笔交易变动后的当前账户总市值
-            current_cash = self.broker.getcash()
-            current_value = self.broker.getvalue()
-
-            self.recorder.log_trade(
-                dt=bt.num2date(order.executed.dt),
-                symbol=order.data._name,
-                action=action,
-                price=order.executed.price,
-                size=order.executed.size,
-                comm=order.executed.comm,
-                order_ref=order.ref,  # Backtrader 内部唯一引用 ID
-                cash=current_cash,
-                value=current_value
-            )
 
     def notify_trade(self, trade):
         if self.risk_control:
@@ -250,6 +245,47 @@ class BacktraderStrategyWrapper(bt.Strategy):
                 triggered_symbols.append(data._name)
 
         return triggered_symbols
+
+    def _log_decision(self, order):
+        """
+        辅助方法：立即记录交易决策
+        """
+        if not self.recorder:
+            return
+
+        try:
+            action = 'BUY' if order.isbuy() else 'SELL'
+
+            # 1. 获取决策时间 (当前 Bar 的时间)
+            current_dt = order.data.datetime.datetime(0)
+
+            # 2. 获取决策价格 (当前 Close)
+            decision_price = order.data.close[0]
+
+            # 3. 获取决策数量 (Created 中的 size)
+            decision_size = order.created.size
+
+            # 4. 估算手续费 (假定成交)
+            comminfo = self.broker.getcommissioninfo(order.data)
+            estimated_comm = comminfo.getcommission(decision_price, decision_size)
+
+            # 5. 获取账户快照
+            current_cash = self.broker.getcash()
+            current_value = self.broker.getvalue()
+
+            self.recorder.log_trade(
+                dt=current_dt,
+                symbol=order.data._name,
+                action=action,
+                price=decision_price,
+                size=decision_size,
+                comm=estimated_comm,
+                order_ref=order.ref,
+                cash=current_cash,
+                value=current_value
+            )
+        except Exception as e:
+            print(f"Error logging decision: {e}")
 
 class Backtester:
     # 回测执行器

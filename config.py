@@ -19,7 +19,7 @@ TUSHARE_TOKEN = 'your_tushare_token_here'
 SXSC_TUSHARE_TOKEN = 'your_sxsc_tushare_token_here'
 
 # 是否开启数据库记录
-DB_ENABLED = False
+DB_ENABLED = True
 
 # 数据库连接字符串
 # 格式: dialect+driver://username:password@host:port/database

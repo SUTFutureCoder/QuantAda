@@ -260,7 +260,8 @@ if __name__ == '__main__':
                 params=s_params,
                 start_date=args.start_date,
                 end_date=args.end_date,
-                initial_cash=args.cash
+                initial_cash=args.cash,
+                commission=args.commission
             )
             recorder_manager.add_recorder(db_recorder)
         except Exception as e:
