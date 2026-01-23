@@ -105,7 +105,7 @@ def get_class_from_name(name_string: str, search_paths: list):
 
 
 def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date,
-                 risk_filename, risk_params, params, timeframe, compression, recorder=None):
+                 risk_filename, risk_params, params, timeframe, compression, recorder=None, enable_plot=True):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
@@ -184,6 +184,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         timeframe=timeframe,
         compression=compression,
         recorder=recorder,
+        enable_plot=enable_plot,
     )
     backtester.run()
 
@@ -220,6 +221,7 @@ if __name__ == '__main__':
                         help="K线时间周期 (默认: 1). 结合 timeframe, 例如 30 Minutes")
     parser.add_argument('--desc', type=str, default=None,
                         help="本次回测的描述信息 (默认为不带 .py 的策略文件名)")
+    parser.add_argument('--no_plot', action='store_true', help="在服务器环境下禁用绘图")
 
     # 3. 解析参数
     args = parser.parse_args()
@@ -288,6 +290,7 @@ if __name__ == '__main__':
         timeframe=args.timeframe,
         compression=args.compression,
         recorder=recorder_manager,
+        enable_plot=not args.no_plot,
     )
 
     print("\n--- Backtest Finished ---")

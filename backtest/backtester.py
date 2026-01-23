@@ -293,7 +293,7 @@ class Backtester:
                  commission=0.0, sizer_class=None, sizer_params=None,
                  risk_control_class=None, risk_control_params=None,
                  timeframe: str = 'Days', compression: int = 1,
-                 recorder = None):
+                 recorder = None, enable_plot = True):
         self.cerebro = bt.Cerebro()
         self.datas = datas
         self.strategy_class = strategy_class
@@ -309,6 +309,7 @@ class Backtester:
         self.timeframe_str = timeframe
         self.compression = compression
         self.recorder = recorder
+        self.enable_plot = enable_plot
         self.timeframe = self._get_bt_timeframe(timeframe)
 
     def _get_bt_timeframe(self, timeframe_str: str) -> int:
@@ -400,7 +401,21 @@ class Backtester:
         # --- 替换 cerebro.plot() 为我们自己的展示函数 ---
         self.display_results()
 
-        self.cerebro.plot()
+        if self.enable_plot:
+            print("Generating plot...")
+            try:
+                self.cerebro.plot()
+            except Exception as e:
+                # 捕获 tkinter 缺失或其他绘图错误，防止整个脚本最后报错
+                error_msg = str(e).lower()
+                if "tkinter" in error_msg or "tkagg" in error_msg:
+                    print("\n[Warning] Plotting Skipped: 'tkinter' module not found.")
+                    print("  - On Server: Use --no_plot to suppress this.")
+                    print("  - To Fix: Install python3-tk (e.g., yum install python3-tk / apt install python3-tk)")
+                else:
+                    print(f"\n[Warning] Plotting Failed: {e}")
+        else:
+            print("Plotting disabled via --no_plot.")
 
     def get_performance_metric(self, metric_name='sharpe'):
         """
