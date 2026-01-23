@@ -19,6 +19,7 @@
   - **插件化开发 (SDK模式)**：支持将框架作为SDK依赖。您可以在自己的代码库中编写策略，并通过`PYTHONPATH`引用，实现业务代码与框架代码的物理隔离，便于版本管理和独立开发。
   - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的灵活性和透明度。
   - **科学的参数优化**：拒绝“暴力穷举”和“过拟合”。集成 Optuna 贝叶斯优化框架，内置严格的样本内训练与样本外验证切分机制。支持Calmar比率等机构级指标作为优化目标，并提供热力图与参数平原可视化，助您寻找真正穿越牛熊的稳健参数。
+  - **交易全记录**：内置强大的记录系统，支持将每一笔交易流水、资金快照及最终绩效自动持久化到 MySQL/SQLite 数据库或发送至 HTTP 服务器、MQ队列等。支持自动建库建表和幂等写入，方便进行大规模回测数据的沉淀与分析。
 
 ![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
 
@@ -39,7 +40,7 @@ source .venv/bin/activate  # on Windows, use `.venv\Scripts\activate`
 pip install -r requirements.txt
 ```
 
-#### 2\. 配置API密钥
+#### 2\. 配置
 
 打开 `config.py` 文件，并填入您的 `TUSHARE_TOKEN`。如果您没有，可以前往 [Tushare Pro](https://tushare.pro/user/token)
 免费注册获取。
@@ -47,6 +48,17 @@ pip install -r requirements.txt
 ```python
 # config.py
 TUSHARE_TOKEN = 'your_tushare_token_here'
+```
+
+数据库记录 (可选): 开启后，回测结果将自动存入数据库。
+
+```python
+# config.py
+DB_ENABLED = True
+# 格式: dialect+driver://username:password@host:port/database
+# 示例 (MySQL): 'mysql+pymysql://root:123456@localhost:3306/quantada_db'
+# 示例 (SQLite): 'sqlite:///quantada_logs.db'
+DB_URL = 'mysql+pymysql://root:yourpassword@localhost:3306/quant'
 ```
 
 #### 3.a. 运行回测 (内部模式)
@@ -228,6 +240,12 @@ QuantAda/
 │   ├── samples/            # 各平台实盘入口文件样例
 │   │   └── gm_main_sample.py
 │   └── engine.py           # 实盘交易引擎 (驱动策略运行)
+├── recorders/              # 回测记录模块
+│   ├── __init__.py
+│   ├── base_recorder.py    # 定义接口
+│   ├── manager.py          # 统一入口（分发器）
+│   ├── db_recorder.py      # 数据库记录实现
+│   └── http_recorder.py    # HTTP记录实现示例
 ├── requirements.txt        # Python依赖包
 ├── optimize.py             # 参数优化启动器 (Optuna)
 └── run.py                  # 命令行回测启动器
