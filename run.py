@@ -1,110 +1,22 @@
 import argparse
-import importlib
-import os
-import re
 import ast
+import logging
+import os
+import sys
 
 import pandas
 
 import config
 from backtest.backtester import Backtester
+from common import optimizer
+from common.loader import get_class_from_name, pascal_to_snake
 from data_providers.manager import DataManager
 from recorders.db_recorder import DBRecorder
 from recorders.http_recorder import HttpRecorder
 from recorders.manager import RecorderManager
 
-# 动态获取 Python 安装目录，并构建 Tcl/Tk 库路径
-python_install_dir = os.path.dirname(os.path.dirname(os.__file__))
-tcl_library_path = os.path.join(python_install_dir, 'tcl', 'tcl8.6')
-tk_library_path = os.path.join(python_install_dir, 'tcl', 'tk8.6')
 
-# 设置环境变量
-os.environ['TCL_LIBRARY'] = tcl_library_path
-os.environ['TK_LIBRARY'] = tk_library_path
-
-
-def _pascal_to_snake(name: str) -> str:
-    """
-    将 PascalCase (大驼峰) 字符串转换为 snake_case (下划线) 字符串。
-    例如: 'SampleMacdCrossStrategy' -> 'sample_macd_cross_strategy'
-    """
-    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
-    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
-
-
-def get_class_from_name(name_string: str, search_paths: list):
-    """
-    根据给定的名称字符串（文件名或类名）动态导入类。
-
-    支持两种模式:
-    1. 内部模式 (无点号): e.g., 'sample_macd_cross_strategy'
-       - 在框架的 'search_paths' (如 'strategies/') 中查找。
-    2. 外部模式 (有点号): e.g., 'my_external_strategies.my_strategy.MyStrategyClass'
-       - 直接从 PYTHONPATH 导入，忽略 'search_paths'。
-
-    :param name_string: 文件名/类名 (e.g., 'sample_macd_cross_strategy') 或
-                        全限定名 (e.g., 'my_strategies.my_strategy_file.MyStrategyClass')
-    :param search_paths: 内部搜索的目录列表, e.g., ['stock_selectors', 'strategies']
-    :return: 动态导入的类
-    """
-    name_string = name_string.replace('.py', '')
-
-    # 1. 检查是否为全限定路径 (包含点号)
-    if '.' in name_string:
-        try:
-            # 尝试 Case 1: 'my_package.my_module.MyClass'
-            # 假设用户提供了模块和类的全名
-            module_path, class_name = name_string.rsplit('.', 1)
-            module = importlib.import_module(module_path)
-            return getattr(module, class_name)
-        except (ImportError, AttributeError, ValueError) as e_class:
-            # 导入失败，尝试 Case 2
-            # Case 2: 'my_package.my_module_file' (snake_case)
-            # 假设用户提供了模块名，我们推断类名 (e.g., MyModuleFile)
-            try:
-                module_name = name_string
-                class_name_base = module_name.split('.')[-1]
-                class_name = "".join(word.capitalize() for word in class_name_base.split('_'))
-
-                module = importlib.import_module(module_name)
-                return getattr(module, class_name)
-            except (ImportError, AttributeError) as e_module:
-                # 两次尝试都失败
-                raise ImportError(
-                    f"Could not import '{name_string}' as a fully qualified path. \n"
-                    f"  Attempt 1 (as ...MyClass) failed: {e_class} \n"
-                    f"  Attempt 2 (as ...my_module) failed: {e_module}"
-                )
-
-    # 2. 原始逻辑 (如果 name_string 不含点号，则在内部搜索)
-    # 启发式判断输入格式
-    if '_' in name_string or name_string.islower():
-        # 认为是 snake_case 文件名
-        module_name = name_string
-        class_name = "".join(word.capitalize() for word in module_name.split('_'))
-    else:
-        # 认为是 PascalCase 类名
-        class_name = name_string
-        module_name = _pascal_to_snake(class_name)
-
-    # 遍历搜索路径尝试导入
-    for path in search_paths:
-        try:
-            module_path = f'{path}.{module_name}'
-            module = importlib.import_module(module_path)
-            return getattr(module, class_name)
-        except (ImportError, AttributeError):
-            # 如果在一个路径中找不到，继续在下一个路径中寻找
-            continue
-
-    # 如果所有路径都尝试完毕仍未找到，则抛出异常
-    raise ImportError(
-        f"Could not find class '{class_name}' from module '{module_name}' "
-        f"derived from input '{name_string}' in any of the search paths: {search_paths}"
-    )
-
-
-def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, data_source, start_date, end_date,
+def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, slippage, data_source, start_date, end_date,
                  risk_filename, risk_params, params, timeframe, compression, recorder=None, enable_plot=True):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
@@ -186,6 +98,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
         end_date=end_date,
         cash=cash,
         commission=commission,
+        slippage=slippage,
         risk_control_classes=risk_control_classes,
         risk_control_params=risk_params,
         timeframe=timeframe,
@@ -216,6 +129,7 @@ if __name__ == '__main__':
     parser.add_argument('--symbols', type=str, default='SHSE.510300', help="以,分割的回测标的代码 (默认: SHSE.510300)")
     parser.add_argument('--cash', type=float, default=100000.0, help="初始资金 (默认: 100000.0)")
     parser.add_argument('--commission', type=float, default=0, help="手续费率，例如：万1.5为:0.00015 (默认：0)")
+    parser.add_argument('--slippage', type=float, default=0.001, help="滑点，模拟真实市场的冲击成本 (默认: 0.001)")
     parser.add_argument('--start_date', type=str, default=None, help="回测起始日期 (例如: 20241111)")
     parser.add_argument('--end_date', type=str, default=None, help="回测结束日期 (例如: 20250101)")
     parser.add_argument('--risk', type=str, default=None, help="风控模块名称 (位于 risk_controls目录 或 自定义包路径)")
@@ -229,6 +143,18 @@ if __name__ == '__main__':
     parser.add_argument('--desc', type=str, default=None,
                         help="本次回测的描述信息 (默认为不带 .py 的策略文件名)")
     parser.add_argument('--no_plot', action='store_true', help="在服务器环境下禁用绘图")
+
+    # Optimizer 专用参数
+    parser.add_argument('--opt_params', type=str, default=None, help="[优化模式] 优化参数空间定义 JSON")
+    parser.add_argument('--n_trials', type=int, default=None, help="[优化模式] 尝试次数 (默认: 自动推断)")
+    parser.add_argument('--n_jobs', type=int, default=-1, help="[优化模式] 并行核心数 (-1 表示使用所有核心)")
+    parser.add_argument('--metric', type=str, default='calmar',
+                        choices=['sharpe', 'return', 'final_value', 'calmar', 'mix_score'],  # 添加 mix_score
+                        help="[优化模式] 优化目标")
+    parser.add_argument('--study_name', type=str, default=None)
+    parser.add_argument('--train_ratio', type=float, default=None)
+    parser.add_argument('--train_period', type=str, default=None)
+    parser.add_argument('--test_period', type=str, default=None)
 
     # 3. 解析参数
     args = parser.parse_args()
@@ -256,48 +182,65 @@ if __name__ == '__main__':
         print(f"Error parsing risk_params JSON: {e}")
         r_params = {}
 
-    # --- 组装 Recorder ---
-    # 创建管理器
-    recorder_manager = RecorderManager()
+    if args.opt_params:
+        # --- 优化模式 ---
+        print(f"\n>>> Mode: PARAMETER OPTIMIZATION (Target: {args.metric}) <<<")
 
-    # 如果开启了 DB，添加 DB Recorder
-    if config.DB_ENABLED:
+        if not args.study_name:
+            # 提取策略名，并将 '.' 替换为 '_' 以适配文件名规范
+            args.study_name = f"study_{pascal_to_snake(args.strategy)}"
+            print(f"[System] Auto-generated study name: {args.study_name}")
+
+        # --- 变更点 2: 显式关闭日志 (从 optimizer.py 移至此处) ---
+        config.LOG = False
+        logging.getLogger("optuna").setLevel(logging.INFO)
+
         try:
-            db_recorder = DBRecorder(
-                strategy_name=args.strategy,
-                description=description,
-                params=s_params,
-                start_date=args.start_date,
-                end_date=args.end_date,
-                initial_cash=args.cash,
-                commission=args.commission
-            )
-            recorder_manager.add_recorder(db_recorder)
+            opt_p_def = ast.literal_eval(args.opt_params)
         except Exception as e:
-            print(f"Failed to init DBRecorder: {e}")
+            print(f"Error parsing opt_params JSON: {e}")
+            sys.exit(1)
 
-    # 如果配置了 HTTP (假设 config 中有配置)，添加 HTTP Recorder
-    if hasattr(config, 'HTTP_LOG_URL') and config.HTTP_LOG_URL:
-        http_recorder = HttpRecorder(endpoint_url=config.HTTP_LOG_URL)
-        recorder_manager.add_recorder(http_recorder)
+        job = optimizer.OptimizationJob(
+            args=args,
+            fixed_params=s_params,
+            opt_params_def=opt_p_def,
+            risk_params=r_params
+        )
+        job.run()
 
-    # 4. 调用回测函数
-    run_backtest(
-        selection_filename=args.selection,
-        strategy_filename=args.strategy,
-        symbols=symbol_list,
-        cash=args.cash,
-        commission=args.commission,
-        data_source=args.data_source,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        risk_filename=args.risk,
-        risk_params=r_params,
-        params=s_params,
-        timeframe=args.timeframe,
-        compression=args.compression,
-        recorder=recorder_manager,
-        enable_plot=not args.no_plot,
-    )
+    else:
+        # --- 普通回测模式 ---
+        recorder_manager = RecorderManager()
+        if config.DB_ENABLED:
+            try:
+                recorder_manager.add_recorder(DBRecorder(
+                    strategy_name=args.strategy, description=description, params=s_params,
+                    start_date=args.start_date, end_date=args.end_date,
+                    initial_cash=args.cash, commission=args.commission
+                ))
+            except Exception as e:
+                print(f"Failed to init DBRecorder: {e}")
 
-    print("\n--- Backtest Finished ---")
+        if hasattr(config, 'HTTP_LOG_URL') and config.HTTP_LOG_URL:
+            recorder_manager.add_recorder(HttpRecorder(endpoint_url=config.HTTP_LOG_URL))
+
+        run_backtest(
+            selection_filename=args.selection,
+            strategy_filename=args.strategy,
+            symbols=symbol_list,
+            cash=args.cash,
+            commission=args.commission,
+            slippage=args.slippage,
+            data_source=args.data_source,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            risk_filename=args.risk,
+            risk_params=r_params,
+            params=s_params,
+            timeframe=args.timeframe,
+            compression=args.compression,
+            recorder=recorder_manager,
+            enable_plot=not args.no_plot,
+        )
+        print("\n--- Backtest Finished ---")

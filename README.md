@@ -5,21 +5,35 @@
 
 一个优雅、可扩展、可实盘的量化交易框架，实现算法的分模块独立或协作开发。
 
-`Ada` 是 `Adapter`（适配器）的缩写，也借此向计算机先驱**阿达·洛夫莱斯 (Ada Lovelace)** 及以她命名的Ada语言致敬。
+`Ada` 是 `Adapter`（适配器）的缩写，也借此向计算机先驱 **阿达·洛夫莱斯 (Ada Lovelace)** 及以她命名的 Ada 语言致敬。
 
-作者看不惯市面上一众机构或开发者，通过过拟合、高年化忽悠小白割韭菜爆金币的风气，让量化交易回归敬畏、诚信、以技术为本的初心。
+本项目旨在对抗市面上普遍存在的“过拟合”与“造神”风气，通过严谨的工程架构与数学逻辑，让量化交易回归敬畏市场、技术为本的初心。
 
 ## 核心特性
 
-  - **策略与引擎解耦**：得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `backtrader` 回测引擎和掘金量化等实盘环境中，并支持全球各大券商独立配置特殊规则。
-  - **模块化与可扩展**：
-      - **数据层**：支持指定主数据源和额外数据源。默认采用责任链模式，按 `PRIORITY` 优先级获取数据，并实现自动增量更新与本地缓存，保证数据获取的稳定与高效。
-      - **策略层**：支持将指标计算（`common/indicators`）抽象为公共模块，集成MyTT、Ta-Lib的同时，方便团队成员共享和组合，避免重复造轮子。
-      - **引擎层**：通过适配器模式清晰地隔离了回测与实盘，您可以轻松添加对QMT、VN.PY等其他平台的适配器，而无需改动任何策略代码。
-  - **插件化开发 (SDK模式)**：支持将框架作为SDK依赖。您可以在自己的代码库中编写策略，并通过`PYTHONPATH`引用，实现业务代码与框架代码的物理隔离，便于版本管理和独立开发。
-  - **轻量级与专注**：框架只提供核心的骨架，没有集成任何臃肿或非必要的功能。每一行代码都为专业开发者服务，确保最大的灵活性和透明度。
-  - **科学的参数优化**：拒绝“暴力穷举”和“过拟合”。集成 Optuna 贝叶斯优化框架，内置严格的样本内训练与样本外验证切分机制。支持Calmar比率等机构级指标作为优化目标，并提供热力图与参数平原可视化，助您寻找真正穿越牛熊的稳健参数。
-  - **交易全记录**：内置强大的记录系统，支持将每一笔交易流水、资金快照及最终绩效自动持久化到 MySQL/SQLite 数据库或发送至 HTTP 服务器、MQ队列等。支持自动建库建表和幂等写入，方便进行大规模回测数据的沉淀与分析。
+  - **策略与引擎解耦 (Adapter Pattern)**  
+    - 得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `Backtrader` 回测引擎或 **掘金量化 (MyQuant)** 等实盘环境中。支持全球各大券商独立配置特殊规则。
+  
+
+  - **启发式并行贝叶斯优化器 (Heuristic-Guided Bayesian Optimizer)**
+    - **学术级算法**：基于 TPE (Tree-structured Parzen Estimator) 算法，引入 `Constant-Liar` 采样策略与哈希去重机制，解决多核环境下的“并发踩踏”问题。
+    - **智能算力评估**：拒绝盲目穷举。框架根据参数空间复杂度（熵）与硬件 CPU 核数，通过非线性公式动态推导最佳尝试次数 ($N_{trials}$)。
+    - **极速并行**：支持 `n_jobs=-1` 调用所有 CPU 核心，内置 Windows 文件锁管理与自动降级机制。
+  
+
+  - **科学的评价体系 (Mix Score)**
+    - **拒绝单一指标**：内置 **Mix Score** 混合评分机制，综合考量 **Calmar (生存能力)**、**Sharpe (资金曲线平滑度)** 与 **Total Return (进攻性)**，并引入交易次数熔断机制，防止优化器拟合“运气单”。
+    - **地狱模式训练**：强制推荐 **“熊市训练 (In-Sample) + 牛市验证 (Out-of-Sample)”** 的切分模式，验证策略的抗脆弱性。
+  
+
+  - **模块化与插件化 (SDK Mode)**
+    - **数据层**：责任链模式管理多数据源 (Tushare/AkShare/CSV)，支持自动增量更新与本地缓存。
+    - **策略层**：指标计算 (`common/indicators`) 抽象为公共模块，集成 MyTT、Ta-Lib。
+    - **工程分离**：支持通过 `PYTHONPATH` 引用外部策略库，实现业务代码与框架核心的物理隔离。
+  
+
+  - **交易全记录**
+    支持将每一笔交易流水、资金快照及最终绩效自动持久化到 MySQL/SQLite 数据库，支持幂等写入，便于大规模回测数据的沉淀与分析。
 
 ![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
 
@@ -163,22 +177,31 @@ python ./run.py --help
 
 #### 3.c. 参数优化 (进阶)
 
-告别“看图说话”的手动调参。使用 `optimize.py` 脚本，您可以定义参数搜索空间，利用 AI 算法自动寻找最优解。
+告别“看图说话”的手动调参。统一使用 run.py 脚本，只需传入 --opt_params 参数，即可激活优化模式。定义参数搜索空间，利用 AI 算法自动寻找最优解。
 
 为了防止过拟合，框架强制推荐使用**训练集/测试集分离**模式，并默认开启 **“地狱模式”** ——即默认在 2018 年熊市训练生存能力（Calmar），在 2019-2020 年牛市验证盈利能力。
 
 ```bash
 # 1. 默认模式 (推荐)：
 # 不指定时间参数时，自动使用默认的“抗过拟合”周期 (2018训练/2019-2020测试) 和 Calmar 目标
-python ./optimize.py sample_momentum_strategy --symbols SHSE.510300 --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60, 'step': 1}}" --n_trials 50
+# 只要传入 --opt_params 即自动切换为优化模式
+python ./run.py sample_momentum_strategy --symbols SHSE.510300 --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60, 'step': 1}}" --n_trials 50
 ```
 
 ```bash
 # 2. 自定义周期：
 # 如果您需要针对特定时间段（例如近期行情）进行优化，请显式覆盖时间参数
 # 示例：在 2021-2022 年训练，2023 年测试
-python ./optimize.py sample_momentum_strategy --symbols SHSE.510300 --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60}}" --train_period 20210101-20221231 --test_period 20230101-20231231 --n_trials 50
+python ./run.py sample_momentum_strategy --selection sample_manual_selector --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60}}" --train_period 20210101-20221231 --test_period 20230101-20231231 --n_trials 50
 ```
+
+```bash
+# 3. 自动步数
+# 不传入 --n_trials: 算法根据参数空间复杂度自动推算尝试次数
+# --metric mix_score 启用混合评分目标（综合 Calmar、Sharpe 和 收益率）
+python ./run.py sample_momentum_strategy --selection sample_manual_selector --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60}}" --metric mix_score
+```
+
 运行结束后，浏览器将自动弹出交互式的**参数优化历史**、**参数切片 (寻找参数平原)** 等图表，助您一眼看穿策略的稳定性。
 
 #### 4\. 部署实盘 (以掘金量化为例)
@@ -213,8 +236,8 @@ QuantAda/
 │   └── backtester.py       # 回测执行器
 ├── common/                 # 通用逻辑模块
 │   ├── indicators.py       # 指标算法聚合库，自定义使用Ta-Lib及MyTT
-│   └── mytt.py             # MyTT指标计算库
-├── config.py               # 配置文件 (API密钥等)
+│   ├── mytt.py             # MyTT指标计算库
+│   └── optimizer.py        # 参数优化核心逻辑 (Optuna)
 ├── data/                   # 行情数据缓存目录
 ├── data_providers/         # 主数据源模块
 │   ├── akshare_provider.py # AkShare数据源适配器
@@ -249,7 +272,7 @@ QuantAda/
 │   ├── db_recorder.py      # 数据库记录实现
 │   └── http_recorder.py    # HTTP记录实现示例
 ├── requirements.txt        # Python依赖包
-├── optimize.py             # 参数优化启动器 (Optuna)
+├── config.py               # 配置文件 (API密钥等)
 └── run.py                  # 命令行回测启动器
     
 ```

@@ -1,9 +1,9 @@
 import json
 import re
-from typing import Optional
 
 import pandas as pd
 import requests
+from typing import Optional
 
 
 class HttpExtraProvider:

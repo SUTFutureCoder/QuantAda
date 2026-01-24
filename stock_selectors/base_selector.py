@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import Union
 
 import pandas
+from typing import Union
 
 
 class BaseSelector(ABC):

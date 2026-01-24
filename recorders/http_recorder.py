@@ -1,5 +1,3 @@
-import requests
-import json
 from .base_recorder import BaseRecorder
 
 class HttpRecorder(BaseRecorder):

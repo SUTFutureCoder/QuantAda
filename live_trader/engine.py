@@ -1,7 +1,7 @@
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
-from types import SimpleNamespace
 
 from run import get_class_from_name
 from .adapters.gm_broker import GmBrokerAdapter, GmDataProvider

@@ -1,13 +1,13 @@
 import datetime
 import uuid
+
 from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, JSON, ForeignKey, Index
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy_utils import database_exists, create_database
 
-from .base_recorder import BaseRecorder
 import config
+from .base_recorder import BaseRecorder
 
 Base = declarative_base()
 

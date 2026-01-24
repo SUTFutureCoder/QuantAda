@@ -1,5 +1,7 @@
-from .base_strategy import BaseStrategy
 import backtrader as bt
+
+from .base_strategy import BaseStrategy
+
 
 class SampleMomentumStrategy(BaseStrategy):
     """

@@ -56,8 +56,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
     唯一职责是加载我们的纯策略，并将Backtrader的环境传递给它
     """
 
-    def __init__(self, strategy_class, params=None, risk_control_classes=None, risk_control_params=None, recorder=None):
+    def __init__(self, strategy_class, params=None, risk_control_classes=None, risk_control_params=None, recorder=None, verbose=True):
         self.recorder = recorder
+        self.verbose = verbose
         # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
         self.actual_start_date = None
         # 用于记录单次 next 循环中，卖单预计释放的资金
@@ -77,7 +78,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
         self.strategy.init()
 
     def log(self, txt, dt=None):
-        if config.LOG:
+        if self.verbose and config.LOG:
             dt = dt or self.datas[0].datetime.date(0)
             print(f'{dt.isoformat()} {txt}')
 
@@ -294,15 +295,16 @@ class BacktraderStrategyWrapper(bt.Strategy):
                 value=current_value
             )
         except Exception as e:
-            print(f"Error logging decision: {e}")
+            if self.verbose:
+                print(f"Error logging decision: {e}")
 
 class Backtester:
     # 回测执行器
     def __init__(self, datas, strategy_class, params=None, start_date=None, end_date=None, cash=100000.0,
-                 commission=0.0, sizer_class=None, sizer_params=None,
+                 commission=0.0, slippage=0.001, sizer_class=None, sizer_params=None,
                  risk_control_classes=None, risk_control_params=None,
                  timeframe: str = 'Days', compression: int = 1,
-                 recorder = None, enable_plot = True):
+                 recorder = None, enable_plot = True, verbose=True):
         self.cerebro = bt.Cerebro()
         self.datas = datas
         self.strategy_class = strategy_class
@@ -311,6 +313,7 @@ class Backtester:
         self.end_date = end_date
         self.cash = cash
         self.commission = commission
+        self.slippage = slippage
         self.sizer_class = sizer_class
         self.sizer_params = sizer_params
         self.risk_control_classes = risk_control_classes
@@ -319,7 +322,10 @@ class Backtester:
         self.compression = compression
         self.recorder = recorder
         self.enable_plot = enable_plot
+        self.verbose = verbose
         self.timeframe = self._get_bt_timeframe(timeframe)
+
+        self._init_analyzers()
 
     def _get_bt_timeframe(self, timeframe_str: str) -> int:
         """将字符串时间维度映射到backtrader的TimeFrame枚举值"""
@@ -333,20 +339,41 @@ class Backtester:
         return mapping.get(timeframe_str, bt.TimeFrame.Days)
 
     def run(self):
-        # 将数据添加到Cerebro
+        self._init_data_feeds()
+        self._init_strategy()
+        self._init_broker()
+
+        self.log(f"Starting Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
+
+        self.results = self.cerebro.run()
+
+        final_val = self.cerebro.broker.getvalue()
+        self.log(f"Final Portfolio Value: {final_val:.2f}")
+
+        self._process_recorder_hooks(final_val)
+        self._generate_report()
+
+        return self.results
+
+    def log(self, msg):
+        """安静模式下的静音处理"""
+        if self.verbose:
+            print(msg)
+
+    def _init_data_feeds(self):
         for symbol, df in self.datas.items():
             feed = bt.feeds.PandasData(
                 dataname=df,
                 fromdate=pd.to_datetime(self.start_date) if self.start_date else None,
                 todate=pd.to_datetime(self.end_date) if self.end_date else None,
-                name=symbol,  # 为每个数据源命名，方便策略内部通过名称访问
-                timeframe = self.timeframe,
-                compression = self.compression
+                name=symbol,
+                timeframe=self.timeframe,
+                compression=self.compression
             )
             self.cerebro.adddata(feed)
-            print(f"  Data feed for '{symbol}' added.")
+            self.log(f"  Data feed for '{symbol}' added.")
 
-        # 添加包装后的策略
+    def _init_strategy(self):
         self.cerebro.addstrategy(
             BacktraderStrategyWrapper,
             strategy_class=self.strategy_class,
@@ -354,81 +381,79 @@ class Backtester:
             risk_control_classes=self.risk_control_classes,
             risk_control_params=self.risk_control_params,
             recorder=self.recorder,
+            verbose=self.verbose  # 将静音标志传递给 wrapper
         )
 
-        # 设置初始资金和手续费
+    def _init_broker(self):
         self.cerebro.broker.setcash(self.cash)
         self.cerebro.broker.setcommission(commission=self.commission)
 
-        # 仅在 sizer_class 被提供时才添加全局 Sizer
-        if self.sizer_class:
-            # 使用 `**(self.sizer_params or {})` 以安全地处理 sizer_params 为 None 的情况
-            self.cerebro.addsizer(self.sizer_class, **(self.sizer_params or {}))
+        # 设置百分比滑点 (0.001 表示 0.1%)
+        # 这会让买入价更高，卖出价更低，模拟真实市场的冲击成本
+        if self.slippage > 0:
+            self.cerebro.broker.set_slippage_perc(perc=self.slippage)
 
-        # 添加性能分析器
-        # PyFolio分析器用于提取详细的交易数据，即使不使用pyfolio绘图，它也非常有用
-        self.cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
+        if self.sizer_class:
+            self.cerebro.addsizer(self.sizer_class, **self.sizer_params)
+
+    def _init_analyzers(self):
+        # 1. 基础指标 (优化器也需要)
         self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', riskfreerate=0.0,
                                  timeframe=self.timeframe, compression=self.compression)
         self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
         self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
         self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')
 
-        print(f"Starting Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
-        self.results = self.cerebro.run()
-        final_val = self.cerebro.broker.getvalue()
-        print(f"Final Portfolio Value: {self.cerebro.broker.getvalue():.2f}")
+        # 2. 详细指标 (仅 Verbose 模式挂载，节省内存)
+        if self.verbose:
+            self.cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
 
-        if self.recorder and self.recorder.active:
-            # 复用 display_results 中的计算逻辑，或者简单提取
-            # 这里为了简洁，重新提取关键指标，你也可以重构 display_results 返回这些值
-            strat = self.results[0]
-            sharpe_analyzer = strat.analyzers.getbyname('sharpe')
-            sharpe = sharpe_analyzer.get_analysis().get('sharperatio', 0.0)
-            if sharpe is None: sharpe = 0.0
+    def _process_recorder_hooks(self, final_val):
+        """处理数据库/HTTP记录逻辑"""
+        if not (self.recorder and self.recorder.active):
+            return
 
-            drawdown_analyzer = strat.analyzers.getbyname('drawdown')
-            max_dd = drawdown_analyzer.get_analysis().max.drawdown / 100
+        # 计算概要指标用于记录
+        strat = self.results[0]
+        sharpe = strat.analyzers.sharpe.get_analysis().get('sharperatio', 0.0) or 0.0
+        max_dd = strat.analyzers.drawdown.get_analysis().max.drawdown / 100
 
-            total_ret = (final_val / self.cash) - 1
-            # 简单的年化估算，详细逻辑参考 display_results
-            start_dt = pd.to_datetime(self.start_date) if self.start_date else datetime.datetime.now()  # 简化
-            end_dt = pd.to_datetime(self.end_date) if self.end_date else datetime.datetime.now()
-            days = (end_dt - start_dt).days
-            ann_ret = 0.0
-            if days > 0:
-                ann_ret = ((1 + total_ret) ** (365.0 / days)) - 1
+        total_ret = (final_val / self.cash) - 1
 
-            self.recorder.finish_execution(
-                final_value=final_val,
-                total_return=total_ret,
-                sharpe=sharpe,
-                max_drawdown=max_dd,
-                annual_return=ann_ret
-            )
+        # 估算年化
+        start_dt = pd.to_datetime(self.start_date) if self.start_date else datetime.datetime.now()
+        end_dt = pd.to_datetime(self.end_date) if self.end_date else datetime.datetime.now()
+        days = (end_dt - start_dt).days
+        ann_ret = ((1 + total_ret) ** (365.0 / days)) - 1 if days > 0 else 0.0
 
-        # --- 替换 cerebro.plot() 为我们自己的展示函数 ---
+        self.recorder.finish_execution(
+            final_value=final_val, total_return=total_ret,
+            sharpe=sharpe, max_drawdown=max_dd, annual_return=ann_ret
+        )
+
+    def _generate_report(self):
+        """生成文字报告和图表"""
+        if not self.verbose:
+            return
+
+        # 打印详细指标
         self.display_results()
 
+        # 绘图
         if self.enable_plot:
-            print("Generating plot...")
+            self.log("Generating plot...")
             try:
                 self.cerebro.plot()
             except Exception as e:
-                # 捕获 tkinter 缺失或其他绘图错误，防止整个脚本最后报错
-                error_msg = str(e).lower()
-                if "tkinter" in error_msg or "tkagg" in error_msg:
-                    print("\n[Warning] Plotting Skipped: 'tkinter' module not found.")
-                    print("  - On Server: Use --no_plot to suppress this.")
-                    print("  - To Fix: Install python3-tk (e.g., yum install python3-tk / apt install python3-tk)")
+                err = str(e).lower()
+                if "tkinter" in err or "tkagg" in err:
+                    print("\n[Warning] Plotting Skipped: 'tkinter' missing. Use --no_plot on server.")
                 else:
                     print(f"\n[Warning] Plotting Failed: {e}")
-        else:
-            print("Plotting disabled via --no_plot.")
 
-    def get_performance_metric(self, metric_name='sharpe'):
+    def get_custom_metric(self, metric_name='sharpe'):
         """
-        供外部调用的获取回测结果接口 (专为 Optuna 设计)
+        获取特定的回测指标，用于参数优化
         """
         if not hasattr(self, 'results') or not self.results:
             return -999.0
@@ -436,18 +461,32 @@ class Backtester:
         strat = self.results[0]
 
         if metric_name == 'sharpe':
-            # 获取夏普比率
-            sharpe_analyzer = strat.analyzers.getbyname('sharpe')
-            # get_analysis() 返回字典 {'sharperatio': float}
-            s = sharpe_analyzer.get_analysis().get('sharperatio')
-            # 如果夏普计算失败(如无交易或波动为0)，返回负值惩罚
+            s = strat.analyzers.sharpe.get_analysis().get('sharperatio')
             return s if s is not None else -999.0
 
         elif metric_name == 'return':
-            # 获取总收益率
-            initial_value = self.cash
-            final_value = self.cerebro.broker.getvalue()
-            return (final_value / initial_value) - 1.0
+            return (self.cerebro.broker.getvalue() - self.cash) / self.cash
+
+        elif metric_name == 'calmar':
+            # Calmar = 年化收益 / 最大回撤
+            # 1. 获取年化收益 (近似值)
+            init_cash = self.cash
+            final_cash = self.cerebro.broker.getvalue()
+
+            # 简易年化计算
+            s_dt = pd.to_datetime(self.start_date) if self.start_date else pd.to_datetime('20000101')
+            e_dt = pd.to_datetime(self.end_date) if self.end_date else datetime.datetime.now()
+            days = (e_dt - s_dt).days or 1
+
+            total_ret = (final_cash / init_cash) - 1
+            annual_ret = (1 + total_ret) ** (365.0 / days) - 1
+
+            # 2. 获取最大回撤 (百分比，如 10% -> 0.1)
+            dd_stats = strat.analyzers.drawdown.get_analysis()
+            max_dd = dd_stats.get('max', {}).get('drawdown', 0) / 100.0
+
+            if max_dd == 0: return annual_ret * 100 # 如果没有回撤，直接返回放大的收益率作为分数
+            return annual_ret / abs(max_dd)
 
         elif metric_name == 'final_value':
             return self.cerebro.broker.getvalue()
