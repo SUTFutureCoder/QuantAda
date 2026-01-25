@@ -29,3 +29,6 @@ DB_URL = 'mysql+pymysql://root:yourpassword@localhost:3306/quant'
 
 # 参数优化实时看板端口
 OPTUNA_DASHBOARD_PORT = 8090
+
+# 年交易日，如果是加密货币请设置为365
+ANNUAL_FACTOR = 252

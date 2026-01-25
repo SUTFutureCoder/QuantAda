@@ -417,16 +417,16 @@ class OptimizationJob:
                 # 让分数连续变化，即使是负数，优化器也能找到上升方向
                 # 亏 5% (Score -0.5) 优于 亏 50% (Score -5.0)
 
-                # 权重微调：
+                # 权重微调：“盯着回撤（Calmar）和总收益（Return），几乎完全无视波动（Sharpe）” 的进攻型猛兽。
                 # Calmar: 2.0 (生存第一)
-                # Sharpe: 1.0 (平滑第二)
-                # Return: 2.0 (收益第三，不用给太高，防止大起大落)
+                # Return: 2.0 (收益第二，不用给太高，防止大起大落)
+                # Sharpe: 1.0 (平滑第三 $\sqrt{252} \approx 15.8$，因此权重除以16，防止变为保守派老头（重波动率平滑）)
 
                 # 保护逻辑：防止 infinite
                 if math.isinf(calmar): calmar = 0.0
                 if math.isinf(sharpe): sharpe = 0.0
 
-                raw_score = (calmar * 2.0) + (sharpe * 1.0) + (total_return * 2.0)
+                raw_score = (calmar * 2.0) + (total_return * 2.0) + (sharpe * 1.0 / 16)
 
                 metric_val = raw_score + penalty
 

@@ -399,7 +399,7 @@ class Backtester:
     def _init_analyzers(self):
         # 1. 基础指标 (优化器也需要)
         self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', riskfreerate=0.0,
-                                 timeframe=self.timeframe, compression=self.compression)
+                                 timeframe=self.timeframe, compression=self.compression, factor=config.ANNUAL_FACTOR, annualize=True)
         self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
         self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
         self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')

@@ -24,7 +24,7 @@
   - **启发式并行贝叶斯优化器 (Heuristic-Guided Bayesian Optimizer)**
     - **学术级算法**：基于 TPE (Tree-structured Parzen Estimator) 算法，引入 `Constant-Liar` 采样策略与哈希去重机制，解决多核环境下的“并发踩踏”问题。
     - **智能算力评估**：拒绝盲目穷举。框架根据参数空间复杂度（熵）与硬件 CPU 核数，通过非线性公式动态推导最佳尝试次数 ($N_{trials}$)。
-    - **极速并行**：默认调用所有 CPU 核心，内置 Windows 文件锁管理与自动降级机制。
+    - **极速并行**：默认调用所有 CPU 核心，飞行模式离线运行，内置 Windows 文件锁管理与自动降级机制。
   
 
   - **科学的评价体系 (Mix Score)**
