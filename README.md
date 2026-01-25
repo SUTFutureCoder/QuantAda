@@ -24,7 +24,7 @@
   - **启发式并行贝叶斯优化器 (Heuristic-Guided Bayesian Optimizer)**
     - **学术级算法**：基于 TPE (Tree-structured Parzen Estimator) 算法，引入 `Constant-Liar` 采样策略与哈希去重机制，解决多核环境下的“并发踩踏”问题。
     - **智能算力评估**：拒绝盲目穷举。框架根据参数空间复杂度（熵）与硬件 CPU 核数，通过非线性公式动态推导最佳尝试次数 ($N_{trials}$)。
-    - **极速并行**：支持 `n_jobs=-1` 调用所有 CPU 核心，内置 Windows 文件锁管理与自动降级机制。
+    - **极速并行**：默认调用所有 CPU 核心，内置 Windows 文件锁管理与自动降级机制。
   
 
   - **科学的评价体系 (Mix Score)**
@@ -35,7 +35,7 @@
   - **全自动交互式看板 (Zero-Config Dashboard)**
     - **开箱即用**：优化任务启动时，框架会自动在后台启动轻量级 Web 服务器，并弹出浏览器展示实时的 Pareto 前沿面、参数重要性分析 (Feature Importance) 及高维参数坐标图。
     - **工程级静默**：通过底层 Monkey Patch 技术屏蔽了 Web 服务的繁杂日志，让您的终端只专注于显示优化进度与核心指标，实现“沉浸式”调参体验。
-    - **无缝协作**：支持 `--dashboard_port` 自定义端口，兼容无头服务器 (Headless Server) 环境，便于通过 SSH 隧道远程监控算力集群。
+    - **无缝协作**：支持配置自定义端口，兼容无头服务器 (Headless Server) 环境，便于通过 SSH 隧道远程监控算力集群。
 
 
   - **交易全记录**
@@ -45,6 +45,7 @@
   - **可插拔风控组件 (Pluggable Risk Control)**
     - **链式防御**：支持在命令行动态挂载多个风控模块（如 `--risk stop_loss,trend_protection`），形成多重防御体系。
     - **独立配置**：风控逻辑与策略逻辑完全解耦，无需修改策略代码即可为不同账户应用不同的止损/止盈/熔断规则。
+
 
 ![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
 
@@ -304,6 +305,9 @@ QuantAda/
 
 ### 基于Optuna优化策略参数
 ![optimizer](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optimizer.png?raw=true)  
+
+### 实时Optuna优化进度看板
+![optuna-dashboard](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optuna-dashboard.png?raw=true)  
 
 
 ## 免责声明
