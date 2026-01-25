@@ -15,6 +15,12 @@
     - 得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `Backtrader` 回测引擎或 **掘金量化 (MyQuant)** 等实盘环境中。支持全球各大券商独立配置特殊规则。
   
 
+  - **模块化与插件化 (SDK Mode)**
+    - **数据层**：责任链模式管理多数据源 (Tushare/AkShare/CSV)，支持自动增量更新与本地缓存。
+    - **策略层**：指标计算 (`common/indicators`) 抽象为公共模块，集成 MyTT、Ta-Lib。
+    - **工程分离**：支持通过 `PYTHONPATH` 引用外部策略库，实现业务代码与框架核心的物理隔离。
+  
+
   - **启发式并行贝叶斯优化器 (Heuristic-Guided Bayesian Optimizer)**
     - **学术级算法**：基于 TPE (Tree-structured Parzen Estimator) 算法，引入 `Constant-Liar` 采样策略与哈希去重机制，解决多核环境下的“并发踩踏”问题。
     - **智能算力评估**：拒绝盲目穷举。框架根据参数空间复杂度（熵）与硬件 CPU 核数，通过非线性公式动态推导最佳尝试次数 ($N_{trials}$)。
@@ -26,14 +32,19 @@
     - **地狱模式训练**：强制推荐 **“熊市训练 (In-Sample) + 牛市验证 (Out-of-Sample)”** 的切分模式，验证策略的抗脆弱性。
   
 
-  - **模块化与插件化 (SDK Mode)**
-    - **数据层**：责任链模式管理多数据源 (Tushare/AkShare/CSV)，支持自动增量更新与本地缓存。
-    - **策略层**：指标计算 (`common/indicators`) 抽象为公共模块，集成 MyTT、Ta-Lib。
-    - **工程分离**：支持通过 `PYTHONPATH` 引用外部策略库，实现业务代码与框架核心的物理隔离。
-  
+  - **全自动交互式看板 (Zero-Config Dashboard)**
+    - **开箱即用**：优化任务启动时，框架会自动在后台启动轻量级 Web 服务器，并弹出浏览器展示实时的 Pareto 前沿面、参数重要性分析 (Feature Importance) 及高维参数坐标图。
+    - **工程级静默**：通过底层 Monkey Patch 技术屏蔽了 Web 服务的繁杂日志，让您的终端只专注于显示优化进度与核心指标，实现“沉浸式”调参体验。
+    - **无缝协作**：支持 `--dashboard_port` 自定义端口，兼容无头服务器 (Headless Server) 环境，便于通过 SSH 隧道远程监控算力集群。
+
 
   - **交易全记录**
     支持将每一笔交易流水、资金快照及最终绩效自动持久化到 MySQL/SQLite 数据库，支持幂等写入，便于大规模回测数据的沉淀与分析。
+
+
+  - **可插拔风控组件 (Pluggable Risk Control)**
+    - **链式防御**：支持在命令行动态挂载多个风控模块（如 `--risk stop_loss,trend_protection`），形成多重防御体系。
+    - **独立配置**：风控逻辑与策略逻辑完全解耦，无需修改策略代码即可为不同账户应用不同的止损/止盈/熔断规则。
 
 ![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
 

@@ -12,6 +12,7 @@ cryptography
 numpy<2.4.0
 numba
 optuna
+optuna-dashboard
 scikit-learn
 plotly
 kaleido

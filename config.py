@@ -26,3 +26,6 @@ DB_ENABLED = False
 # 示例 (MySQL): 'mysql+pymysql://root:123456@localhost:3306/quantada_db'
 # 示例 (SQLite): 'sqlite:///quantada_logs.db'
 DB_URL = 'mysql+pymysql://root:yourpassword@localhost:3306/quant'
+
+# 参数优化实时看板端口
+OPTUNA_DASHBOARD_PORT = 8090

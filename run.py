@@ -1,5 +1,6 @@
 import argparse
 import ast
+import datetime
 import logging
 import os
 import sys
@@ -188,7 +189,8 @@ if __name__ == '__main__':
 
         if not args.study_name:
             # 提取策略名，并将 '.' 替换为 '_' 以适配文件名规范
-            args.study_name = f"study_{pascal_to_snake(args.strategy)}"
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            args.study_name = f"study_{pascal_to_snake(args.strategy)}_{timestamp}"
             print(f"[System] Auto-generated study name: {args.study_name}")
 
         # --- 变更点 2: 显式关闭日志 (从 optimizer.py 移至此处) ---

@@ -15,9 +15,14 @@ QuantAda 启发式并行贝叶斯优化器
 """
 
 import copy
+import datetime
 import math
 import sys
 import os
+import subprocess
+import threading
+import webbrowser
+import time
 
 import optuna
 import optuna.visualization as vis
@@ -43,6 +48,12 @@ try:
     HAS_JOURNAL = True
 except ImportError:
     HAS_JOURNAL = False
+
+try:
+    from optuna_dashboard import run_server
+    HAS_DASHBOARD = True
+except ImportError:
+    HAS_DASHBOARD = False
 
 class OptimizationJob:
     def __init__(self, args, fixed_params, opt_params_def, risk_params):
@@ -172,6 +183,76 @@ class OptimizationJob:
         else:
             print("Warning: No split method defined. Running optimization on FULL dataset.")
             return self.raw_datas, {}, (self.args.start_date, self.args.end_date), (None, None)
+
+    def _launch_dashboard(self, log_file, port=8080):
+        """
+        [线程版] 直接在代码中运行 Optuna Dashboard
+        """
+        if not HAS_DASHBOARD:
+            print("[Warning] 'optuna-dashboard' not installed. Skipping.")
+            return
+
+        import logging
+        import http.server
+        import wsgiref.simple_server
+
+        # 直接覆盖标准库 http.server 的日志方法，彻底消除访问日志
+        def silent_log_message(self, format, *args):
+            return  # 什么都不做，直接返回
+
+        # 覆盖 http.server 的日志方法 (bottle 默认 server 基于此)
+        http.server.BaseHTTPRequestHandler.log_message = silent_log_message
+        # 同时也覆盖 wsgiref 的日志方法 (双重保险)
+        wsgiref.simple_server.WSGIRequestHandler.log_message = silent_log_message
+
+        print("\n" + "=" * 60)
+        print(">>> STARTING DASHBOARD (Thread Mode) <<<")
+        print("=" * 60)
+
+        def start_server():
+            # 静默日志
+            loggers_to_silence = [
+                "optuna",
+                "optuna_dashboard",
+                "sqlalchemy",
+                "bottle",
+                "waitress",
+                "werkzeug"
+            ]
+            for name in loggers_to_silence:
+                logging.getLogger(name).setLevel(logging.ERROR)
+
+            # 1. 在线程内部初始化存储对象
+            # 这样可以确保它读取的是最新的文件
+            try:
+                storage = JournalStorage(JournalFileBackendCls(log_file))
+
+                # 2. 启动服务 (这是一个阻塞操作，会一直运行)
+                run_server(storage, host="127.0.0.1", port=port)
+            except OSError as e:
+                if "Address already in use" in str(e):
+                    print(f"\n[Error] Port {port} is occupied! Dashboard failed to start.")
+                else:
+                    print(f"\n[Error] Dashboard thread failed: {e}")
+            except Exception as e:
+                print(f"\n[Error] Dashboard crashed: {e}")
+
+        # 3. 创建并启动守护线程
+        t = threading.Thread(target=start_server, daemon=True)
+        t.start()
+
+        dashboard_url = f"http://127.0.0.1:{port}"
+        print(f"[Success] Dashboard is running at: {dashboard_url}")
+
+        # 4. 尝试打开浏览器
+        try:
+            time.sleep(1.5)
+            webbrowser.open(dashboard_url)
+        except:
+            pass
+
+        print("[INFO] Dashboard running in background thread.")
+        print("=" * 60 + "\n")
 
     def _estimate_n_trials(self):
         """
@@ -327,30 +408,31 @@ class OptimizationJob:
                 total_trades = trade_analysis.get('total', {}).get('total', 0)
 
                 # 2. 熔断/惩罚机制 (Sanity Check)
-                # 交易次数太少说明样本不足，可能是运气
-                if total_trades < 15:
-                    print(f"total_trades:{total_trades} < 15 直接赋予极低惩罚分值，引导优化器避开这种参数")
-                    metric_val = -5.0
-                elif calmar < 0.2:
-                    print(f"calmar:{calmar} < 0.2 抗风险能力太差，直接淘汰")
-                    metric_val = -1.0
-                else:
-                    # 3. 混合评分公式 (Blended Score)
-                    # 权重分配：
-                    # Calmar (1.0): 保证生存，避免大幅回撤
-                    # Sharpe (1.0): 保证资金曲线的平滑度
-                    # Return (5.0): 适当放大收益率的权重 (例如 50% 收益 = 0.5 * 5 = 2.5分)
+                # 交易次数过少的惩罚 (Penalty)
+                # 只有这个是硬伤，需要重罚，因为样本太少没有统计意义
+                penalty = 0.0
+                if total_trades < 10:
+                    penalty = -10.0
 
-                    # 示例得分：
-                    # A: Calmar 3.0, Sharpe 2.0, Ret 0.4 (40%) -> 3 + 2 + 2 = 7.0 (稳健型)
-                    # B: Calmar 0.5, Sharpe 0.8, Ret 0.8 (80%) -> 0.5 + 0.8 + 4.0 = 5.3 (激进但风险大)
-                    # C: Calmar 0.1, Sharpe 0.1, Ret 1.0 (100%) -> 熔断 -> -1.0
+                # 让分数连续变化，即使是负数，优化器也能找到上升方向
+                # 亏 5% (Score -0.5) 优于 亏 50% (Score -5.0)
 
-                    metric_val = (calmar * 1.0) + (sharpe * 1.0) + (total_return * 5.0)
+                # 权重微调：
+                # Calmar: 2.0 (生存第一)
+                # Sharpe: 1.0 (平滑第二)
+                # Return: 2.0 (收益第三，不用给太高，防止大起大落)
 
-                # =========================================================
-                # 传统模式 (单独指定 calmar, sharpe 等)
-                # =========================================================
+                # 保护逻辑：防止 infinite
+                if math.isinf(calmar): calmar = 0.0
+                if math.isinf(sharpe): sharpe = 0.0
+
+                raw_score = (calmar * 2.0) + (sharpe * 1.0) + (total_return * 2.0)
+
+                metric_val = raw_score + penalty
+
+            # =========================================================
+            # 传统模式 (单独指定 calmar, sharpe 等)
+            # =========================================================
             else:
                 metric_val = bt_instance.get_custom_metric(self.args.metric)
                 # 回退逻辑
@@ -411,12 +493,14 @@ class OptimizationJob:
         storage = None
         n_jobs = getattr(self.args, 'n_jobs', 1)
 
+        log_file = None
+
         if n_jobs != 1:
             if HAS_JOURNAL:
                 log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
                 os.makedirs(log_dir, exist_ok=True)
 
-                log_file = os.path.join(log_dir, f"journal_{self.args.study_name}.log")
+                log_file = os.path.join(log_dir, f"{self.args.study_name}.log")
 
                 try:
                     # 尝试清除旧文件和锁
@@ -500,6 +584,9 @@ class OptimizationJob:
         if n_trials is None:
             n_trials = self._estimate_n_trials()
             print(f"[Optimizer] Auto-inferred n_trials: {n_trials} (based on param complexity)")
+
+        if log_file and os.path.exists(log_file):
+            self._launch_dashboard(log_file, port=config.OPTUNA_DASHBOARD_PORT)
 
         print(f"\n--- Starting Optimization ({n_trials} trials, {n_jobs} parallel jobs) ---")
 
