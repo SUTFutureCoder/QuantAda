@@ -129,6 +129,11 @@ class BaseLiveBroker(ABC):
                 max_shares = cash / (price * 1.01)
                 shares = min(shares, max_shares)
 
+                # 如果降级后股数变为0，打印原因
+                if shares < 1:  # 假设最小买入单位是1
+                    print(
+                        f"[Broker Warning] Buy {data._name} skipped. Cash ({cash:.2f}) insufficient for price {price:.2f}.")
+
         # 取整逻辑
         if lot_size > 1:
             shares = int(shares // lot_size) * lot_size

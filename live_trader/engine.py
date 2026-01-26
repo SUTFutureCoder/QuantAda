@@ -1,4 +1,5 @@
 import sys
+import time
 from types import SimpleNamespace
 
 import pandas as pd
@@ -386,10 +387,20 @@ def on_order_status_callback(context, order):
             if order_proxy.is_sell() and order_proxy.executed.size > 0:
                 # 再次确认不是撤单导致的 size>0 (虽然撤单通常 size=0，但为了严谨)
                 if not order_proxy.is_canceled() and not order_proxy.is_rejected():
+                    print("[Engine] Sell filled. Waiting for cash settlement (1s)...")
+                    time.sleep(1.0)  # 强制等待柜台资金刷新
+
                     if hasattr(broker, 'sync_balance'):
                         broker.sync_balance()
+                        print(f"[Debug] Cash after sync: {broker.get_cash():.2f}")
+
                     if hasattr(broker, 'process_deferred_orders'):
-                        broker.process_deferred_orders()
+                        try:
+                            broker.process_deferred_orders()
+                        except Exception as e:
+                            print(f"[Error] Failed to process deferred orders: {e}")
+                            import traceback
+                            traceback.print_exc()
 
         except RuntimeError as re:
             # 专门捕获 BaseBroker 抛出的死锁熔断异常
