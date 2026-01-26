@@ -5,7 +5,7 @@ DEFAULT_LOT_SIZE = 100
 DATA_PATH = '.data'
 
 # 缓存数据
-CACHE_DATA = True
+CACHE_DATA = False
 
 # 是否打印详细交易日志
 LOG = True
