@@ -101,6 +101,15 @@ class GmBrokerAdapter(BaseLiveBroker):
         super().__init__(context, cash_override, commission_override)
         self.is_live = self.is_live_mode(context)  # 保存当前是否为实盘
 
+    # 实盘引擎调用此方法设置当前时间时，我们将其转换为无时区的北京时间
+    # 这样 engine.py 中对比 df.index (无时区) 和 current_dt (无时区) 就不会报错了
+    def set_datetime(self, dt):
+        if dt is not None and dt.tzinfo is not None:
+            # 转为北京时间并剥离时区
+            dt = dt.tz_convert('Asia/Shanghai').tz_localize(None)
+
+        super().set_datetime(dt)
+
     @staticmethod
     def is_live_mode(context) -> bool:
         """掘金平台实盘模式的具体判断逻辑"""

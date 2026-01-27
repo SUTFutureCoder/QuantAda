@@ -84,10 +84,29 @@ class DataManager:
         # 【最终切片】确保返回的数据在请求的日期范围内
         if final_df is not None and not final_df.empty:
             print(f"Filtering final data from {start_date} to {end_date}...")
+
+            # 辅助函数：将输入的日期字符串对齐到 df 索引的时区，防止比较报错
+            def align_date(dt_input, index):
+                dt = pd.to_datetime(dt_input)
+                if index.tz is not None:
+                    # 如果索引有时区，输入时间也加上同样的时区
+                    if dt.tz is None:
+                        return dt.tz_localize(index.tz)
+                    else:
+                        return dt.tz_convert(index.tz)
+                else:
+                    # 如果索引无时区，输入时间也去掉时区
+                    if dt.tz is not None:
+                        return dt.tz_convert(None)
+                return dt
+
             if start_date:
-                final_df = final_df[final_df.index >= pd.to_datetime(start_date)]
+                start_dt = align_date(start_date, final_df.index)
+                final_df = final_df[final_df.index >= start_dt]
             if end_date:
-                final_df = final_df[final_df.index <= pd.to_datetime(end_date)]
+                end_dt = align_date(end_date, final_df.index)
+                final_df = final_df[final_df.index <= end_dt]
+
             return final_df
 
         print(f"Error: All data providers failed for symbol {symbol}.")
@@ -122,6 +141,11 @@ class DataManager:
                                                             timeframe, compression)
 
                 if df_incremental is not None and not df_incremental.empty:
+                    # 合并前检查时区不一致。CSV读出来通常是Naive，新数据是Aware
+                    if df_local.index.tz is None and df_incremental.index.tz is not None:
+                        # 将本地旧数据对齐到新数据的时区
+                        df_local.index = df_local.index.tz_localize(df_incremental.index.tz)
+
                     self._append_to_cache(df_incremental, symbol, timeframe, compression)
                     return pd.concat([df_local, df_incremental])
                 else:
@@ -180,7 +204,7 @@ class DataManager:
         except Exception as e:
             print(f"Failed to cache data for {symbol}: {e}")
 
-    def _append_to_cache(self, df: pd.DataFrame, symbol: str):
+    def _append_to_cache(self, df: pd.DataFrame, symbol: str, timeframe: str = 'Days', compression: int = 1):
         """将增量DataFrame追加到现有CSV文件的末尾"""
         if not CACHE_DATA: return
         csv_filepath = self._get_cache_filepath(symbol, timeframe, compression)

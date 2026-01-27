@@ -126,7 +126,7 @@ if __name__ == '__main__':
                         help="策略参数 (JSON字符串, 例如: \"{\'selectTopK\': 2, \'target_buffer\': 0.95}\")")
     parser.add_argument('--selection', type=str, default=None, help="选股器文件名 (位于selectors目录 或 自定义包路径)")
     parser.add_argument('--data_source', type=str, default=None,
-                        help="指定数据源 (例如: csv akshare tushare sxsc_tushare)")
+                        help="指定数据源 (例如: csv akshare tushare sxsc_tushare gm)")
     parser.add_argument('--symbols', type=str, default='SHSE.510300', help="以,分割的回测标的代码 (默认: SHSE.510300)")
     parser.add_argument('--cash', type=float, default=100000.0, help="初始资金 (默认: 100000.0)")
     parser.add_argument('--commission', type=float, default=0, help="手续费率，例如：万1.5为:0.00015 (默认：0)")
@@ -144,7 +144,8 @@ if __name__ == '__main__':
     parser.add_argument('--desc', type=str, default=None,
                         help="本次回测的描述信息 (默认为不带 .py 的策略文件名)")
     parser.add_argument('--no_plot', action='store_true', help="在服务器环境下禁用绘图")
-
+    parser.add_argument('--config', type=str, default='{}',
+                        help="覆盖config.py配置 (JSON字符串, 例如: \"{'GM_TOKEN':'xxx','LOG':False}\")")
     # Optimizer 专用参数
     parser.add_argument('--opt_params', type=str, default=None, help="[优化模式] 优化参数空间定义 JSON")
     parser.add_argument('--n_trials', type=int, default=None, help="[优化模式] 尝试次数 (默认: 自动推断)")
@@ -159,6 +160,15 @@ if __name__ == '__main__':
 
     # 3. 解析参数
     args = parser.parse_args()
+
+    # 覆盖config.py
+    if args.config:
+        override_config = ast.literal_eval(args.config)
+        print(f"\n--- Applying Config Overrides ---")
+        for key, value in override_config.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+                print(f"  [Config] Overriding {key} = {value}")
 
     # 处理 desc 默认值
     description = args.desc

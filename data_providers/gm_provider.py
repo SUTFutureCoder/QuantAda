@@ -62,9 +62,15 @@ class GmDataProvider(BaseDataProvider):
                 df.rename(columns={'eob': 'datetime'}, inplace=True)
                 df['datetime'] = pd.to_datetime(df['datetime'])
                 df.set_index('datetime', inplace=True)
-                # 统一转为无时区
+
+                # 转为北京时间，归一化，然后剥离时区信息（变成 Naive，但时间值是北京时间）
                 if df.index.tz is not None:
-                    df.index = df.index.tz_convert(None)
+                    df.index = df.index.tz_convert('Asia/Shanghai')
+                else:
+                    df.index = df.index.tz_localize('UTC').tz_convert('Asia/Shanghai')
+
+                # 归一化到 00:00 并移除时区对象，解决 Backtrader 比较报错
+                df.index = df.index.normalize().tz_localize(None)
 
             # 3. 粘合实时数据 (仅限日线)
             if freq == '1d':
@@ -107,11 +113,14 @@ class GmDataProvider(BaseDataProvider):
         tick_time = tick['created_at']
         if isinstance(tick_time, str):
             tick_time = pd.to_datetime(tick_time)
+
         if tick_time.tzinfo is not None:
-            tick_time = tick_time.tz_convert(None)
+            tick_time = tick_time.tz_convert('Asia/Shanghai')
+        else:
+            tick_time = tick_time.tz_localize('UTC').tz_convert('Asia/Shanghai')
 
         # 日线归一化到 00:00:00
-        bar_time = tick_time.normalize()
+        bar_time = tick_time.normalize().tz_localize(None)
 
         # 判断是否需要拼接
         should_append = False
