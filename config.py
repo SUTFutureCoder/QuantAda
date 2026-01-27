@@ -18,6 +18,9 @@ TUSHARE_TOKEN = 'your_tushare_token_here'
 # 用于演示快速接入数据源
 SXSC_TUSHARE_TOKEN = 'your_sxsc_tushare_token_here'
 
+# 掘金API Token
+GM_TOKEN = 'your_gm_token_here'
+
 # 是否开启数据库记录
 DB_ENABLED = False
 

@@ -2,16 +2,17 @@ import datetime
 
 import pandas as pd
 
-from .base_broker import BaseLiveBroker, BaseLiveDataProvider, BaseOrderProxy
+from data_providers.gm_provider import GmDataProvider as UnifiedGmDataProvider
+from .base_broker import BaseLiveBroker, BaseOrderProxy
 
 try:
-    from gm.api import history, order_target_percent, order_volume, current, get_cash, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
+    from gm.api import order_target_percent, order_volume, current, get_cash, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
         OrderStatus_New, OrderStatus_PartiallyFilled, OrderStatus_Filled, \
         OrderStatus_Canceled, OrderStatus_Rejected, OrderStatus_PendingNew, \
         OrderSide_Buy, OrderSide_Sell
 except ImportError:
     print("Warning: 'gm' module not found. GmAdapter will not be available.")
-    history = order_target_percent = get_cash = OrderType_Market = MODE_BACKTEST = None
+    order_target_percent = get_cash = OrderType_Market = MODE_BACKTEST = None
 
 
 class GmOrderProxy(BaseOrderProxy):
@@ -87,117 +88,11 @@ class GmOrderProxy(BaseOrderProxy):
     def is_sell(self) -> bool:
         return hasattr(self.platform_order, 'side') and self.platform_order.side == OrderSide_Sell
 
-
-class GmDataProvider(BaseLiveDataProvider):
-    """掘金平台的数据提供者实现"""
-
-    def _map_gm_frequency(self, timeframe: str, compression: int) -> str:
-        """将Backtrader时间框架映射到掘金的frequency参数"""
-        if timeframe == 'Days':
-            if compression == 1:
-                return '1d'
-            else:
-                #
-                print(f"Warning: GM Provider: {compression} Days timeframe not directly supported. Using '1d'.")
-                return '1d'
-
-        if timeframe == 'Minutes':
-            #
-            supported_compressions = [1, 5, 15, 30, 60]
-            if compression in supported_compressions:
-                return f'{compression}m'
-            else:
-                print(f"Warning: GM Provider: Unsupported compression {compression} for Minutes. Defaulting to '60m'.")
-                return '60m'
-
-        if timeframe == 'Weeks':
-            return '1w'
-        if timeframe == 'Months':
-            return '1M'
-
-        print(f"Warning: GM Provider: Unsupported timeframe {timeframe}. Defaulting to '1d'.")
-        return '1d'
-
+class GmDataProvider(UnifiedGmDataProvider):
     def get_history(self, symbol: str, start_date: str, end_date: str,
                     timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
-        if history is None:
-            raise ImportError("'gm' module is required for GmDataProvider.")
-
-        frequency = self._map_gm_frequency(timeframe, compression)
-
-        df = history(symbol=symbol, frequency=frequency, start_time=start_date, end_time=end_date,
-                     fields='open,high,low,close,volume,eob', adjust=1, df=True)
-        if df.empty: return df
-        df.rename(columns={'eob': 'datetime'}, inplace=True)
-        df.set_index('datetime', inplace=True)
-        df.index = pd.to_datetime(df.index)
-
-        if frequency == '1d':
-            try:
-                ticks = current(symbols=symbol)
-                if ticks:
-                    tick = ticks[0]
-                    tick_price = tick['price']
-
-                    # tick['created_at'] 通常已经是带时区的 datetime 对象
-                    tick_time = tick['created_at']
-                    if isinstance(tick_time, str):
-                        tick_time = pd.to_datetime(tick_time)
-
-                    # 获取日期用于比较 (date() 对象是无时区的，可以直接比)
-                    tick_date = tick_time.date() if hasattr(tick_time, 'date') else tick_time.date()
-
-                    # 构造当日 Bar
-                    open_p = tick['open'] if tick['open'] > 0 else tick_price
-                    high_p = tick['high'] if tick['high'] > 0 else tick_price
-                    low_p = tick['low'] if tick['low'] > 0 else tick_price
-
-                    # 先创建一个初始 DataFrame
-                    today_bar = pd.DataFrame({
-                        'open': [open_p],
-                        'high': [high_p],
-                        'low': [low_p],
-                        'close': [tick_price],
-                        'volume': [tick['cum_volume']],
-                        'datetime': [tick_time]  # 直接使用原始带时区时间，或后续处理
-                    })
-                    today_bar.set_index('datetime', inplace=True)
-
-                    # 【核心修正】：对齐时区 (Timezone Alignment)
-                    if not df.empty:
-                        # 获取历史数据的时区
-                        target_tz = df.index.tz
-
-                        if target_tz is not None:
-                            # 如果 today_bar 也是带时区的，则转换；如果是 naive 的，则本地化
-                            if today_bar.index.tz is None:
-                                today_bar.index = today_bar.index.tz_localize(target_tz)
-                            else:
-                                today_bar.index = today_bar.index.tz_convert(target_tz)
-
-                        # 归一化时间到 00:00:00 (保持时区不变)
-                        # 掘金历史数据通常是 00:00:00+08:00
-                        today_bar.index = today_bar.index.normalize()
-
-                    # --- 拼接判断 ---
-                    should_append = False
-                    if df.empty:
-                        should_append = True
-                    else:
-                        # 比较日期 (使用 .date() 安全比较)
-                        last_hist_date = df.index[-1].date()
-                        if tick_date > last_hist_date:
-                            should_append = True
-
-                    if should_append:
-                        df = pd.concat([df, today_bar])
-                        # print(f"[Data] Stitched real-time bar for {symbol} (TZ-Aware)")
-
-            except Exception as e:
-                print(f"[GmDataProvider] Warning: Failed to stitch real-time data for {symbol}: {e}")
-
-        return df
-
+        # 直接透传调用父类的 get_data
+        return self.get_data(symbol, start_date, end_date, timeframe, compression)
 
 class GmBrokerAdapter(BaseLiveBroker):
     """掘金平台的交易执行器实现"""
