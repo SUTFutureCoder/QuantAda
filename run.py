@@ -64,7 +64,8 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
             end_date=end_date,
             specified_sources=data_source,
             timeframe=timeframe,
-            compression=compression
+            compression=compression,
+            refresh=args.refresh
         )
         if df is not None and not df.empty:
             datas[symbol] = df
@@ -144,6 +145,7 @@ if __name__ == '__main__':
     parser.add_argument('--desc', type=str, default=None,
                         help="本次回测的描述信息 (默认为不带 .py 的策略文件名)")
     parser.add_argument('--no_plot', action='store_true', help="在服务器环境下禁用绘图")
+    parser.add_argument('--refresh', action='store_true', help="强制刷新数据 (忽略缓存，重新下载并覆盖)")
     parser.add_argument('--config', type=str, default='{}',
                         help="覆盖config.py配置 (JSON字符串, 例如: \"{'GM_TOKEN':'xxx','LOG':False}\")")
     # Optimizer 专用参数

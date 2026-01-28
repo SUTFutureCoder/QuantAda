@@ -58,7 +58,7 @@ class DataManager:
         return discovered_providers
 
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                 specified_sources: str = None, timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
+                 specified_sources: str = None, timeframe: str = 'Days', compression: int = 1, refresh: bool = False) -> pd.DataFrame:
         """
         智能获取数据。
         - 如果指定了 specified_sources，则按指定顺序尝试。
@@ -78,8 +78,8 @@ class DataManager:
 
         # 路径二: 执行默认的责任链逻辑
         else:
-            print("--- Using default data provider chain (with incremental update) ---")
-            final_df = self._get_data_with_incremental_update(symbol, start_date, end_date, timeframe, compression)
+            print(f"--- Using default data provider chain (Refresh={refresh}) ---")
+            final_df = self._get_data_smart(symbol, start_date, end_date, timeframe, compression, refresh)
 
         # 【最终切片】确保返回的数据在请求的日期范围内
         if final_df is not None and not final_df.empty:
@@ -112,51 +112,29 @@ class DataManager:
         print(f"Error: All data providers failed for symbol {symbol}.")
         return None
 
-    def _get_data_with_incremental_update(self, symbol, start_date, end_date, timeframe: str = 'Days', compression: int = 1):
-        """默认的获取数据逻辑，包含检查和更新本地缓存。"""
+    def _get_data_smart(self, symbol, start_date, end_date, timeframe: str, compression: int, refresh: bool):
         csv_provider = self.provider_map.get('csv')
         online_providers = [
             p for p in self.providers
             if p.__class__.__name__.replace('DataProvider', '').lower() != 'csv'
         ]
 
-        # 如果请求的不是日线，则跳过复杂的增量更新，直接从网络获取
-        if timeframe != 'Days' or compression != 1:
-            print(f"Non-daily timeframe requested ({compression} {timeframe}). Bypassing incremental cache.")
-            return self._fetch_from_providers(symbol, start_date, end_date, online_providers,
-                                              timeframe, compression)
+        # 1. 如果是非日线，或者是强制刷新模式 -> 直接走网络
+        if refresh or not csv_provider:
+            if refresh:
+                print(f"Force refresh requested. Bypassing cache for {symbol}...")
 
-        # 1. 尝试从本地CSV加载完整数据以检查时效性
+            return self._fetch_from_providers(symbol, start_date, end_date, online_providers, timeframe, compression)
+
+        # 2. 默认模式：尝试读取缓存
         df_local = csv_provider.get_data(symbol, None, None, timeframe, compression) if csv_provider else None
 
         if df_local is not None and not df_local.empty:
-            last_date_in_csv = df_local.index[-1]
-            last_trading_day = pd.to_datetime((datetime.today() - BDay(1)).date())
+            print("Local cache found. Using it (add --refresh to force update).")
+            return df_local
 
-            # 2. 如果数据陈旧，获取增量数据并合并
-            if last_date_in_csv < last_trading_day:
-                print(f"Local data is stale. Fetching incremental data...")
-                incremental_start_date = (last_date_in_csv + BDay(1)).strftime('%Y%m%d')
-                df_incremental = self._fetch_from_providers(symbol, incremental_start_date, end_date, online_providers,
-                                                            timeframe, compression)
-
-                if df_incremental is not None and not df_incremental.empty:
-                    # 合并前检查时区不一致。CSV读出来通常是Naive，新数据是Aware
-                    if df_local.index.tz is None and df_incremental.index.tz is not None:
-                        # 将本地旧数据对齐到新数据的时区
-                        df_local.index = df_local.index.tz_localize(df_incremental.index.tz)
-
-                    self._append_to_cache(df_incremental, symbol, timeframe, compression)
-                    return pd.concat([df_local, df_incremental])
-                else:
-                    print("Warning: Failed to fetch incremental data. Using stale local data.")
-                    return df_local
-            else:
-                print("Local data is up-to-date.")
-                return df_local
-
-        # 3. 如果本地无数据，进行全量下载
-        print("Local data not found or empty. Attempting full download...")
+        # 3. 缓存不存在 -> 走网络
+        print("Local cache not found. Attempting download...")
         return self._fetch_from_providers(symbol, start_date, end_date, online_providers, timeframe, compression)
 
     def _fetch_from_providers(self, symbol, start_date, end_date, providers,
@@ -182,37 +160,13 @@ class DataManager:
                 continue
         return None
 
-    def _get_cache_filepath(self, symbol: str, timeframe: str, compression: int) -> str:
-        """辅助函数：根据时间框架生成唯一的缓存文件名"""
-        # 日线使用旧文件名，保持兼容
-        if timeframe == 'Days' and compression == 1:
-            tf_str = ""
-        else:
-            tf_str = f"_{timeframe}_{compression}"
-
-        csv_filename = f"{symbol.replace('.', '_')}{tf_str}.csv"
-        return os.path.join(self.data_path, csv_filename)
-
     def _cache_data(self, df: pd.DataFrame, symbol: str, timeframe: str = 'Days', compression: int = 1):
         """将DataFrame完整写入CSV文件（覆盖）"""
         if not CACHE_DATA: return
         if not os.path.exists(self.data_path): os.makedirs(self.data_path)
-        csv_filepath = self._get_cache_filepath(symbol, timeframe, compression)
+        csv_filepath = CsvDataProvider.get_cache_filepath(self.data_path, symbol, timeframe, compression)
         try:
-            df.to_csv(csv_filepath)
+            df.to_csv(csv_filepath, mode='w')
             print(f"Data for {symbol} cached to {csv_filepath}")
         except Exception as e:
             print(f"Failed to cache data for {symbol}: {e}")
-
-    def _append_to_cache(self, df: pd.DataFrame, symbol: str, timeframe: str = 'Days', compression: int = 1):
-        """将增量DataFrame追加到现有CSV文件的末尾"""
-        if not CACHE_DATA: return
-        csv_filepath = self._get_cache_filepath(symbol, timeframe, compression)
-        if not os.path.exists(csv_filepath):
-            self._cache_data(df, symbol)
-            return
-        try:
-            df.to_csv(csv_filepath, mode='a', header=False)
-            print(f"Incremental data for {symbol} appended to cache file.")
-        except Exception as e:
-            print(f"Failed to append data for {symbol}: {e}")
