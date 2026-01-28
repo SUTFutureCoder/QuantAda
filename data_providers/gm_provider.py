@@ -1,6 +1,7 @@
-from datetime import date, datetime
+from datetime import datetime
 
 import pandas as pd
+
 try:
     from gm.api import history, set_token, current
 except ImportError:

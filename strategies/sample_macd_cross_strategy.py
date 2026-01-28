@@ -11,6 +11,7 @@ class SampleMacdCrossStrategy(BaseStrategy):
         'exitbars': 5,
     }
 
+    # !!!注意，初始化方法只会执行一次，如果将计算逻辑写到这里实盘会有不重新计算的风险，请抽象计算方法并放置于next中!!!
     def init(self):
         """
         初始化指标。

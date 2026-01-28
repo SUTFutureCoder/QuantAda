@@ -2,10 +2,8 @@ import importlib
 import inspect
 import os
 from collections import OrderedDict
-from datetime import datetime
 
 import pandas as pd
-from pandas.tseries.offsets import BDay
 
 from config import DATA_PATH, CACHE_DATA
 from .base_provider import BaseDataProvider

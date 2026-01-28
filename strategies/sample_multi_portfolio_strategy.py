@@ -7,6 +7,7 @@ class SampleMultiPortfolioStrategy(BaseStrategy):
     在回测开始时，将资金平均买入所有可用的标的并持有。
     """
 
+    # !!!注意，初始化方法只会执行一次，如果将计算逻辑写到这里实盘会有不重新计算的风险，请抽象计算方法并放置于next中!!!
     def init(self):
         self.log(f"Strategy initialized for {len(self.broker.datas)} assets.")
         self.order = False

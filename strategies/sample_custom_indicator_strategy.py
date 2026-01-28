@@ -14,6 +14,7 @@ class SampleCustomIndicatorStrategy(BaseStrategy):
         'M': 9,
     }
 
+    # !!!注意，初始化方法只会执行一次，如果将计算逻辑写到这里会有不重新计算的风险!!!
     def init(self):
         try:
             # 1. 获取完整的原始DataFrame，它的索引是我们将要使用的DatetimeIndex
