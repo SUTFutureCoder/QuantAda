@@ -104,9 +104,15 @@ class GmBrokerAdapter(BaseLiveBroker):
     # 实盘引擎调用此方法设置当前时间时，我们将其转换为无时区的北京时间
     # 这样 engine.py 中对比 df.index (无时区) 和 current_dt (无时区) 就不会报错了
     def set_datetime(self, dt):
-        if dt is not None and dt.tzinfo is not None:
-            # 转为北京时间并剥离时区
-            dt = dt.tz_convert('Asia/Shanghai').tz_localize(None)
+        if dt is not None:
+            # 1. 掘金传回来的是 python datetime，先转为 pandas Timestamp
+            #    这样才能使用 .tz_convert 方法
+            dt = pd.Timestamp(dt)
+
+            if dt.tzinfo is not None:
+                # 2. 先转为北京时间 (确保数值是 +8 区的)
+                # 3. 再剥离时区 (变成 Naive，适配 Backtrader)
+                dt = dt.tz_convert('Asia/Shanghai').tz_localize(None)
 
         super().set_datetime(dt)
 

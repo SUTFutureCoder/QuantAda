@@ -1,3 +1,4 @@
+import datetime
 from abc import ABC, abstractmethod
 
 import pandas as pd
@@ -282,35 +283,78 @@ class BaseLiveBroker(ABC):
 
     def set_datetime(self, dt):
         """设置当前时间，并进行跨周期检查"""
-        # 检查时间是否推进 (进入了新的 Bar/Day)
+        # 检查时间是否推进 (进入了新的 Bar/Day，跨周期)
         if self._datetime and dt > self._datetime:
 
-            # 【新增】不再悄悄清理，而是直接“爆破”
-            # 如果新的一天开始了，但兜里还揣着昨天的延迟单，说明逻辑严重泄漏
-            if self._deferred_orders:
-                raise RuntimeError(
-                    f"CRITICAL: Ghost Orders Detected at Market Open! "
-                    f"{len(self._deferred_orders)} deferred orders were left over from {self._datetime}. "
-                    f"This usually means a Sell order didn't complete by market close. "
-                    f"Current time: {dt}"
-                )
+            # 【逻辑修正】
+            # 不要因为 tick/bar 的更新就清理订单（会误杀 HFT 买单）。
+            # 只有在以下两种情况才清理：
+            # 1. 跨日了 (New Trading Day) -> 昨天的单子肯定是死单
+            # 2. 两次心跳间隔太久 (例如 > 10分钟) -> 说明程序可能断线重启过，状态不可信
 
-            # 清理卖单监控（可选，防止跨日ID污染，但通常上面的检查已经足够拦截问题）
-            # self._pending_sells.clear()
+            is_new_day = dt.date() > self._datetime.date()
+
+            # 计算时间差 (秒)
+            time_delta = (dt - self._datetime).total_seconds()
+            is_long_gap = time_delta > 600  # 10分钟无心跳视为异常
+
+            if is_new_day or is_long_gap:
+                if self._deferred_orders:
+                    print(f"[Broker] {'New Day' if is_new_day else 'Long Gap'} detected. "
+                          f"Clearing {len(self._deferred_orders)} stale deferred orders.")
+                    self._reset_stale_state(new_dt=dt)
+
+            # 注意：对于同一个交易日内的正常 Bar 更新（比如 10:00 -> 10:01），
+            # 我们保留 deferred_orders。因为 process_deferred_orders 会在资金到位时
+            # 重新计算 target_percent，所以即使保留下来，也会用最新的价格重新下单，是安全的。
 
         self._datetime = dt
 
     @property
     def datetime(self):
         """模拟 backtrader 的 datetime 属性，使 asof() 等能工作"""
-
         class dt_proxy:
             def __init__(self, dt): self._dt = dt
-
             def datetime(self, ago=0): return self._dt
-
         return dt_proxy(self._datetime)
 
     def log(self, txt, dt=None):
         log_time = dt or self._datetime or pd.Timestamp.now()
         print(f"[{log_time.strftime('%Y-%m-%d %H:%M:%S')}] {txt}")
+
+    def _reset_stale_state(self, new_dt):
+        """
+        清理陈旧/卡死的状态，防止死锁。
+        被 set_datetime 内部调用。
+        """
+        print(f"[Broker Recovery] Resetting stale state at {new_dt}...")
+
+        # 1. 清理积压的买单 (这些单子是基于旧价格/旧时间的，必须作废)
+        if self._deferred_orders:
+            count = len(self._deferred_orders)
+            self._deferred_orders.clear()
+            print(f"  >>> Auto-cleared {count} stale deferred orders (Expired).")
+
+        # 2. 清理积压的卖单监控
+        # 如果发生了跨日或长中断，旧的卖单监控大概率也失效了，重置以防误判
+        if self._pending_sells:
+            count = len(self._pending_sells)
+            self._pending_sells.clear()
+            print(f"  >>> Auto-cleared {count} pending sell monitors (Reset).")
+
+        print("  >>> Broker state reset completed.")
+
+    def force_reset_state(self):
+        """
+        外部强制重置接口。
+        供 Engine 在捕获到 CRITICAL 异常时调用，进行兜底恢复。
+        """
+        print("[Broker] Force reset state requested by Engine...")
+        self._deferred_orders.clear()
+        self._pending_sells.clear()
+        try:
+            self.sync_balance()
+            print(f"  >>> Balance re-synced: {self.get_cash():.2f}")
+        except Exception as e:
+            print(f"  >>> Warning: Failed to sync balance during reset: {e}")
+        print("[Broker] Force reset state completed.")

@@ -1,3 +1,4 @@
+import datetime
 import sys
 import time
 from types import SimpleNamespace
@@ -101,6 +102,17 @@ class LiveTrader:
 
             # 1. 检查策略是否有挂单
             strategy_order = getattr(self.strategy, 'order', None)
+
+            # 如果策略持有“虚拟延迟单”，但 Broker 的延迟队列已经被清空（例如跨日清理了），
+            # 那么这个订单就是“僵尸单”，必须强制复位，否则策略会死锁。
+            if strategy_order and getattr(strategy_order, 'id', None) == "DEFERRED_VIRTUAL_ID":
+                # 检查 Broker 内部队列
+                deferred_queue = getattr(self.broker, '_deferred_orders', [])
+                if len(deferred_queue) == 0:
+                    print(f"[Engine] Detected ZOMBIE deferred order in strategy. "
+                          f"Broker queue is empty. Forcing strategy.order = None")
+                    self.strategy.order = None
+                    strategy_order = None  # 本次循环视为无单，允许继续执行
 
             if strategy_order:
                 print("[Engine] Strategy has a pending order. Notifying and skipping logic.")
@@ -340,7 +352,7 @@ class LiveTrader:
 
 def on_order_status_callback(context, order):
     """
-    掘金实盘的订单状态回调函数。
+    实盘的订单状态回调函数。
     当订单状态发生变化（部成、全成、撤单、废单）时触发。
     """
     if hasattr(context, 'strategy_instance') and context.strategy_instance:
@@ -402,23 +414,26 @@ def on_order_status_callback(context, order):
                             import traceback
                             traceback.print_exc()
 
-        except RuntimeError as re:
-            # 专门捕获 BaseBroker 抛出的死锁熔断异常
-            if "CRITICAL" in str(re):
-                print(f"\n{'!' * 40}")
-                print(f"[FATAL ERROR] {re}")
-                print(f"{'!' * 40}\n")
-                print("Terminating execution immediately to prevent Ghost Orders.")
-                sys.exit(1)  # 直接终止进程，不再让 GM SDK 继续运行
-            else:
-                # 其他 RuntimeError 照常打印但不退出
-                import traceback
-                print(f"[Engine Callback Error] {re}")
-                traceback.print_exc()
-
         except Exception as e:
+            # 记录所有未预期的异常，并确保主循环不退出即可。
             import traceback
-            print(f"[Engine Callback Error] Failed to notify strategy: {e}")
+            error_msg = f"[Engine Callback Error] Unexpected exception: {e}"
+
+            # 打印醒目的错误日志
+            print(f"\n{'=' * 40}")
+            print(error_msg)
+            print(f"{'=' * 40}")
             traceback.print_exc()
+
+            # 极端防御：如果遇到未知的严重错误，也可以尝试盲调用一次重置
+            # 这样即使是代码其他地方写的 Bug 导致状态脏了，也能在下一次心跳前恢复
+            try:
+                if hasattr(context, 'strategy_instance'):
+                    context.strategy_instance.broker.force_reset_state()
+            except:
+                # 不抛出异常，让程序继续运行
+                # 这样下一个 Bar 到来时，Broker 会有机会再次自我修正
+                pass
+
     else:
         print("[Engine Callback Warning] No strategy_instance found in context.")

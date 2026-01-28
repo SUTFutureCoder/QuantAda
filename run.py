@@ -170,13 +170,6 @@ if __name__ == '__main__':
                 setattr(config, key, value)
                 print(f"  [Config] Overriding {key} = {value}")
 
-    # 处理 desc 默认值
-    description = args.desc
-    if not description:
-        # 移除路径和扩展名，只保留文件名作为描述
-        basename = os.path.basename(args.strategy)
-        description = os.path.splitext(basename)[0]
-
     # 将逗号分隔的字符串转换为列表
     symbol_list = [s.strip() for s in args.symbols.split(',')]
 
@@ -227,7 +220,7 @@ if __name__ == '__main__':
         if config.DB_ENABLED:
             try:
                 recorder_manager.add_recorder(DBRecorder(
-                    strategy_name=args.strategy, description=description, params=s_params,
+                    strategy_name=args.strategy, description=args.desc, params=s_params,
                     start_date=args.start_date, end_date=args.end_date,
                     initial_cash=args.cash, commission=args.commission
                 ))

@@ -1,7 +1,7 @@
 import datetime
 import uuid
 
-from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, JSON, ForeignKey, Index
+from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, JSON, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy_utils import database_exists, create_database
@@ -23,7 +23,7 @@ class BacktestExecution(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
 
     # 核心唯一索引：策略名
-    strategy_name = Column(String(100), unique=True, nullable=False)
+    strategy_name = Column(String(100), nullable=False)
 
     description = Column(String(255))
     start_time = Column(DateTime, default=datetime.datetime.now)
@@ -49,6 +49,9 @@ class BacktestExecution(Base):
 
     trades = relationship("BacktestTradeLog", backref="execution", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        UniqueConstraint('strategy_name', 'description', name='uix_strategy_desc'),
+    )
 
 class BacktestTradeLog(Base):
     """
@@ -92,6 +95,9 @@ class DBRecorder(BaseRecorder):
         self.Session = sessionmaker(bind=self.engine)
         # 注意：这里我们只初始化连接，但不进行任何写操作
         self.session = self.Session()
+
+        if description is None:
+            description = ""
 
         # --- 变更点 1: 将所有元数据暂存到内存 self.meta_data ---
         self.meta_data = {
@@ -142,10 +148,9 @@ class DBRecorder(BaseRecorder):
             # --- 变更点 4: 在结束时一次性开启事务 ---
 
             name = self.meta_data["strategy_name"]
+            desc = self.meta_data["description"]
 
-            # 1. 查询旧记录
-            execution = self.session.query(BacktestExecution).filter_by(strategy_name=name).first()
-
+            execution = self.session.query(BacktestExecution).filter_by(strategy_name=name, description=desc).first()
             if execution:
                 # 如果存在，复用 ID，清空旧的 trade logs
                 # 注意：此时因为还没有 commit，如果下面报错 rollback，这些删除操作也会撤销
@@ -153,7 +158,6 @@ class DBRecorder(BaseRecorder):
                     synchronize_session=False)
 
                 # 更新元数据
-                execution.description = self.meta_data["description"]
                 execution.start_time = self.meta_data["start_time"]
                 execution.updated_time = datetime.datetime.now()
                 execution.params = self.meta_data["params"]
@@ -165,7 +169,7 @@ class DBRecorder(BaseRecorder):
                 # 如果不存在，创建新的
                 execution = BacktestExecution(
                     strategy_name=name,
-                    description=self.meta_data["description"],
+                    description=desc,
                     start_time=self.meta_data["start_time"],
                     updated_time=datetime.datetime.now(),
                     params=self.meta_data["params"],
