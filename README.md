@@ -19,7 +19,12 @@
     - **数据层**：责任链模式管理多数据源 (Tushare/AkShare/CSV)，支持自动增量更新与本地缓存。
     - **策略层**：指标计算 (`common/indicators`) 抽象为公共模块，集成 MyTT、Ta-Lib。
     - **工程分离**：支持通过 `PYTHONPATH` 引用外部策略库，实现业务代码与框架核心的物理隔离。
+
   
+  - **全天候监控与报警 (24/7 Monitoring & Alarms)**
+    - **多渠道推送**：内置钉钉 (DingTalk)、企业微信 (WeCom) Webhook 集成，无需二次开发。
+    - **全维感知**：实时推送系统启动/死信状态、交易成交详情及异常堆栈信息，让您随时随地掌握策略“心跳”。
+
 
   - **启发式并行贝叶斯优化器 (Heuristic-Guided Bayesian Optimizer)**
     - **学术级算法**：基于 TPE (Tree-structured Parzen Estimator) 算法，引入 `Constant-Liar` 采样策略与哈希去重机制，解决多核环境下的“并发踩踏”问题。
@@ -244,6 +249,11 @@ python ./run.py sample_momentum_strategy --selection sample_manual_selector --op
 
 ```
 QuantAda/
+├── alarms/                 # 报警监控模块
+│   ├── base_alarm.py       # 报警基类
+│   ├── dingtalk_alarm.py   # 钉钉适配
+│   ├── wecom_alarm.py      # 企业微信适配
+│   └── manager.py          # 报警管理器
 ├── backtest/               # 回测模块
 │   └── backtester.py       # 回测执行器
 ├── common/                 # 通用逻辑模块
@@ -302,6 +312,9 @@ QuantAda/
 
 ### 框架和自定义策略工程分离
 ![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/public_private_split.png?raw=true)  
+
+### 实时监控并推送实盘操作
+![push_live_alarms](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/push_live_alarms?raw=true)  
 
 ### 基于Optuna优化策略参数
 ![optimizer](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optimizer.png?raw=true)  

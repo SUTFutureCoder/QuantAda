@@ -79,7 +79,7 @@ class GmDataProvider(BaseDataProvider):
                     df = self._stitch_realtime_bar(symbol, df)
                 except Exception as e:
                     # 仅打印警告，不中断流程，返回已有的历史数据
-                    # print(f"[GmDataProvider] Warning: Real-time stitching failed for {symbol}: {e}")
+                    print(f"[GmDataProvider] Warning: Real-time stitching failed for {symbol}: {e}")
                     pass
 
             if df.empty:
@@ -111,9 +111,7 @@ class GmDataProvider(BaseDataProvider):
             return df
 
         # 处理时间
-        tick_time = tick['created_at']
-        if isinstance(tick_time, str):
-            tick_time = pd.to_datetime(tick_time)
+        tick_time = pd.Timestamp(tick['created_at'])
 
         if tick_time.tzinfo is not None:
             tick_time = tick_time.tz_convert('Asia/Shanghai')

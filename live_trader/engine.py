@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+import config
+from alarms.manager import AlarmManager
 from run import get_class_from_name
 from .adapters.gm_broker import GmBrokerAdapter, GmDataProvider
 
@@ -30,7 +32,10 @@ class LiveTrader:
     def init(self, context):
         print("--- LiveTrader Engine Initializing ---")
 
-        # 1. 【核心改动】静态调用 is_live_mode 来判断模式
+        # 初始化报警器
+        self.alarm_manager = AlarmManager()
+
+        # 1. 静态调用 is_live_mode 来判断模式
         is_live = self.BrokerClass.is_live_mode(context)
 
         # 2. 根据模式决定配置合并策略
@@ -67,6 +72,9 @@ class LiveTrader:
         params = self.config.get('params', {})
         self.strategy = self.strategy_class(broker=self.broker, params=params)
         self.strategy.init()
+
+        # 发送启动死信/通知
+        self.alarm_manager.push_start(self.config['strategy_name'])
 
         # 5. 加载风控模块 ---
         self.risk_control = None
@@ -152,6 +160,9 @@ class LiveTrader:
             import traceback
             self.broker.log(traceback.format_exc())
             # 即使出错，也打印 "Finished"，表示此bar安全退出
+            # 推送异常报警
+            if hasattr(self, 'alarm_manager'):
+                self.alarm_manager.push_exception("Engine Main Loop", e)
 
         print("--- LiveTrader Run Finished ---")
 
@@ -353,6 +364,9 @@ def on_order_status_callback(context, order):
     实盘的订单状态回调函数。
     当订单状态发生变化（部成、全成、撤单、废单）时触发。
     """
+    # 获取报警器单例
+    alarm_manager = AlarmManager()
+
     if hasattr(context, 'strategy_instance') and context.strategy_instance:
         try:
             from .adapters.gm_broker import GmOrderProxy
@@ -378,7 +392,7 @@ def on_order_status_callback(context, order):
             # 将掘金的原生 order 包装成 Proxy，并传入 data
             order_proxy = GmOrderProxy(order, is_live, data=matched_data)
 
-            # 2. 【核心】喂给 Broker，让它去维护在途单
+            # 2. 喂给 Broker，让它去维护在途单
             if hasattr(broker, 'on_order_status'):
                 broker.on_order_status(order_proxy)
 
@@ -392,6 +406,25 @@ def on_order_status_callback(context, order):
                 msg = getattr(order, 'ord_rej_reason_detail', '')  # 尝试获取拒单原因
 
             print(f"[Engine Callback] Notified strategy of order status: {order.status} ({msg})")
+
+            # 报警通知
+            # A. 交易成交推送 (完全成交、部分成交、以及部成后撤单)
+            if order_proxy.executed.size > 0:
+                # 排除已被拒绝的废单(虽然废单size通常为0，为了严谨双重检查)
+                if not order_proxy.is_rejected():
+                    trade_info = {
+                        'symbol': order_proxy.data._name if order_proxy.data else order.symbol,
+                        'action': 'BUY' if order_proxy.is_buy() else 'SELL',
+                        'price': order_proxy.executed.price,
+                        'size': order_proxy.executed.size,
+                        'value': order_proxy.executed.value,
+                        'dt': context.now.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    alarm_manager.push_trade(trade_info)
+
+            # B. 异常状态推送 (拒单)
+            if order_proxy.is_rejected():
+                alarm_manager.push_text(f"⚠️ 订单被拒绝: {order.symbol} - {msg}", level='WARNING')
 
             # 3. 如果卖单成交（有钱回笼），触发重试
             if order_proxy.is_sell() and order_proxy.executed.size > 0:
