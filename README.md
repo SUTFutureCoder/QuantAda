@@ -314,7 +314,7 @@ QuantAda/
 ![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/public_private_split.png?raw=true)  
 
 ### 实时监控并推送实盘操作
-![push_live_alarms](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/push_live_alarms?raw=true)  
+![push_live_alarms](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/push_live_alarms.png?raw=true)  
 
 ### 基于Optuna优化策略参数
 ![optimizer](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optimizer.png?raw=true)  
