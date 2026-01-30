@@ -12,7 +12,8 @@
 ## 核心特性
 
   - **策略与引擎解耦 (Adapter Pattern)**  
-    - 得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `Backtrader` 回测引擎或 **掘金量化 (MyQuant)** 等实盘环境中。支持全球各大券商独立配置特殊规则。
+    - **复用可插拔**：得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `Backtrader` 回测引擎或实盘环境中。支持全球各大券商独立配置特殊规则。
+    - **交易全记录**：支持将每一笔交易流水、资金快照及最终绩效自动持久化到 MySQL/SQLite 数据库、HTTP发送或投递到消息队列中，支持幂等写入，便于大规模回测数据的沉淀与分析。
   
 
   - **模块化与插件化 (SDK Mode)**
@@ -43,16 +44,12 @@
     - **无缝协作**：支持配置自定义端口，兼容无头服务器 (Headless Server) 环境，便于通过 SSH 隧道远程监控算力集群。
 
 
-  - **交易全记录**
-    支持将每一笔交易流水、资金快照及最终绩效自动持久化到 MySQL/SQLite 数据库，支持幂等写入，便于大规模回测数据的沉淀与分析。
-
-
   - **可插拔风控组件 (Pluggable Risk Control)**
     - **链式防御**：支持在命令行动态挂载多个风控模块（如 `--risk stop_loss,trend_protection`），形成多重防御体系。
     - **独立配置**：风控逻辑与策略逻辑完全解耦，无需修改策略代码即可为不同账户应用不同的止损/止盈/熔断规则。
 
 
-![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/diagram.png?raw=true)
+![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/diagram.png?raw=true)
 
 ## 快速开始
 
@@ -302,25 +299,25 @@ QuantAda/
 ## 样例截图
 
 ### 终端执行回测
-![backtest_mode_in_terminal](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/backtest_mode_in_terminal.png?raw=true)
+![backtest_mode_in_terminal](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/backtest_mode_in_terminal.png?raw=true)
 
 ### 券商平台执行回测
-![backtest_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/backtest_mode_in_broker.png?raw=true)
+![backtest_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/backtest_mode_in_broker.png?raw=true)
 
 ### 券商平台执行实盘
-![live_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/live_mode_in_broker.png?raw=true)
+![live_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/live_mode_in_broker.png?raw=true)
 
 ### 框架和自定义策略工程分离
-![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/public_private_split.png?raw=true)  
+![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/public_private_split.png?raw=true)  
 
 ### 实时监控并推送实盘操作
-![push_live_alarms](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/push_live_alarms.png?raw=true)  
+![push_live_alarms](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/push_live_alarms.png?raw=true)  
 
 ### 基于Optuna优化策略参数
-![optimizer](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optimizer.png?raw=true)  
+![optimizer](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/optimizer.png?raw=true)  
 
 ### 实时Optuna优化进度看板
-![optuna-dashboard](https://github.com/SUTFutureCoder/QuantAda/blob/main/sample_pictures/optuna-dashboard.png?raw=true)  
+![optuna-dashboard](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/optuna-dashboard.png?raw=true)  
 
 
 ## 免责声明
