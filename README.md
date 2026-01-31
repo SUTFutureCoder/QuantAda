@@ -11,42 +11,45 @@
 
 ## 核心特性
 
-  - **策略与引擎解耦 (Adapter Pattern)**  
-    - **复用可插拔**：得益于适配器模式，您只需编写一次纯粹的策略逻辑，即可无缝运行在 `Backtrader` 回测引擎或实盘环境中。支持全球各大券商独立配置特殊规则。
-    - **交易全记录**：支持将每一笔交易流水、资金快照及最终绩效自动持久化到 MySQL/SQLite 数据库、HTTP发送或投递到消息队列中，支持幂等写入，便于大规模回测数据的沉淀与分析。
-  
-
-  - **模块化与插件化 (SDK Mode)**
-    - **数据层**：责任链模式管理多数据源 (Tushare/AkShare/CSV)，支持自动增量更新与本地缓存。
-    - **策略层**：指标计算 (`common/indicators`) 抽象为公共模块，集成 MyTT、Ta-Lib。
-    - **工程分离**：支持通过 `PYTHONPATH` 引用外部策略库，实现业务代码与框架核心的物理隔离。
-
-  
-  - **全天候监控与报警 (24/7 Monitoring & Alarms)**
-    - **多渠道推送**：内置钉钉 (DingTalk)、企业微信 (WeCom) Webhook 集成，无需二次开发。
-    - **全维感知**：实时推送系统启动/死信状态、交易成交详情及异常堆栈信息，让您随时随地掌握策略“心跳”。
+- **策略与引擎解耦 (Adapter Pattern)**
+  - **一次编写，多处运行**：基于适配器模式，纯粹的策略逻辑可无缝运行于 `Backtester` 本地回测或实盘环境。
+  - **自动持久化**：支持交易流水与资金快照自动写入 MySQL/SQLite 或投递至消息队列，实现数据沉淀。
 
 
-  - **启发式并行贝叶斯优化器 (Heuristic-Guided Bayesian Optimizer)**
-    - **学术级算法**：基于 TPE (Tree-structured Parzen Estimator) 算法，引入 `Constant-Liar` 采样策略与哈希去重机制，解决多核环境下的“并发踩踏”问题。
-    - **智能算力评估**：拒绝盲目穷举。框架根据参数空间复杂度（熵）与硬件 CPU 核数，通过非线性公式动态推导最佳尝试次数 ($N_{trials}$)。
-    - **极速并行**：默认调用所有 CPU 核心，飞行模式离线运行，内置 Windows 文件锁管理与自动降级机制。
-  
-
-  - **科学的评价体系 (Mix Score)**
-    - **拒绝单一指标**：内置 **Mix Score** 混合评分机制，综合考量 **Calmar (生存能力)**、**Sharpe (资金曲线平滑度)** 与 **Total Return (进攻性)**，并引入交易次数熔断机制，防止优化器拟合“运气单”。
-    - **地狱模式训练**：强制推荐 **“熊市训练 (In-Sample) + 牛市验证 (Out-of-Sample)”** 的切分模式，验证策略的抗脆弱性。
-  
-
-  - **全自动交互式看板 (Zero-Config Dashboard)**
-    - **开箱即用**：优化任务启动时，框架会自动在后台启动轻量级 Web 服务器，并弹出浏览器展示实时的 Pareto 前沿面、参数重要性分析 (Feature Importance) 及高维参数坐标图。
-    - **工程级静默**：通过底层 Monkey Patch 技术屏蔽了 Web 服务的繁杂日志，让您的终端只专注于显示优化进度与核心指标，实现“沉浸式”调参体验。
-    - **无缝协作**：支持配置自定义端口，兼容无头服务器 (Headless Server) 环境，便于通过 SSH 隧道远程监控算力集群。
+- **全场景运行模式 (Flexible Execution Modes)**
+  1. **本地框架回测**：脱离外部依赖，直接使用本地数据 (`CSV`/`DB`) 进行高效策略验证。
+  2. **嵌入式运行**：适配券商 SDK（如掘金量化），支持策略代码直接在券商终端内运行。
+  3. **分布式远程调用**：支持通过 `Launcher` 主动发起远程连接，实现**计算（Linux）与交易（Windows）分离**的实盘部署。
 
 
-  - **可插拔风控组件 (Pluggable Risk Control)**
-    - **链式防御**：支持在命令行动态挂载多个风控模块（如 `--risk stop_loss,trend_protection`），形成多重防御体系。
-    - **独立配置**：风控逻辑与策略逻辑完全解耦，无需修改策略代码即可为不同账户应用不同的止损/止盈/熔断规则。
+- **模块化与工程分离 (SDK Mode)**
+  - **数据层**：内置多源数据管理 (Tushare/AkShare)，支持责任链更新与自动缓存。
+  - **工程层**：支持通过 `PYTHONPATH` 引用外部库，实现业务策略代码与框架核心的物理隔离。
+
+
+- **全天候监控 (Monitoring)**
+  - **即时推送**：开箱即用的钉钉 (DingTalk) 与企业微信 (WeCom) 集成。
+  - **全维感知**：实时推送系统启停、成交详情及异常堆栈，随时掌握策略“心跳”。
+
+
+- **启发式并行优化器 (Bayesian Optimizer)**
+  - **极速并行**：基于 TPE 算法与 Constant-Liar 策略，充分利用多核 CPU 进行并行参数搜索。
+  - **智能评估**：根据参数空间熵值动态推导最佳尝试次数，拒绝盲目穷举。
+
+
+- **科学评价体系 (Mix Score)**
+  - **混合评分**：独创 **Mix Score** 指标，综合考量生存能力 (Calmar)、平滑度 (Sharpe) 与进攻性 (Return)。
+  - **抗过拟合**：强制推荐 **“样本内训练 + 样本外验证”** 模式，验证策略鲁棒性。
+
+
+- **交互式看板 (Zero-Config Dashboard)**
+  - **可视化调参**：优化任务启动时自动唤起 Web 看板，实时展示 Pareto 前沿面与参数重要性分析。
+  - **远程支持**：兼容无头服务器 (Headless) 环境，支持 SSH 隧道远程监控。
+
+
+- **可插拔风控 (Pluggable Risk Control)**
+  - **链式防御**：支持命令行动态挂载多个风控组件（如 `--risk stop_loss,trend_protection`）。
+  - **独立配置**：风控规则与策略逻辑解耦，可针对不同账户灵活组合。
 
 
 ![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/diagram.png?raw=true)
@@ -241,6 +244,18 @@ python ./run.py sample_momentum_strategy --selection sample_manual_selector --op
     ```
 
 4.  **运行**：保存 `main.py` 并启动掘金策略。
+
+### 主动运行券商实盘
+支持 **Linux (策略端)** + **Windows (柜台端)** 分布式部署方案，实现计算与交易环境物理隔离。
+
+1. **配置连接**：修改 `config.py` 中的 `BROKER_ENVIRONMENTS`，配置目标机器 IP、Token 及策略 ID。
+2. **启动命令**：通过 `--connect` 参数指定 Broker 和环境。
+   ```bash
+   # 连接 config.py 中定义的 gm_broker:real 环境
+   python run.py strategies.sample_macd_cross_strategy --connect=gm_broker:real
+
+   # 连接仿真环境
+   python run.py strategies.sample_macd_cross_strategy --connect=gm_broker:sim
 
 ## 框架目录说明
 

@@ -12,6 +12,6 @@ class BaseRecorder(ABC):
         pass
 
     @abstractmethod
-    def finish_execution(self, final_value, total_return, sharpe, max_drawdown, annual_return):
+    def finish_execution(self, final_value, total_return, sharpe, max_drawdown, annual_return, trade_count, win_rate):
         """记录回测结束时的最终绩效"""
         pass

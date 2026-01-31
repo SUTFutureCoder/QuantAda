@@ -4,7 +4,7 @@ from common import mytt
 from risk_controls.base_risk_control import BaseRiskControl
 
 
-class TrendProtection(BaseRiskControl):
+class SampleTrendProtection(BaseRiskControl):
     """
     趋势保护风控模块 (Trend Protection)
 

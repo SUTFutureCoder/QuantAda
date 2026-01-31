@@ -52,7 +52,7 @@ class BaseStrategy(ABC):
         """
         订单状态通知
         """
-        if order.is_completed():
+        if order.is_completed() and order.executed.size > 0:
             if order.is_buy():
                 self.log(
                     f'BUY EXECUTED, Size: {order.executed.size:.2f}, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.5f}')

@@ -57,6 +57,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
     """
 
     def __init__(self, strategy_class, params=None, risk_control_classes=None, risk_control_params=None, recorder=None, verbose=True):
+        self.is_live = False
         self.recorder = recorder
         self.verbose = verbose
         # 增加一个属性用于存储实际开始日期，面向解决多标的数据就绪问题
@@ -425,10 +426,19 @@ class Backtester:
         end_dt = pd.to_datetime(self.end_date) if self.end_date else datetime.datetime.now()
         days = (end_dt - start_dt).days
         ann_ret = ((1 + total_ret) ** (365.0 / days)) - 1 if days > 0 else 0.0
+        trade_analysis = strat.analyzers.tradeanalyzer.get_analysis()
+        total_trades = trade_analysis.get('total', {}).get('total', 0)
+
+        # 获取获利交易数
+        win_trades = trade_analysis.get('won', {}).get('total', 0)
+
+        # 计算胜率 (0.0 ~ 1.0)
+        win_rate = (win_trades / total_trades) if total_trades > 0 else 0.0
 
         self.recorder.finish_execution(
             final_value=final_val, total_return=total_ret,
-            sharpe=sharpe, max_drawdown=max_dd, annual_return=ann_ret
+            sharpe=sharpe, max_drawdown=max_dd, annual_return=ann_ret,
+            trade_count=total_trades, win_rate=win_rate  # 传入新增参数
         )
 
     def _generate_report(self):

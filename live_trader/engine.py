@@ -94,6 +94,15 @@ class LiveTrader:
 
         print("--- LiveTrader Engine Initialized Successfully ---")
 
+        print(f"[Engine] Subscribing to {len(symbols)} symbols...")
+        # 注意：掘金需要显式调用 subscribe
+        # 如果你的 BaseLiveBroker 没有封装 subscribe，你需要在这里直接调用或者通过 broker 调用
+
+        # 临时修复：直接调用掘金 subscribe 以排除框架封装问题
+        if self.config.get('platform') == 'gm':
+            from gm.api import subscribe
+            subscribe(symbols=symbols, frequency='1d', count=100, wait_group=True)
+
     def run(self, context):
         print(f"--- LiveTrader Running at {context.now.strftime('%Y-%m-%d %H:%M:%S')} ---")
         self.broker.set_datetime(context.now)
@@ -165,6 +174,18 @@ class LiveTrader:
                 self.alarm_manager.push_exception("Engine Main Loop", e)
 
         print("--- LiveTrader Run Finished ---")
+
+    def notify_order(self, order):
+        """
+        [系统回调入口] 接收来自底层 Broker 的订单状态更新，并转发给策略和风控。
+        """
+        # 1. 转发给用户策略 (最重要)
+        if self.strategy:
+            self.strategy.notify_order(order)
+
+        # 2. 转发给风控模块 (如果有)
+        if self.risk_control:
+            self.risk_control.notify_order(order)
 
     def _determine_symbols(self) -> list:
         """根据最终配置决定交易的标的列表"""

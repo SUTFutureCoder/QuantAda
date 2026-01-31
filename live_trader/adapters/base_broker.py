@@ -65,6 +65,7 @@ class BaseLiveBroker(ABC):
     """交易执行器适配器的抽象基类，模拟 backtrader 的 broker 接口"""
 
     def __init__(self, context, cash_override=None, commission_override=None):
+        self.is_live = True
         self._context = context
         self.datas = []
         self._datetime = None
@@ -74,6 +75,43 @@ class BaseLiveBroker(ABC):
         self._cash = self._init_cash()
         self._deferred_orders = []
         self._pending_sells = set()
+
+    # =========================================================
+    #  用户只需实现下述原子接口 (The Minimum Set)
+    # =========================================================
+    @abstractmethod
+    def _fetch_real_cash(self) -> float:
+        """子类必须实现，用于获取真实账户的可用资金"""
+        pass
+
+    @abstractmethod
+    def get_position(self, data):
+        """子类必须实现，用于获取指定标的的持仓"""
+        pass
+
+    @abstractmethod
+    def _get_current_price(self, data) -> float:
+        """子类必须实现，用于获取指定标的实时价格"""
+        pass
+
+    @abstractmethod
+    def _submit_order(self, data, volume, side, price):
+        """子类必须实现，用于提交指定标的买入或卖出操作"""
+        pass
+
+    # 实盘启动协议
+    @classmethod
+    def launch(cls, conn_cfg: dict, strategy_path: str, params: dict, **kwargs):
+        """
+        [可选协议] 实盘启动入口。
+
+        如果通过 `run.py --connect` 启动，框架会调用此方法。
+        如果是被动模式或不需要启动器，子类可以不覆盖此方法。
+        """
+        raise NotImplementedError(
+            f"Broker '{cls.__name__}' has not implemented the 'launch' method.\n"
+            f"It cannot be started via the 'run.py --connect' command."
+        )
 
     @staticmethod
     @abstractmethod
@@ -247,28 +285,6 @@ class BaseLiveBroker(ABC):
             return self._commission_override
         return 0.0
 
-    # =========================================================
-    #  用户只需实现这 4 个原子接口 (The Minimum Set)
-    # =========================================================
-    @abstractmethod
-    def _fetch_real_cash(self) -> float:
-        """子类必须实现，用于获取真实账户的可用资金"""
-        pass
-
-    @abstractmethod
-    def get_position(self, data):
-        """子类必须实现，用于获取指定标的的持仓"""
-        pass
-
-    @abstractmethod
-    def _get_current_price(self, data) -> float:
-        """子类必须实现，用于获取指定标的实时价格"""
-        pass
-
-    @abstractmethod
-    def _submit_order(self, data, volume, side, price):
-        """子类必须实现，用于提交指定标的买入或卖出操作"""
-        pass
 
     def getposition(self, data):
         """

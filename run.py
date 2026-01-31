@@ -160,6 +160,10 @@ if __name__ == '__main__':
     parser.add_argument('--train_period', type=str, default=None)
     parser.add_argument('--test_period', type=str, default=None)
 
+    # 实盘参数
+    parser.add_argument('--connect', type=str, default=None,
+                        help="实盘连接配置，格式 'broker:env' (例如: 'gm_broker:sim')")
+
     # 3. 解析参数
     args = parser.parse_args()
 
@@ -188,8 +192,40 @@ if __name__ == '__main__':
         print(f"Error parsing risk_params JSON: {e}")
         r_params = {}
 
+    # ==========================
+    # 实盘模式
+    # ==========================
+    if args.connect:
+        if ':' not in args.connect:
+            print("Error: --connect format must be 'broker:env' (e.g. gm_broker:sim)")
+            sys.exit(1)
+
+        broker_name, conn_name = args.connect.split(':', 1)
+
+        # 收集执行参数 (Execution Args)
+        # 这些参数之前只用于内部回测，现在我们也传给 Broker
+        exec_args = {
+            'start_date': args.start_date,
+            'end_date': args.end_date,
+            'cash': args.cash,
+            'commission': args.commission,
+            'slippage': args.slippage,
+            # 透传选股器和标的参数
+            'selection': args.selection,
+            # 同时也处理 symbols (转为列表)，以防没有选股器时使用
+            'symbols': [s.strip() for s in args.symbols.split(',')] if args.symbols else []
+        }
+
+        # 延迟导入 launcher，避免回测时引入不必要的依赖
+        from live_trader.launcher import launch_live
+
+        launch_live(broker_name, conn_name, args.strategy, s_params, **exec_args)
+        sys.exit(0)
+
+    # ==========================
+    # 优化模式
+    # ==========================
     if args.opt_params:
-        # --- 优化模式 ---
         print(f"\n>>> Mode: PARAMETER OPTIMIZATION (Target: {args.metric}) <<<")
 
         if not args.study_name:
@@ -215,39 +251,41 @@ if __name__ == '__main__':
             risk_params=r_params
         )
         job.run()
+        sys.exit(0)
 
-    else:
-        # --- 普通回测模式 ---
-        recorder_manager = RecorderManager()
-        if config.DB_ENABLED:
-            try:
-                recorder_manager.add_recorder(DBRecorder(
-                    strategy_name=args.strategy, description=args.desc, params=s_params,
-                    start_date=args.start_date, end_date=args.end_date,
-                    initial_cash=args.cash, commission=args.commission
-                ))
-            except Exception as e:
-                print(f"Failed to init DBRecorder: {e}")
+    # ==========================
+    # 回测模式
+    # ==========================
+    recorder_manager = RecorderManager()
+    if config.DB_ENABLED:
+        try:
+            recorder_manager.add_recorder(DBRecorder(
+                strategy_name=args.strategy, description=args.desc, params=s_params,
+                start_date=args.start_date, end_date=args.end_date,
+                initial_cash=args.cash, commission=args.commission
+            ))
+        except Exception as e:
+            print(f"Failed to init DBRecorder: {e}")
 
-        if hasattr(config, 'HTTP_LOG_URL') and config.HTTP_LOG_URL:
-            recorder_manager.add_recorder(HttpRecorder(endpoint_url=config.HTTP_LOG_URL))
+    if hasattr(config, 'HTTP_LOG_URL') and config.HTTP_LOG_URL:
+        recorder_manager.add_recorder(HttpRecorder(endpoint_url=config.HTTP_LOG_URL))
 
-        run_backtest(
-            selection_filename=args.selection,
-            strategy_filename=args.strategy,
-            symbols=symbol_list,
-            cash=args.cash,
-            commission=args.commission,
-            slippage=args.slippage,
-            data_source=args.data_source,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            risk_filename=args.risk,
-            risk_params=r_params,
-            params=s_params,
-            timeframe=args.timeframe,
-            compression=args.compression,
-            recorder=recorder_manager,
-            enable_plot=not args.no_plot,
-        )
-        print("\n--- Backtest Finished ---")
+    run_backtest(
+        selection_filename=args.selection,
+        strategy_filename=args.strategy,
+        symbols=symbol_list,
+        cash=args.cash,
+        commission=args.commission,
+        slippage=args.slippage,
+        data_source=args.data_source,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        risk_filename=args.risk,
+        risk_params=r_params,
+        params=s_params,
+        timeframe=args.timeframe,
+        compression=args.compression,
+        recorder=recorder_manager,
+        enable_plot=not args.no_plot,
+    )
+    print("\n--- Backtest Finished ---")

@@ -13,7 +13,7 @@ from .base_recorder import BaseRecorder
 Base = declarative_base()
 
 
-# --- 1. 高性能表结构设计 (保持不变) ---
+# --- 1. 高性能表结构设计 ---
 
 class BacktestExecution(Base):
     """
@@ -46,7 +46,11 @@ class BacktestExecution(Base):
     max_drawdown = Column(Float, nullable=True)
     sharpe_ratio = Column(Float, nullable=True)
 
-    status = Column(String(20), default='FINISHED')  # 默认为 FINISHED，因为我们只保存完成的
+    # [新增] 统计字段
+    trade_count = Column(Integer, nullable=True)  # 交易次数
+    win_rate = Column(Float, nullable=True)  # 胜率
+
+    status = Column(String(20), default='FINISHED')
 
     trades = relationship("BacktestTradeLog", backref="execution", cascade="all, delete-orphan")
 
@@ -56,23 +60,21 @@ class BacktestExecution(Base):
 
 class BacktestTradeLog(Base):
     """
-    交易流水表
+    交易流水表 (保持不变)
     """
     __tablename__ = 'backtest_trade_logs'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-
     execution_id = Column(String(36), ForeignKey('backtest_executions.id'), nullable=False, index=True)
 
     dt = Column(DateTime, nullable=False)
     symbol = Column(String(50), nullable=False)
-    action = Column(String(10), nullable=False)  # BUY / SELL
+    action = Column(String(10), nullable=False)
 
     price = Column(Float)
     size = Column(Float)
     commission = Column(Float)
 
-    # 资金快照
     cash_snapshot = Column(Float)
     value_snapshot = Column(Float)
 
@@ -83,7 +85,7 @@ class BacktestTradeLog(Base):
     )
 
 
-# --- 2. 数据库记录器逻辑 (核心修改) ---
+# --- 2. 数据库记录器逻辑 ---
 
 class DBRecorder(BaseRecorder):
     def __init__(self, strategy_name, description, params, start_date, end_date, initial_cash, commission):
@@ -94,13 +96,11 @@ class DBRecorder(BaseRecorder):
         self.active = True
         self.engine = self._init_engine()
         self.Session = sessionmaker(bind=self.engine)
-        # 注意：这里我们只初始化连接，但不进行任何写操作
         self.session = self.Session()
 
         if description is None:
             description = ""
 
-        # --- 变更点 1: 将所有元数据暂存到内存 self.meta_data ---
         self.meta_data = {
             "strategy_name": strategy_name,
             "description": description,
@@ -109,12 +109,10 @@ class DBRecorder(BaseRecorder):
             "end_date": end_date,
             "initial_cash": initial_cash,
             "commission": commission,
-            "start_time": datetime.datetime.now()  # 记录开始时间
+            "start_time": datetime.datetime.now()
         }
 
-        # --- 变更点 2: 交易记录暂存到内存列表 ---
         self.trades_buffer = []
-
         print(f"--- DB Recorder: Initialized (Buffered mode) for '{strategy_name}' ---")
 
     def _init_engine(self):
@@ -128,7 +126,6 @@ class DBRecorder(BaseRecorder):
     def log_trade(self, dt, symbol, action, price, size, comm, order_ref, cash, value):
         if not self.active: return
 
-        # --- 变更点 3: 只记入内存 buffer，不写库 ---
         self.trades_buffer.append({
             "dt": dt,
             "symbol": symbol,
@@ -141,24 +138,20 @@ class DBRecorder(BaseRecorder):
             "value_snapshot": value
         })
 
-    def finish_execution(self, final_value, total_return, sharpe, max_drawdown, annual_return):
+    # 接收 trade_count 和 win_rate
+    def finish_execution(self, final_value, total_return, sharpe, max_drawdown, annual_return, trade_count, win_rate):
         if not self.active: return
 
         print(f"--- DB Recorder: Saving results to DB... ---")
         try:
-            # --- 变更点 4: 在结束时一次性开启事务 ---
-
             name = self.meta_data["strategy_name"]
             desc = self.meta_data["description"]
 
             execution = self.session.query(BacktestExecution).filter_by(strategy_name=name, description=desc).first()
             if execution:
-                # 如果存在，复用 ID，清空旧的 trade logs
-                # 注意：此时因为还没有 commit，如果下面报错 rollback，这些删除操作也会撤销
                 self.session.query(BacktestTradeLog).filter_by(execution_id=execution.id).delete(
                     synchronize_session=False)
 
-                # 更新元数据
                 execution.start_time = self.meta_data["start_time"]
                 execution.updated_time = datetime.datetime.now()
                 execution.params = self.meta_data["params"]
@@ -167,7 +160,6 @@ class DBRecorder(BaseRecorder):
                 execution.initial_cash = self.meta_data["initial_cash"]
                 execution.commission_scheme = self.meta_data["commission"]
             else:
-                # 如果不存在，创建新的
                 execution = BacktestExecution(
                     strategy_name=name,
                     description=desc,
@@ -180,7 +172,6 @@ class DBRecorder(BaseRecorder):
                     commission_scheme=self.meta_data["commission"]
                 )
                 self.session.add(execution)
-                # Flush 以便获取 generated ID (如果需要的话，虽然 UUID 通常在 python 端生成)
                 self.session.flush()
 
             # 2. 写入本次回测的结果数据
@@ -189,30 +180,26 @@ class DBRecorder(BaseRecorder):
             execution.sharpe_ratio = sharpe
             execution.max_drawdown = max_drawdown
             execution.annual_return = annual_return
-            execution.status = 'FINISHED'  # 直接标记为完成
+            # [新增] 写入新增字段
+            execution.trade_count = trade_count
+            execution.win_rate = win_rate
+
+            execution.status = 'FINISHED'
 
             # 3. 批量写入 Trade Logs
-            # 使用列表推导式构建对象列表
             trade_objects = [
                 BacktestTradeLog(
                     execution_id=execution.id,
-                    **trade_data  # 解包字典
+                    **trade_data
                 ) for trade_data in self.trades_buffer
             ]
 
-            # 使用 add_all 批量添加，性能更好
             self.session.add_all(trade_objects)
-
-            # 4. 提交事务 (Atomic Commit)
-            # 只有到了这一步才会真正修改数据库
             self.session.commit()
             print(f"--- DB Recorder: Success! Results saved for {name} ---")
 
         except Exception as e:
-            # 5. 发生任何错误，回滚事务
             self.session.rollback()
             print(f"DB Finish Error (Rolled back): {e}")
-            # 这里可以选择是否抛出异常，如果不抛出则不影响主程序退出
-            # raise e
         finally:
             self.session.close()

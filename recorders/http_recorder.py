@@ -25,7 +25,7 @@ class HttpRecorder(BaseRecorder):
         except Exception as e:
             print(f"HttpRecorder Error: {e}")
 
-    def finish_execution(self, final_value, total_return, sharpe, max_drawdown, annual_return):
+    def finish_execution(self, final_value, total_return, sharpe, max_drawdown, annual_return, trade_count, win_rate):
         payload = {
             'type': 'summary',
             'final_value': final_value,

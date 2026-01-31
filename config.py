@@ -57,3 +57,26 @@ DB_URL = 'mysql+pymysql://root:yourpassword@localhost:3306/quant'
 # --- 机器学习优化器配置 ---
 # 参数优化实时看板端口
 OPTUNA_DASHBOARD_PORT = 8090
+
+
+# --- 框架 → 实盘/仿真连接通道配置 ---
+# BROKER_ENVIRONMENTS 的 Key 必须与 adapters 下的文件名一致 (如 gm_broker.py -> "gm_broker")
+BROKER_ENVIRONMENTS = {
+    "gm_broker": {
+        'sim': {
+            'strategy_id': 'xxx',
+            'token': 'xxx',
+            'serv_addr': '127.0.0.1:7001',
+            'schedule': '1d:14:50:00'
+        },
+        'real': {
+            'strategy_id': 'xxx',
+            'token': 'xxx',
+            'serv_addr': '127.0.0.1:7001',
+            'schedule': '1d:14:50:00'
+        }
+    },
+
+    # 未来只需要新建 adapters/ib_broker.py 并在其中实现 launch() 方法即可
+    # "ib_broker": { ... }
+}
