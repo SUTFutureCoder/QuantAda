@@ -1,19 +1,32 @@
-import os
-import pandas as pd
 import datetime
+import os
 
+import pandas as pd
+
+from alarms.manager import AlarmManager
 from data_providers.gm_provider import GmDataProvider as UnifiedGmDataProvider
 from .base_broker import BaseLiveBroker, BaseOrderProxy
-from alarms.manager import AlarmManager
+
+import config
+from live_trader.engine import LiveTrader, on_order_status_callback
 
 try:
-    from gm.api import order_target_percent, order_volume, current, get_cash, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
+    from gm.api import order_target_percent, order_volume, current, get_cash, subscribe, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
         OrderStatus_New, OrderStatus_PartiallyFilled, OrderStatus_Filled, \
         OrderStatus_Canceled, OrderStatus_Rejected, OrderStatus_PendingNew, \
         OrderSide_Buy, OrderSide_Sell
+    from gm.api import set_serv_addr, set_token, ADJUST_PREV
+    from gm.csdk.c_sdk import (
+        py_gmi_set_strategy_id, gmi_set_mode, py_gmi_set_data_callback,
+        py_gmi_set_backtest_config, py_gmi_run, gmi_init, gmi_poll,
+        py_gmi_set_backtest_intraday
+    )
+    from gm.model.storage import context  # 掘金全局上下文
+    from gm.callback import callback_controller  # 掘金回调控制器
+    from gm.api._errors import check_gm_status
 except ImportError:
     print("Warning: 'gm' module not found. GmAdapter will not be available.")
-    order_target_percent = get_cash = OrderType_Market = MODE_BACKTEST = None
+    order_target_percent = get_cash = subscribe = OrderType_Market = MODE_BACKTEST = None
 
 
 class GmOrderProxy(BaseOrderProxy):
@@ -224,25 +237,6 @@ class GmBrokerAdapter(BaseLiveBroker):
         """
         实现掘金启动逻辑：手动注册回调，绕过 SDK 的 filename 加载机制
         """
-
-        try:
-            # 引入掘金底层组件
-            from gm.api import set_serv_addr, set_token, MODE_BACKTEST, MODE_LIVE, ADJUST_PREV
-            from gm.csdk.c_sdk import (
-                py_gmi_set_strategy_id, gmi_set_mode, py_gmi_set_data_callback,
-                py_gmi_set_backtest_config, py_gmi_run, gmi_init, gmi_poll,
-                py_gmi_set_backtest_intraday
-            )
-            from gm.model.storage import context  # 掘金全局上下文
-            from gm.callback import callback_controller  # 掘金回调控制器
-            from gm.api._errors import check_gm_status
-
-            import config
-            from live_trader.engine import LiveTrader, on_order_status_callback
-        except ImportError as e:
-            print(f"[Error] GM dependencies missing: {e}")
-            return
-
         print(f"\n>>> Launching {cls.__name__} (Custom Run Mode) <<<")
 
         token = conn_cfg.get('token')
@@ -303,6 +297,9 @@ class GmBrokerAdapter(BaseLiveBroker):
             trader = LiveTrader(engine_config)
             trader.init(ctx)
             ctx.strategy_instance = trader
+
+            print(f"[GmBroker] Subscribing to {len(ctx.strategy_instance._determine_symbols())} symbols...")
+            subscribe(symbols=ctx.strategy_instance._determine_symbols(), frequency='1d', count=1, wait_group=True)
 
             # 实盘定时任务配置
             if mode == MODE_LIVE and schedule_rule:

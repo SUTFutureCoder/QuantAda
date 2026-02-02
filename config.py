@@ -24,7 +24,7 @@ TUSHARE_TOKEN = 'your_tushare_token_here'
 # 用于演示快速接入数据源
 SXSC_TUSHARE_TOKEN = 'your_sxsc_tushare_token_here'
 
-# 掘金API Token
+# 掘金API Token 格式： TOKEN[|HOST:PORT]
 GM_TOKEN = 'your_gm_token_here'
 
 
@@ -67,16 +67,28 @@ BROKER_ENVIRONMENTS = {
             'strategy_id': 'xxx',
             'token': 'xxx',
             'serv_addr': '127.0.0.1:7001',
-            'schedule': '1d:14:50:00'
+            'schedule': '1d:14:45:00'
         },
         'real': {
             'strategy_id': 'xxx',
             'token': 'xxx',
             'serv_addr': '127.0.0.1:7001',
-            'schedule': '1d:14:50:00'
+            'schedule': '1d:14:45:00'
         }
     },
 
-    # 未来只需要新建 adapters/ib_broker.py 并在其中实现 launch() 方法即可
-    # "ib_broker": { ... }
+    # IB 配置
+    "ib_broker": {
+        'sim': {  # 模拟盘/Paper Trading
+            'host': '127.0.0.1',
+            'port': 7497,  # TWS Paper默认端口
+            'client_id': 1,
+            'account': 'DU12345'  # 可选
+        },
+        'real': {  # 实盘/Docker Gateway
+            'host': '127.0.0.1',
+            'port': 4001,  # Docker Gateway 通常暴露 4001/4002
+            'client_id': 99,  # 实盘建议用不同的ID
+        }
+    }
 }

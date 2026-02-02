@@ -1,3 +1,5 @@
+import importlib
+import inspect
 import time
 from types import SimpleNamespace
 
@@ -6,10 +8,8 @@ import pandas as pd
 import config
 from alarms.manager import AlarmManager
 from run import get_class_from_name
-from .adapters.gm_broker import GmBrokerAdapter, GmDataProvider
-
-ADAPTERS = {'gm': {'broker': GmBrokerAdapter, 'data_provider': GmDataProvider}}
-
+from .adapters.base_broker import BaseLiveBroker
+from data_providers.base_provider import BaseDataProvider
 
 class LiveTrader:
     """实盘交易引擎"""
@@ -17,17 +17,67 @@ class LiveTrader:
     def __init__(self, config: dict):
         self.user_config = config
         platform = config.get('platform', 'gm')
-        adapter_map = ADAPTERS.get(platform)
-        if not adapter_map: raise ValueError(f"Unsupported platform: {platform}")
 
-        self.data_provider = adapter_map['data_provider']()
-        self.BrokerClass = adapter_map['broker']
+        # 2. 动态加载对应的 Broker 和 DataProvider 类
+        print(f"[Engine] Loading adapter for platform: {platform}...")
+        self.BrokerClass, DataProviderClass = self._load_adapter_classes(platform)
+
+        # 3. 实例化组件
+        self.data_provider = DataProviderClass()
+
         self.strategy_class = None
         self.selector_class = None
         self.strategy = None
         self.broker = None
         self.config = None
         self.risk_control = None
+
+    def _load_adapter_classes(self, platform: str):
+        """
+        根据平台名称动态加载对应的模块和类
+        约定: platform='ib' -> 模块='live_trader.adapters.ib_broker'
+        """
+        # 处理模块名称约定 (例如 ib -> ib_broker)
+        module_name = platform if platform.endswith('_broker') else f"{platform}_broker"
+
+        try:
+            # 动态导入模块 (相对于当前包)
+            # 注意：engine.py 位于 live_trader 包下，adapters 也是同级子包
+            module_path = f".adapters.{module_name}"
+            mod = importlib.import_module(module_path, package=__package__)
+        except ImportError as e:
+            raise ValueError(
+                f"无法加载平台 '{platform}' 的适配器模块 ({module_name}.py)。请确保文件存在于 adapters 目录下。\n错误信息: {e}")
+
+        broker_cls = None
+        provider_cls = None
+
+        # 遍历模块成员，自动查找符合条件的类
+        # 过滤条件: 必须是定义在该模块中的类 (排除 import 进来的)，且继承自基类
+        for name, obj in inspect.getmembers(mod, inspect.isclass):
+            # 查找 Broker 类
+            if issubclass(obj, BaseLiveBroker) and obj is not BaseLiveBroker:
+                # 确保只加载当前模块定义的，防止加载了从其他地方 import 的基类
+                if obj.__module__ == mod.__name__:
+                    broker_cls = obj
+
+            # 查找 DataProvider 类
+            # 注意：有些 Provider 可能是在 adapter 文件中定义的，也可能是 import 的
+            # 这里我们放宽限制，只要该模块有这个类且符合接口即可
+            if issubclass(obj, BaseDataProvider) and obj is not BaseDataProvider:
+                if obj.__module__ == mod.__name__:
+                    provider_cls = obj
+
+        if not broker_cls:
+            raise ValueError(f"在模块 {module_name} 中未找到继承自 BaseLiveBroker 的类。")
+
+        if not provider_cls:
+            # 如果 adapter 文件中没有定义 Provider，尝试容错或使用通用 Provider
+            # 但通常我们要求 Adapter 必须提供配套的数据源封装
+            raise ValueError(f"在模块 {module_name} 中未找到继承自 BaseDataProvider 的类。")
+
+        print(f"[Engine] Adapter loaded: Broker={broker_cls.__name__}, Provider={provider_cls.__name__}")
+        return broker_cls, provider_cls
 
     def init(self, context):
         print("--- LiveTrader Engine Initializing ---")
@@ -94,14 +144,6 @@ class LiveTrader:
 
         print("--- LiveTrader Engine Initialized Successfully ---")
 
-        print(f"[Engine] Subscribing to {len(symbols)} symbols...")
-        # 注意：掘金需要显式调用 subscribe
-        # 如果你的 BaseLiveBroker 没有封装 subscribe，你需要在这里直接调用或者通过 broker 调用
-
-        # 临时修复：直接调用掘金 subscribe 以排除框架封装问题
-        if self.config.get('platform') == 'gm':
-            from gm.api import subscribe
-            subscribe(symbols=symbols, frequency='1d', count=100, wait_group=True)
 
     def run(self, context):
         print(f"--- LiveTrader Running at {context.now.strftime('%Y-%m-%d %H:%M:%S')} ---")

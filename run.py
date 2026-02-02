@@ -155,10 +155,11 @@ if __name__ == '__main__':
     parser.add_argument('--metric', type=str, default='calmar',
                         choices=['sharpe', 'return', 'final_value', 'calmar', 'mix_score'],  # 添加 mix_score
                         help="[优化模式] 优化目标")
-    parser.add_argument('--study_name', type=str, default=None)
-    parser.add_argument('--train_ratio', type=float, default=None)
-    parser.add_argument('--train_period', type=str, default=None)
-    parser.add_argument('--test_period', type=str, default=None)
+    parser.add_argument('--study_name', type=str, default=None, help="[优化模式] 训练名称")
+    parser.add_argument('--train_roll_period', type=str, default=None, help="[优化模式] 动态滚动训练，使用T-X作为训练集。例如：1w、1m、6m、1y")
+    parser.add_argument('--train_ratio', type=float, default=None, help="[优化模式] 比例切分训练集、测试集")
+    parser.add_argument('--train_period', type=str, default=None, help="[优化模式] 训练集时段")
+    parser.add_argument('--test_period', type=str, default=None, help="[优化模式] 测试集时段")
 
     # 实盘参数
     parser.add_argument('--connect', type=str, default=None,

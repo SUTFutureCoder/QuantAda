@@ -3,7 +3,7 @@ from datetime import datetime
 import pandas as pd
 
 try:
-    from gm.api import history, set_token, current
+    from gm.api import history, set_token, current, set_serv_addr
 except ImportError:
     print("Warning: 'gm' module not found. GmDataProvider will not be available.")
     history = set_token = current = None
@@ -32,11 +32,13 @@ class GmDataProvider(BaseDataProvider):
             self.valid_config = True
             set_token(token)
         elif config and hasattr(config, 'GM_TOKEN'):
-            cfg_token = config.GM_TOKEN
+            cfg_token, serv_addr = config.GM_TOKEN.split("|", 1)
             if cfg_token and cfg_token != 'your_gm_token_here':
                 self.token = cfg_token
                 self.valid_config = True
                 set_token(cfg_token)
+            if serv_addr:
+                set_serv_addr(serv_addr)
 
     def _map_frequency(self, timeframe: str, compression: int) -> str:
         if timeframe == 'Days':
