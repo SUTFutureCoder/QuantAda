@@ -2,7 +2,7 @@ import os
 
 import pandas as pd
 
-from config import DATA_PATH
+import config
 from .base_provider import BaseDataProvider
 
 
@@ -12,7 +12,7 @@ class CsvDataProvider(BaseDataProvider):
     """
     PRIORITY = 10  # 最高优先级，先从本地CSV读取
 
-    def __init__(self, data_path: str = DATA_PATH):
+    def __init__(self, data_path: str = config.DATA_PATH):
         self.data_path = data_path
         if not os.path.exists(self.data_path):
             os.mkdir(self.data_path)

@@ -7,17 +7,11 @@ from data_providers.base_provider import BaseDataProvider
 class TiingoProvider(BaseDataProvider):
     """
     Tiingo 数据源 (付费/高质量)
-
-    特点：
-    1. 价格低廉 ($10/mo)，适合个人量化。
-    2. 数据极度干净，自动处理复权。
-    3. 覆盖美股 (全量)、A股 (部分)、外汇、加密货币。
     """
 
     PRIORITY = 50
 
     def __init__(self, token: str = config.TIINGO_TOKEN):
-        # 请在 config.py 中添加 TIINGO_KEY = 'your_key'
         if not token or token == 'your_token_here':
             print("Warning: TIINGO_KEY not found in config. TiingoProvider unavailable.")
             self.client = None
@@ -25,41 +19,21 @@ class TiingoProvider(BaseDataProvider):
             self.client = TiingoClient({'api_key': token, 'session': True})
 
     def _map_symbol(self, symbol):
-        """
-        映射规则：
-        - A股: SHSE.510300 -> 510300 (Tiingo A股直接用6位数字)
-        - 美股: STK.AAPL.USD -> AAPL
-        - 其他: 纯数字直接透传
-        """
         sym = symbol.upper()
-
-        # --- 1. A股处理 (去除 SHSE./SZSE.) ---
         if 'SHSE.' in sym or 'SZSE.' in sym:
-            # 提取最后一段数字代码
             return sym.split('.')[-1]
-
-        # --- 2. 美股处理 (STK.NVDA.USD -> NVDA) ---
         if 'STK.' in sym and 'USD' in sym:
             return sym.split('.')[1]
-
-        # --- 3. 纯数字兜底 (防止传入纯数字代码被忽略) ---
         if sym.isdigit():
             return sym
-
-        # --- 4. 默认兜底 (如 AAPL) ---
-        # 如果不含 '.'，假设是美股 Ticker 直接返回
         if '.' not in sym:
             return sym
-
-        # 其他情况保持原样 (可能用户传了特殊格式)
         return sym
 
     def get_data(self, symbol, start_date=None, end_date=None, timeframe='Days', compression=1):
         if not self.client:
             return None
 
-        # Tiingo 主要优势是日线数据 (EOD)
-        # 如果需要分钟线，Tiingo IEX 接口也支持，但历史较短
         if timeframe != 'Days':
             print(f"[Tiingo] Warning: Tiingo best supports Daily data. Intraday might vary.")
 
@@ -67,13 +41,12 @@ class TiingoProvider(BaseDataProvider):
         print(f"[Tiingo] Fetching {tiingo_symbol}...")
 
         try:
-            # Tiingo API 返回的是 json list
             data = self.client.get_ticker_price(
                 tiingo_symbol,
                 fmt='json',
                 startDate=start_date,
                 endDate=end_date,
-                frequency='daily'  # or 'resample' for intraday if paid IEX
+                frequency='daily'
             )
 
             if not data:
@@ -82,38 +55,33 @@ class TiingoProvider(BaseDataProvider):
 
             df = pd.DataFrame(data)
 
-            # Tiingo 返回列: date, adjClose, adjHigh, adjLow, adjOpen, adjVolume, ...
-            # 我们直接用复权后的数据 (adj*) 作为主力数据，防止回测出现价格跳空
-            df.rename(columns={
-                'date': 'datetime',
-                'adjOpen': 'open',
-                'adjHigh': 'high',
-                'adjLow': 'low',
-                'adjClose': 'close',
-                'adjVolume': 'volume'
-            }, inplace=True)
+            # === 明确列选择，防止产生重复列 ===
+            # Tiingo 同时返回 'open' 和 'adjOpen'。
+            # 直接 rename 可能会导致 DataFrame 中存在两个 'open' 列。
+            # 这里的做法是：只提取我们需要的 adj 列，并直接赋值给新列名。
 
-            df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_localize(None)  # 移除时区
-            df.set_index('datetime', inplace=True)
-            df.sort_index(inplace=True)
+            # 1. 检查是否存在复权数据 (股票通常有，加密货币/外汇可能没有)
+            if 'adjClose' in df.columns:
+                # 股票模式：强制使用复权数据
+                # 显式构造新 DataFrame，丢弃未复权数据，杜绝 duplicates
+                clean_df = df[['date', 'adjOpen', 'adjHigh', 'adjLow', 'adjClose', 'adjVolume']].copy()
+                clean_df.columns = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+            else:
+                # 兜底模式：使用原始数据
+                base_cols = ['date', 'open', 'high', 'low', 'close', 'volume']
+                # 取交集防止列缺失
+                existing_cols = [c for c in base_cols if c in df.columns]
+                clean_df = df[existing_cols].copy()
+                clean_df.rename(columns={'date': 'datetime'}, inplace=True)
 
-            return df[['open', 'high', 'low', 'close', 'volume']]
+            # 2. 标准化处理
+            clean_df['datetime'] = pd.to_datetime(clean_df['datetime']).dt.tz_localize(None)
+            clean_df.set_index('datetime', inplace=True)
+            clean_df.sort_index(inplace=True)
+
+            # 3. 再次确保只返回标准 OHLCV
+            return clean_df[['open', 'high', 'low', 'close', 'volume']]
 
         except Exception as e:
             print(f"[Tiingo] Error fetching {symbol}: {e}")
             return None
-
-
-if __name__ == '__main__':
-    # 单元测试
-    p = TiingoProvider()
-
-    # 测试 1: A股
-    print("\n--- Test A-Share ---")
-    df_cn = p.get_data("SHSE.510300", start_date="20240101")
-    if df_cn is not None: print(df_cn.tail(2))
-
-    # 测试 2: 美股 (QuantAda 格式)
-    print("\n--- Test US Stock (IB Style) ---")
-    df_us = p.get_data("STK.NVDA.USD", start_date="20240101") # 等价于NVDA
-    if df_us is not None: print(df_us.tail(2))

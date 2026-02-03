@@ -5,7 +5,7 @@ from collections import OrderedDict
 
 import pandas as pd
 
-from config import DATA_PATH, CACHE_DATA
+import config
 from .base_provider import BaseDataProvider
 from .csv_provider import CsvDataProvider
 
@@ -13,7 +13,7 @@ from .csv_provider import CsvDataProvider
 class DataManager:
     def __init__(self):
         self.providers = self.auto_discover_and_sort_providers()
-        self.data_path = DATA_PATH
+        self.data_path = config.DATA_PATH
         # 创建一个从字符串名称到提供者实例的映射
         self.provider_map = OrderedDict(
             (p.__class__.__name__.replace('DataProvider', '').lower(), p)
@@ -157,8 +157,10 @@ class DataManager:
 
     def _cache_data(self, df: pd.DataFrame, symbol: str, timeframe: str = 'Days', compression: int = 1):
         """将DataFrame完整写入CSV文件（覆盖）"""
-        if not CACHE_DATA: return
-        if not os.path.exists(self.data_path): os.makedirs(self.data_path)
+        if not getattr(config, 'CACHE_DATA', False):
+            return
+        if not os.path.exists(self.data_path):
+            os.makedirs(self.data_path)
         csv_filepath = CsvDataProvider.get_cache_filepath(self.data_path, symbol, timeframe, compression)
         try:
             df.to_csv(csv_filepath, mode='w')

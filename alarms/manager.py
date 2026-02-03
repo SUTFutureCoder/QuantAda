@@ -66,9 +66,9 @@ class AlarmManager:
 
     # --- 统一推送接口 ---
 
-    def push_text(self, content):
+    def push_text(self, content, level):
         for alarm in self.alarms:
-            threading.Thread(target=alarm.push_text, args=(content,)).start()
+            threading.Thread(target=alarm.push_text, args=(content, level)).start()
 
     def push_exception(self, context, error):
         for alarm in self.alarms:

@@ -23,22 +23,21 @@ class GmDataProvider(BaseDataProvider):
 
     PRIORITY = 40
 
-    def __init__(self, token=None):
+    def __init__(self, token=config.GM_TOKEN):
+        if not token or token == 'your_token_here|host:port':
+            print("Warning: Gm token is not configured. GmProvider will be skipped.")
+            self.token = None
+            return
+
         self.valid_config = False
         self.token = None
-
-        if token:
-            self.token = token
+        cfg_token, serv_addr = config.GM_TOKEN.split("|", 1)
+        if cfg_token:
+            self.token = cfg_token
             self.valid_config = True
-            set_token(token)
-        elif config and hasattr(config, 'GM_TOKEN'):
-            cfg_token, serv_addr = config.GM_TOKEN.split("|", 1)
-            if cfg_token and cfg_token != 'your_token_here':
-                self.token = cfg_token
-                self.valid_config = True
-                set_token(cfg_token)
-            if serv_addr:
-                set_serv_addr(serv_addr)
+            set_token(cfg_token)
+        if serv_addr:
+            set_serv_addr(serv_addr)
 
     def _map_frequency(self, timeframe: str, compression: int) -> str:
         if timeframe == 'Days':
@@ -50,6 +49,9 @@ class GmDataProvider(BaseDataProvider):
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
                  timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
 
+        if not self.token:
+            return None
+        
         try:
             freq = self._map_frequency(timeframe, compression)
 

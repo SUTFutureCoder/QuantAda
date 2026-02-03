@@ -5,6 +5,11 @@ DEFAULT_LOT_SIZE = 100
 # 年交易日，如果是加密货币请设置为365
 ANNUAL_FACTOR = 252
 
+# 限价单即时成交的溢价比例 (默认 2%)
+# 作用：实盘下单时，以 现价 * (1 ± SLIPPAGE) 发送限价单。
+# 目的：既模拟市价单的成交速度，又避免因价格瞬间剧烈波动造成的资金透支或高位接盘。
+LIVE_LIMIT_ORDER_SLIPPAGE = 0.02
+
 # 数据缓存路径
 DATA_PATH = '.data'
 

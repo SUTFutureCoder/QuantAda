@@ -362,7 +362,7 @@ class OptimizationJob:
         final_estimated = max(final_estimated, min_saturation)
 
         # 5. 设定上限 (防止无限膨胀)
-        final_estimated = min(final_estimated, 10000)
+        # final_estimated = min(final_estimated, 10000)
 
         return final_estimated
 
@@ -374,9 +374,30 @@ class OptimizationJob:
         for param_name, config in self.opt_params_def.items():
             p_type = config.get('type')
             if p_type == 'int':
-                val = trial.suggest_int(param_name, config['low'], config['high'], step=config.get('step', 1))
+                # 自动计算符合步进的最大 high 值
+                step = config.get('step', 1)
+                high = config['high']
+                low = config['low']
+                # 修正逻辑: high = low + n * step
+                corrected_high = low + int((high - low) // step) * step
+
+                val = trial.suggest_int(param_name, low, corrected_high, step=step)
+
             elif p_type == 'float':
-                val = trial.suggest_float(param_name, config['low'], config['high'], step=config.get('step', None))
+                step = config.get('step', None)
+                low = config['low']
+                high = config['high']
+
+                if step is not None:
+                    # 浮点数修正，增加微小偏移防止精度丢失
+                    import math
+                    steps = math.floor((high - low) / step + 1e-10)
+                    corrected_high = low + steps * step
+                    # 如果修正值和原始值非常接近（浮点误差），就用原始的，否则用修正的
+                    if abs(corrected_high - high) > 1e-10:
+                        high = corrected_high
+
+                val = trial.suggest_float(param_name, low, high, step=step)
             elif p_type == 'categorical':
                 val = trial.suggest_categorical(param_name, config['choices'])
             else:

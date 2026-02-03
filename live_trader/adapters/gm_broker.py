@@ -11,7 +11,7 @@ import config
 from live_trader.engine import LiveTrader, on_order_status_callback
 
 try:
-    from gm.api import order_target_percent, order_target_value, order_volume, current, get_cash, subscribe, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
+    from gm.api import order_target_percent, order_target_value, order_volume, current, get_cash, subscribe, OrderType_Market, OrderType_Limit, MODE_LIVE, MODE_BACKTEST, \
         OrderStatus_New, OrderStatus_PartiallyFilled, OrderStatus_Filled, \
         OrderStatus_Canceled, OrderStatus_Rejected, OrderStatus_PendingNew, \
         OrderSide_Buy, OrderSide_Sell
@@ -115,6 +115,10 @@ class GmBrokerAdapter(BaseLiveBroker):
         super().__init__(context, cash_override, commission_override)
         self.is_live = self.is_live_mode(context)  # 保存当前是否为实盘
 
+    def getcash(self):
+        """ 获取可用资金 (Backtrader 命名风格)"""
+        return self._fetch_real_cash()
+
     # 实盘引擎调用此方法设置当前时间时，我们将其转换为无时区的北京时间
     # 这样 engine.py 中对比 df.index (无时区) 和 current_dt (无时区) 就不会报错了
     def set_datetime(self, dt):
@@ -176,60 +180,75 @@ class GmBrokerAdapter(BaseLiveBroker):
     def _submit_order(self, data, volume, side, price):
         gm_side = OrderSide_Buy if side == 'BUY' else OrderSide_Sell
 
-        upper_limit, lower_limit = self._get_upper_lower_limit(data, price)
-        actual_price = upper_limit if side == 'BUY' else lower_limit
+        # === 核心分歧逻辑 ===
+        # 回测 (Backtest): 使用 市价单 (Market)。
+        #   尽可能和backtester回测结果对齐，券商回测的唯一作用是：测试代码有没有 Bug（会不会报错）。 至于它跑出来的收益率是 59% 还是 86%，已经不重要。
+        #   理由: 掘金回测引擎的市价单能以 Open 价成交，还原真实低开红利。限价单在回测中可能以 Limit 价成交，导致低开时买贵。
+        # 实盘 (Live): 使用 限价单 (Limit)。backtester的真实结果，如果gm_broker实盘用市价则第二天成交、大幅降低收益
+        #   理由: 实盘中限价单能以最优价成交，且能避免市价单导致的巨额资金冻结。
 
-        # 资金预检查，防止资金不足
+        if self.is_live:
+            # --- 实盘逻辑 (Limit) ---
+            slippage = getattr(config, 'LIVE_LIMIT_ORDER_SLIPPAGE', 0.02)
+            if side == 'BUY':
+                actual_price = price * (1 + slippage)
+                actual_price = float(round(actual_price, 4))  # 保留精度
+                freeze_price = actual_price  # 实盘按委托价冻结
+            else:
+                actual_price = price * (1 - slippage)
+                actual_price = float(round(actual_price, 4))
+            order_type = OrderType_Limit
+
+        else:
+            # --- 回测逻辑 (Market) ---
+            # 即使是 Market 单，我们也需要预估冻结资金来做 Auto-Downsize
+            # A股通常冻结涨停价，回测中我们保守估算 1.1 倍 (10%涨停) 作为冻结基准
+            freeze_buffer = 1.1
+            if side == 'BUY':
+                freeze_price = price * freeze_buffer
+            else:
+                freeze_price = 0  # 卖出不查钱
+
+            # 回测中市价单不需要指定 price (或者传0)，引擎按 Open 撮合
+            actual_price = 0
+            order_type = OrderType_Market
+
+        # 2. 资金预检查与自动降级 (仅买入)
         if side == 'BUY':
             available_cash = self._fetch_real_cash()
-            # 预估冻结资金 (加 0.05% 缓冲)
-            estimated_cost = volume * actual_price * 1.0005
+            # 预估成本
+            estimated_cost = volume * freeze_price * 1.0005
 
             if estimated_cost > available_cash:
-                # 资金不够覆盖涨停价冻结，自动降仓
                 old_volume = volume
-                volume = int(available_cash / (actual_price * 1.0005) // 100) * 100
+                # 倒推最大股数
+                volume = int(available_cash / (freeze_price * 1.0005) // 100) * 100
 
                 if volume < 100:
-                    print(
-                        f"[GmBroker] Skip Buy {data._name}: Cash {available_cash:.2f} < LimitCost {estimated_cost:.2f}")
+                    # 只有真的买不起了才打印 (避免刷屏)
+                    # print(f"[GmBroker] Skip Buy ...")
                     return None
 
-                print(f"[GmBroker] Auto-Downsize {data._name}: {old_volume} -> {volume} (Reason: LimitPrice Freeze)")
+                # 仅在发生实质性降仓时打印
+                if old_volume != volume:
+                    print(
+                        f"[GmBroker] Auto-Downsize {data._name}: {old_volume} -> {volume} (Reason: Cash Fit, Mode: {'Live' if self.is_live else 'Backtest'})")
 
         if volume <= 0: return None
 
         try:
-            # 1=Open, 2=Close
             effect = 1 if side == 'BUY' else 2
+
             ords = order_volume(
                 symbol=data._name, volume=volume, side=gm_side,
-                order_type=OrderType_Market, position_effect=effect, price=actual_price
+                order_type=order_type,
+                position_effect=effect,
+                price=actual_price
             )
             return GmOrderProxy(ords[-1], self.is_live, data=data) if ords else None
         except Exception as e:
             print(f"[GM Error] {e}")
             return None
-
-    # 计算涨停和跌停保护价
-    def _get_upper_lower_limit(self, data, price):
-        # 获取前一天收盘价用于市价单保护
-        current_dt = self._datetime
-        lastday_dt = data.p.dataname.asof(current_dt - datetime.timedelta(days=1))
-        pre_close = 0.0
-        if not lastday_dt.empty:
-            pre_close = lastday_dt.close
-
-        # 确定计算基准价：优先昨收，其次开盘，最后现价
-        base_price_for_calc = pre_close if pre_close > 0 else price
-
-        # 估算/确定保护价
-        limit_ratio = 0.20 if data._name.startswith(('SHSE.688', 'SZSE.300')) else 0.10
-
-        upper_limit = base_price_for_calc * (1 + limit_ratio - 0.015)
-        lower_limit = base_price_for_calc * (1 - limit_ratio + 0.015)
-
-        return upper_limit, lower_limit
 
     # --- 实现 BaseLiveBroker 的启动协议 ---
     @classmethod

@@ -64,6 +64,8 @@ class BacktraderStrategyWrapper(bt.Strategy):
         self.actual_start_date = None
         # 用于记录单次 next 循环中，卖单预计释放的资金
         self.expected_freed_cash = 0.0
+        # 本轮循环已花费的虚拟现金
+        self.virtual_spent_cash = 0.0
         self.dataclose = self.datas[0].close
         self.strategy = strategy_class(broker=self, params=params)
         self.risk_controls = []
@@ -98,6 +100,8 @@ class BacktraderStrategyWrapper(bt.Strategy):
     def next(self):
         # 每次进入新的 K 线周期，重置预计释放资金为 0
         self.expected_freed_cash = 0.0
+        # 每过一个K线，重置虚拟消费账本
+        self.virtual_spent_cash = 0.0
 
         if self.actual_start_date is None:
             self.actual_start_date = self.datas[0].datetime.datetime(0)
@@ -265,24 +269,37 @@ class BacktraderStrategyWrapper(bt.Strategy):
         if delta_shares > 0:  # 买入
             # 获取可用现金 (含本次循环预计释放的资金)
             current_cash = self.broker.getcash()
-            total_purchasing_power = current_cash + self.expected_freed_cash
+
+            # 2. 计算动态购买力
+            # 公式: 静态现金 + 卖出回笼 - [新增]本轮已花掉的钱
+            total_purchasing_power = current_cash + self.expected_freed_cash - self.virtual_spent_cash
 
             # 估算最大购买力 (含手续费)
             commission_ratio = self.broker.getcommissioninfo(data).p.commission
-            # 这里的 target 是目标总市值，但我们受限于现金
-            # 计算仅用现金能买多少
-            max_buy_by_cash = total_purchasing_power / (price * (1 + commission_ratio))
 
-            # 取 目标增量 和 现金购买上限 的较小值
+            # 增加 0.95 的安全折扣 (Safety Buffer)
+            # 防止隔日开盘跳空高开 (Gap Up) 导致资金不足被拒单，尽管会有几个因为双重高开导致拒单，但此时不买/买失败也是一种避免高开低走的风控。
+            safe_purchasing_power = total_purchasing_power * 0.95
+
+            # 防止算力穿透 (比如 safe_purchasing_power 为负时)
+            if safe_purchasing_power < 0: safe_purchasing_power = 0
+
+            max_buy_by_cash = safe_purchasing_power / (price * (1 + commission_ratio))
+
+            # 取 目标量 和 现金上限 的较小值
             shares_to_buy = min(delta_shares, max_buy_by_cash)
 
-            # [关键] 向下取整到 lot_size
+            # 向下取整到 lot_size
             if lot_size > 1:
                 shares_to_buy = int(shares_to_buy // lot_size) * lot_size
             else:
                 shares_to_buy = int(shares_to_buy)
 
             if shares_to_buy > 0:
+                # 记账：这笔钱已经花出去了！
+                # 估算花费 = 股数 * 价格 * (1+手续费)
+                estimated_cost = shares_to_buy * price * (1 + commission_ratio)
+                self.virtual_spent_cash += estimated_cost
                 return self.buy(data=data, size=shares_to_buy)
 
         elif delta_shares < 0:  # 卖出
@@ -478,6 +495,16 @@ class Backtester:
     def _init_broker(self):
         self.cerebro.broker.setcash(self.cash)
         self.cerebro.broker.setcommission(commission=self.commission)
+
+        # 开启 "Cheat-On-Close" (收盘作弊模式)
+        # 作用：让 T 日发出的市价单，以 T 日的 Close 价成交。
+        # 目的：模拟实盘在 14:45 (接近收盘) 的买入动作，消除 "次日低开红利" 的回测虚高。
+        self.cerebro.broker.set_coc(True)
+
+        # 关闭下单时的资金检查
+        # 允许 "先卖后买" 的订单在资金未回笼时先提交进入队列
+        # 只要在次日开盘执行顺序正确 (先卖出成交回款，再买入)，交易就能成功
+        self.cerebro.broker.set_checksubmit(False)
 
         # 设置百分比滑点 (0.001 表示 0.1%)
         # 这会让买入价更高，卖出价更低，模拟真实市场的冲击成本

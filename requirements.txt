@@ -4,7 +4,6 @@ pandas
 tushare
 akshare
 tiingo
-yfinance
 ta-lib
 requests
 sqlalchemy

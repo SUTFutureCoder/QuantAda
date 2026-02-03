@@ -3,7 +3,7 @@ from functools import partial
 import pandas as pd
 import requests
 
-from config import SXSC_TUSHARE_TOKEN
+import config
 from .base_provider import BaseDataProvider
 
 """
@@ -18,7 +18,7 @@ class SxscTushareDataProvider(BaseDataProvider):
     __http_url = 'http://221.204.19.233:7172'
     __timeout = 30  # 增加一个默认的请求超时时间
 
-    def __init__(self, token: str = SXSC_TUSHARE_TOKEN):
+    def __init__(self, token: str = config.SXSC_TUSHARE_TOKEN):
         if not token or token == 'your_token_here':
             print("Warning: SXSC Tushare token is not configured. SxscTushareProvider will be skipped.")
             self.token = None
