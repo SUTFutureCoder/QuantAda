@@ -25,7 +25,7 @@ TUSHARE_TOKEN = 'your_tushare_token_here'
 SXSC_TUSHARE_TOKEN = 'your_sxsc_tushare_token_here'
 
 # 掘金API Token 格式： TOKEN[|HOST:PORT]
-GM_TOKEN = 'your_gm_token_here'
+GM_TOKEN = 'your_gm_token_here|host:port'
 
 
 # --- 报警与监控配置 ---

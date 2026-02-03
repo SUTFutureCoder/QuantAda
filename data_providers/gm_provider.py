@@ -4,8 +4,8 @@ import pandas as pd
 
 try:
     from gm.api import history, set_token, current, set_serv_addr
-except ImportError:
-    print("Warning: 'gm' module not found. GmDataProvider will not be available.")
+except ImportError as e:
+    print("Warning: 'gm' module not found. GmDataProvider will not be available. Error: {}".format(e))
     history = set_token = current = None
 
 from .base_provider import BaseDataProvider
