@@ -78,6 +78,18 @@ class BacktraderStrategyWrapper(bt.Strategy):
                 self.risk_controls.append(rc_cls(broker=self, params=risk_control_params))
         self.strategy.init()
 
+    def getcash(self):
+        """代理调用真实 Broker 的 getcash"""
+        return self.broker.getcash()
+
+    def getvalue(self):
+        """代理调用真实 Broker 的 getvalue"""
+        return self.broker.getvalue()
+
+    def getcommissioninfo(self, data):
+        """代理调用真实 Broker 的 getcommissioninfo"""
+        return self.broker.getcommissioninfo(data)
+
     def log(self, txt, dt=None):
         if self.verbose and config.LOG:
             dt = dt or self.datas[0].datetime.date(0)
@@ -208,6 +220,84 @@ class BacktraderStrategyWrapper(bt.Strategy):
                 return self.close(data=data)
 
             # 向下取整到 lot_size
+            if lot_size > 1:
+                shares_to_sell = int(shares_to_sell // lot_size) * lot_size
+            else:
+                shares_to_sell = int(shares_to_sell)
+
+            if shares_to_sell > 0:
+                return self.sell(data=data, size=shares_to_sell)
+
+        return None
+
+    def order_target_value(self, data=None, target=0.0, **kwargs):
+        """
+        重写 order_target_value 以支持：
+        1. A股整手 (Lot Size)
+        2. 同Bar资金回笼 (Selling frees cash for Buying)
+        3. 风控拦截 (Risk Control Lock)
+        """
+        data = data or self.datas[0]
+        lot_size = kwargs.get('lot_size', config.DEFAULT_LOT_SIZE)
+
+        # 0. 风控拦截：如果该标的正在被风控接管，且策略试图买入/持有，则拦截
+        if hasattr(self.strategy, 'risk_handled_symbols'):
+            # 如果目标金额 > 0，视为买入或维持持仓意图，予以拦截
+            if data._name in self.strategy.risk_handled_symbols and target > 0:
+                self.log(f"IGNORED order_target_value({target}) for {data._name} due to Risk Control Lock.")
+                return None
+
+        # 1. 获取当前持仓和价格
+        pos_size = self.getposition(data).size
+        price = data.close[0]
+
+        if price <= 0:
+            return None
+
+        # 2. 计算目标股数 (核心区别：直接用 target_value / price)
+        # target 参数即为目标市值 (Cash Value)
+        expected_shares = target / price
+
+        # 3. 计算需要变化的股数
+        delta_shares = expected_shares - pos_size
+
+        # 4. 执行下单逻辑 (逻辑复用 order_target_percent)
+        if delta_shares > 0:  # 买入
+            # 获取可用现金 (含本次循环预计释放的资金)
+            current_cash = self.broker.getcash()
+            total_purchasing_power = current_cash + self.expected_freed_cash
+
+            # 估算最大购买力 (含手续费)
+            commission_ratio = self.broker.getcommissioninfo(data).p.commission
+            # 这里的 target 是目标总市值，但我们受限于现金
+            # 计算仅用现金能买多少
+            max_buy_by_cash = total_purchasing_power / (price * (1 + commission_ratio))
+
+            # 取 目标增量 和 现金购买上限 的较小值
+            shares_to_buy = min(delta_shares, max_buy_by_cash)
+
+            # [关键] 向下取整到 lot_size
+            if lot_size > 1:
+                shares_to_buy = int(shares_to_buy // lot_size) * lot_size
+            else:
+                shares_to_buy = int(shares_to_buy)
+
+            if shares_to_buy > 0:
+                return self.buy(data=data, size=shares_to_buy)
+
+        elif delta_shares < 0:  # 卖出
+            shares_to_sell = abs(delta_shares)
+
+            # 记录预计释放的资金 (用于同Bar买入)
+            if shares_to_sell > 0:
+                estimated_freed_value = shares_to_sell * price
+                self.expected_freed_cash += estimated_freed_value
+
+            # 如果目标价值是 0 或极小，视为清仓
+            if target <= 1.0:  # 容忍浮点误差，小于1块钱视同清仓
+                return self.close(data=data)
+
+            # [关键] 向下取整到 lot_size
             if lot_size > 1:
                 shares_to_sell = int(shares_to_sell // lot_size) * lot_size
             else:

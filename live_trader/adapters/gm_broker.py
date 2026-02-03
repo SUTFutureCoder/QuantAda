@@ -11,7 +11,7 @@ import config
 from live_trader.engine import LiveTrader, on_order_status_callback
 
 try:
-    from gm.api import order_target_percent, order_volume, current, get_cash, subscribe, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
+    from gm.api import order_target_percent, order_target_value, order_volume, current, get_cash, subscribe, OrderType_Market, MODE_LIVE, MODE_BACKTEST, \
         OrderStatus_New, OrderStatus_PartiallyFilled, OrderStatus_Filled, \
         OrderStatus_Canceled, OrderStatus_Rejected, OrderStatus_PendingNew, \
         OrderSide_Buy, OrderSide_Sell
@@ -26,7 +26,7 @@ try:
     from gm.api._errors import check_gm_status
 except ImportError:
     print("Warning: 'gm' module not found. GmAdapter will not be available.")
-    order_target_percent = get_cash = subscribe = OrderType_Market = MODE_BACKTEST = None
+    order_target_percent = order_target_value = get_cash = subscribe = OrderType_Market = MODE_BACKTEST = None
 
 
 class GmOrderProxy(BaseOrderProxy):

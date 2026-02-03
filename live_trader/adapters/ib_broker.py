@@ -152,11 +152,22 @@ class IBBrokerAdapter(BaseLiveBroker):
     # 1. 查钱
     def _fetch_real_cash(self) -> float:
         if not self.ib: return 0.0
-        # 查找基准货币的 CashBalance
-        tags = [v for v in self.ib.accountValues() if v.tag == 'CashBalance' and v.currency == 'USD']  # 假设账户基准是 USD
+
+        # 优先读取 TotalCashBalance (基础货币总现金)
+        # 这个值代表你账户里的现金总额，不包含融资额度
+        tags = [v for v in self.ib.accountValues() if v.tag == 'TotalCashBalance' and v.currency == 'USD']
+
+        if not tags:
+            # 备选：CashBalance
+            tags = [v for v in self.ib.accountValues() if v.tag == 'CashBalance' and v.currency == 'USD']
+
         if tags:
-            return float(tags[0].value)
-        # 备选：TotalCashBalance
+            try:
+                real_cash = float(tags[0].value)
+                return real_cash
+            except:
+                return 0.0
+
         return 0.0
 
     # 2. 查持仓

@@ -150,29 +150,78 @@ class BaseLiveBroker(ABC):
             return self._smart_sell(data, abs(delta_shares), price, **kwargs)
         return None
 
+    def order_target_value(self, data, target, **kwargs):
+        """
+        按目标市值金额下单
+        target: 目标持仓金额 (例如 1000 USD)
+        """
+        # 1. 原子操作：查价
+        price = self._get_current_price(data)
+        if not price or price <= 0: return None
+
+        # 2. 核心算法：直接用目标金额除以价格
+        expected_shares = target / price
+        pos_obj = self.get_position(data)
+        delta_shares = expected_shares - pos_obj.size
+
+        # 3. 决策分发
+        if delta_shares > 0:
+            # 使用针对 Value 模式的智能买入逻辑
+            return self._smart_buy_value(data, delta_shares, price, target, **kwargs)
+        elif delta_shares < 0:
+            return self._smart_sell(data, abs(delta_shares), price, **kwargs)
+        return None
+
+    # =========================================================
+    #  智能执行逻辑 (Smart Execution)
+    # =========================================================
+
     def _smart_buy(self, data, shares, price, target_pct, **kwargs):
-        """智能买入：资金检查 + 延迟重试 + 自动降级"""
+        """智能买入 (Percent模式)：资金检查 + 延迟重试 + 自动降级"""
         lot_size = kwargs.get('lot_size', 100)
         cash = self.get_cash()
         estimated_cost = shares * price * 1.01  # 1% 缓冲
 
-        # 资金不足时的决策树
         if cash < estimated_cost:
             if self._has_pending_sells():
-                # 场景A: 有卖单在途 -> 存入延迟队列
-                self._add_deferred(self.order_target_percent, locals())
+                # 有卖单在途 -> 存入延迟队列 (重试 order_target_percent)
+                retry_kwargs = {'data': data, 'target': target_pct}
+                retry_kwargs.update(kwargs)
+                self._add_deferred(self.order_target_percent, retry_kwargs)
                 return _DeferredOrderProxy(data)
             else:
-                # 场景B: 真没钱了 -> 降级购买 (Buying Power Cut)
+                # 没钱了 -> 降级购买
                 max_shares = cash / (price * 1.01)
                 shares = min(shares, max_shares)
+                if shares < 1:
+                    print(f"[Broker Warning] Buy {data._name} skipped. Cash ({cash:.2f}) insufficient.")
 
-                # 如果降级后股数变为0，打印原因
-                if shares < 1:  # 假设最小买入单位是1
-                    print(
-                        f"[Broker Warning] Buy {data._name} skipped. Cash ({cash:.2f}) insufficient for price {price:.2f}.")
+        return self._finalize_and_submit(data, shares, price, lot_size)
 
-        # 取整逻辑
+    def _smart_buy_value(self, data, shares, price, target_value, **kwargs):
+        """智能买入 (Value模式)：资金检查 + 延迟重试 + 自动降级"""
+        lot_size = kwargs.get('lot_size', 100)
+        cash = self.get_cash()
+        estimated_cost = shares * price * 1.01
+
+        if cash < estimated_cost:
+            if self._has_pending_sells():
+                # 有卖单在途 -> 存入延迟队列 (重试 order_target_value)
+                retry_kwargs = {'data': data, 'target': target_value}
+                retry_kwargs.update(kwargs)
+                self._add_deferred(self.order_target_value, retry_kwargs)
+                return _DeferredOrderProxy(data)
+            else:
+                # 没钱了 -> 降级购买
+                max_shares = cash / (price * 1.01)
+                shares = min(shares, max_shares)
+                if shares < 1:
+                    print(f"[Broker Warning] Buy {data._name} skipped. Cash ({cash:.2f}) insufficient.")
+
+        return self._finalize_and_submit(data, shares, price, lot_size)
+
+    def _finalize_and_submit(self, data, shares, price, lot_size):
+        """通用的下单收尾逻辑：取整 + 提交"""
         if lot_size > 1:
             shares = int(shares // lot_size) * lot_size
         else:
@@ -239,19 +288,18 @@ class BaseLiveBroker(ABC):
         print(f"[Broker] 资金回笼，重试 {len(self._deferred_orders)} 个延迟单...")
         retry_list = self._deferred_orders[:]
         self._deferred_orders.clear()
-        for item in retry_list:
-            # 过滤掉不需要透传的参数
-            kwargs = {k: v for k, v in item['kwargs'].items()
-                      if k not in ['data', 'shares', 'price', 'target_pct', 'cash', 'estimated_cost']}
-            # 重新进入 Template Method
-            self.order_target_percent(item['data'], item['target_pct'], **kwargs)
 
-    def _add_deferred(self, func, local_vars):
-        # 捕获闭包参数
+        # 这里的 item 结构现在是通用的 {'func': func, 'kwargs': kwargs}
+        for item in retry_list:
+            func = item.get('func')
+            kwargs = item.get('kwargs', {})
+            if func:
+                func(**kwargs)
+
+    def _add_deferred(self, func, kwargs):        # 捕获闭包参数
         self._deferred_orders.append({
-            'data': local_vars['data'],
-            'target_pct': local_vars['target_pct'],
-            'kwargs': local_vars['kwargs']
+            'func': func,
+            'kwargs': kwargs
         })
 
     def get_cash(self):
