@@ -2,6 +2,8 @@ import importlib
 import os
 import re
 
+import pandas as pd
+
 # 动态获取 Python 安装目录，并构建 Tcl/Tk 库路径
 python_install_dir = os.path.dirname(os.path.dirname(os.__file__))
 tcl_library_path = os.path.join(python_install_dir, 'tcl', 'tcl8.6')
@@ -92,3 +94,28 @@ def get_class_from_name(name_string: str, search_paths: list):
         f"derived from input '{name_string}' in any of the search paths: {search_paths}"
     )
 
+
+def parse_period_string(period_str):
+    """
+    解析时间周期字符串，如 '1y', '6m', '2w', '30d'
+    返回 pd.DateOffset 对象
+    """
+    if not period_str:
+        return None
+
+    match = re.match(r"(\d+)([ymwd])", period_str.lower())
+    if not match:
+        raise ValueError(f"Invalid period format: {period_str}. Use format like '1y', '6m', '30d'.")
+
+    val = int(match.group(1))
+    unit = match.group(2)
+
+    if unit == 'y':
+        return pd.DateOffset(years=val)
+    elif unit == 'm':
+        return pd.DateOffset(months=val)
+    elif unit == 'w':
+        return pd.DateOffset(weeks=val)
+    elif unit == 'd':
+        return pd.DateOffset(days=val)
+    return None

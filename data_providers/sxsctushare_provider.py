@@ -19,7 +19,7 @@ class SxscTushareDataProvider(BaseDataProvider):
     __timeout = 30  # 增加一个默认的请求超时时间
 
     def __init__(self, token: str = SXSC_TUSHARE_TOKEN):
-        if not token or token == 'your_sxsc_tushare_token_here':
+        if not token or token == 'your_token_here':
             print("Warning: SXSC Tushare token is not configured. SxscTushareProvider will be skipped.")
             self.token = None
         else:

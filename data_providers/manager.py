@@ -19,9 +19,6 @@ class DataManager:
             (p.__class__.__name__.replace('DataProvider', '').lower(), p)
             for p in self.providers
         )
-        # 兼容 sxsc_tushare 这种带下划线的命名
-        if 'sxsctushare' in self.provider_map:
-            self.provider_map['sxsc_tushare'] = self.provider_map.pop('sxsctushare')
 
     def auto_discover_and_sort_providers(self, provider_dir="data_providers"):
         """

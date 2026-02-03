@@ -12,6 +12,7 @@ QuantAda 启发式并行贝叶斯优化器
 3. **随机并发探索**：引入 `Constant-Liar` 采样策略与哈希去重机制，
    解决多核环境下的"并发踩踏"问题，模拟退火特性以有效跳出局部最优陷阱。
 4. **工程鲁棒性**：内置跨平台文件锁管理、异常自动降级及全自动环境清理机制。
+5. **动态滚动训练**：支持基于时间周期的自动滚动切分 (Walk-Forward)，自动推断训练/测试窗口。
 """
 
 import copy
@@ -29,7 +30,7 @@ from optuna.samplers import TPESampler
 
 import config
 from backtest.backtester import Backtester
-from common.loader import get_class_from_name
+from common.loader import get_class_from_name, parse_period_string
 from data_providers.manager import DataManager
 
 try:
@@ -106,6 +107,23 @@ class OptimizationJob:
         req_start = self.args.start_date
         req_end = self.args.end_date
 
+        # 只有启用了 train_roll_period 且没有显式指定 train_period 时
+        # 我们才需要自动把 req_start 往前推，以包含训练集数据
+        if getattr(self.args, 'train_roll_period', None) and not self.args.train_period:
+            offset = parse_period_string(self.args.train_roll_period)
+            if offset and req_start:
+                try:
+                    # 假设 req_start 是测试集的开始，我们需要往前推 offset 作为训练集的开始
+                    s_dt = pd.to_datetime(str(req_start))
+                    # 额外多留一点 buffer (比如7天) 防止边界效应
+                    train_start_dt = s_dt - offset - pd.DateOffset(days=7)
+                    train_start_str = train_start_dt.strftime('%Y%m%d')
+                    print(
+                        f"[Auto-Fetch] Dynamic Rolling Detected ({self.args.train_roll_period}): Extending data fetch start from {req_start} to {train_start_str}")
+                    req_start = train_start_str
+                except Exception as e:
+                    print(f"[Warning] Failed to calculate dynamic start date: {e}")
+
         if self.args.train_period and self.args.test_period:
             # 自动计算覆盖整个训练+测试的日期范围
             train_s, train_e = self.args.train_period.split('-')
@@ -135,6 +153,7 @@ class OptimizationJob:
         return datas
 
     def _split_data(self):
+        # 1. 显式指定模式 (最高优先级)
         if self.args.train_period and self.args.test_period:
             tr_s, tr_e = self.args.train_period.split('-')
             te_s, te_e = self.args.test_period.split('-')
@@ -147,6 +166,46 @@ class OptimizationJob:
             test_d = self.slice_datas(te_s, te_e)
             return train_d, test_d, (tr_s, tr_e), (te_s, te_e)
 
+        # 2. 动态滚动训练模式 (Dynamic Rolling)
+        elif getattr(self.args, 'train_roll_period', None):
+            roll_window = self.args.train_roll_period
+            print(f"Split Mode: Dynamic Rolling (Lookback: {roll_window})")
+
+            # A. 确定目标(测试)区间
+            # 如果没指定 test_period，就用 run.py 传入的 start/end 作为想要验证的区间
+            if self.args.test_period:
+                te_s, te_e = self.args.test_period.split('-')
+            else:
+                te_s = self.args.start_date
+                te_e = self.args.end_date
+                if not te_s:
+                    raise ValueError(
+                        "[Error] Dynamic rolling requires --start_date to define the target/test period start.")
+
+            # B. 推断训练区间
+            offset = parse_period_string(roll_window)
+            target_start_dt = pd.to_datetime(str(te_s))
+
+            # 训练集结束 = 测试集开始 (无缝衔接)
+            # 训练集开始 = 测试集开始 - 滚动周期
+            train_end_dt = target_start_dt
+            train_start_dt = train_end_dt - offset
+
+            tr_s = train_start_dt.strftime('%Y%m%d')
+            tr_e = train_end_dt.strftime('%Y%m%d')
+
+            # 格式化 Test 结束时间 (如果是 None/Latest)
+            te_e_display = te_e if te_e else "Latest"
+
+            print(f"  [Auto-Inferred] Train Set: {tr_s} -> {tr_e}")
+            print(f"  [Target/Test]   Test Set:  {te_s} -> {te_e_display}")
+
+            train_d = self.slice_datas(tr_s, tr_e)
+            test_d = self.slice_datas(te_s, te_e)
+
+            return train_d, test_d, (tr_s, tr_e), (te_s, te_e)
+
+        # 3. 比例切分模式
         elif self.args.train_ratio:
             ratio = float(self.args.train_ratio)
             print(f"Split Mode: Ratio ({ratio * 100}% Train)")
@@ -178,6 +237,7 @@ class OptimizationJob:
             test_d = self.slice_datas(test_start_str, end_date_str)
             return train_d, test_d, (start_date_str, split_date_str), (test_start_str, end_date_str)
 
+        # 4. 全量模式 (无测试集)
         else:
             print("Warning: No split method defined. Running optimization on FULL dataset.")
             return self.raw_datas, {}, (self.args.start_date, self.args.end_date), (None, None)

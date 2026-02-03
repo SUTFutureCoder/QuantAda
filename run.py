@@ -126,7 +126,7 @@ if __name__ == '__main__':
                         help="策略参数 (JSON字符串, 例如: \"{\'selectTopK\': 2, \'target_buffer\': 0.95}\")")
     parser.add_argument('--selection', type=str, default=None, help="选股器文件名 (位于selectors目录 或 自定义包路径)")
     parser.add_argument('--data_source', type=str, default=None,
-                        help="指定数据源 (例如: csv akshare tushare sxsc_tushare gm)")
+                        help="指定数据源 (例如: csv yf akshare tushare sxsc_tushare gm)")
     parser.add_argument('--symbols', type=str, default='SHSE.510300', help="以,分割的回测标的代码 (默认: SHSE.510300)")
     parser.add_argument('--cash', type=float, default=100000.0, help="初始资金 (默认: 100000.0)")
     parser.add_argument('--commission', type=float, default=0, help="手续费率，例如：万1.5为:0.00015 (默认：0)")

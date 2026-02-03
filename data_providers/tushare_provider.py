@@ -12,7 +12,7 @@ class TushareDataProvider(BaseDataProvider):
     PRIORITY = 20
 
     def __init__(self, token: str = TUSHARE_TOKEN):
-        if not token or token == 'your_tushare_token_here':
+        if not token or token == 'your_token_here':
             print("Warning: Tushare token is not configured. Tushare provider will be skipped.")
             self.pro = None
         else:

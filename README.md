@@ -78,7 +78,7 @@ pip install -r requirements.txt
 
 ```python
 # config.py
-TUSHARE_TOKEN = 'your_tushare_token_here'
+TUSHARE_TOKEN = 'your_token_here'
 ```
 
 数据库记录 (可选): 开启后，回测结果将自动存入数据库。
@@ -278,8 +278,9 @@ QuantAda/
 │   ├── base_provider.py    # 数据源抽象基类
 │   ├── csv_provider.py     # CSV数据源适配器
 │   ├── manager.py          # 数据源调度与缓存管理器
-│   ├── sxsc_tushare_provider.py       # 山西证券TuShare数据源适配器
-│   └── tushare_provider.py # TuShare数据源适配器
+│   ├── sxsctushare_provider.py       # 山西证券TuShare数据源适配器
+│   ├── tushare_provider.py # TuShare数据源适配器
+│   └── yf_provider.py      # yfinance数据源适配器
 ├── data_extra_providers/   # 额外数据源模块
 │   ├── http_extra_provider.py         # HTTP额外数据获取类
 │   └── mysql_extra_provider.py        # MySQL额外数据获取类

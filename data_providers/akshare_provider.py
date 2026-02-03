@@ -5,7 +5,8 @@ from .base_provider import BaseDataProvider
 
 
 class AkshareDataProvider(BaseDataProvider):
-    PRIORITY = 50  # 优先级低于CSV
+
+    PRIORITY = 70
 
     def _map_akshare_period(self, timeframe: str, compression: int) -> str:
         """将Backtrader的时间框架映射到Akshare的period参数"""

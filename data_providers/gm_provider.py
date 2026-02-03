@@ -33,7 +33,7 @@ class GmDataProvider(BaseDataProvider):
             set_token(token)
         elif config and hasattr(config, 'GM_TOKEN'):
             cfg_token, serv_addr = config.GM_TOKEN.split("|", 1)
-            if cfg_token and cfg_token != 'your_gm_token_here':
+            if cfg_token and cfg_token != 'your_token_here':
                 self.token = cfg_token
                 self.valid_config = True
                 set_token(cfg_token)
