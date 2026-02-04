@@ -579,18 +579,7 @@ class OptimizationJob:
                 log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
                 os.makedirs(log_dir, exist_ok=True)
 
-                log_file = os.path.join(log_dir, f"{self.args.study_name}.log")
-
-                try:
-                    # 尝试清除旧文件和锁
-                    lock_file = log_file + ".lock"
-                    if os.path.exists(log_file):
-                        os.remove(log_file)
-                        print(f"[Optimizer] Cleaned up old journal: {log_file}")
-                    if os.path.exists(lock_file):
-                        os.remove(lock_file)
-                except Exception as e:
-                    print(f"[Warning] Failed to clean logs: {e}")
+                log_file = os.path.join(log_dir, "optuna_shared_history.log")
 
                 try:
                     # 尝试创建文件存储
