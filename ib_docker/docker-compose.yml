@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # 1. 量化策略容器 (您的核心代码)
+  strategy:
+    build:
+      context: ..  # 指向您的代码根目录
+      dockerfile: Dockerfile
+    container_name: quant_strategy
+    volumes:
+      - ../.data:/app/data               # 挂载数据目录，确保持久化
+      - ../logs:/app/logs               # 挂载日志目录
+      - ../config.py:/app/config.py     # 挂载配置文件
+    environment:
+      - TZ=Asia/Hong_Kong               # 锁定港股时区 (或 US/Eastern)
+      - IBKR_HOST=ib-gateway            # [关键] 指向 Gateway 容器的服务名
+      - IBKR_PORT=4002                  # 4002是模拟盘，4001是实盘
+    depends_on:
+      - ib-gateway
+    networks:
+      - quant-net
+    # command: python run_live.py       # 启动命令 (按需开启)
+
+  # 2. IB Gateway 容器 (负责连接盈透)
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib_gateway
+    restart: always
+    environment:
+      - TWS_USERID=${IB_USER}           # 读取 .env 文件
+      - TWS_PASSWORD=${IB_PASS}
+      - TRADING_MODE=${IB_MODE:-paper}  # paper=模拟盘, live=实盘
+      - VNC_PASSWORD=${VNC_PASS:-123456} # VNC 远程桌面密码
+      - IBC_INI=/root/ibc/config.ini
+      - TWOFA_TIMEOUT_ACTION=exit       # 2FA 超时则退出，方便重启
+    ports:
+      - "4002:4002"                     # 暴露端口给宿主机 (可选，方便调试)
+      - "4001:4001"
+      - "5900:5900"                     # VNC 端口 (远程桌面)
+    networks:
+      - quant-net
+
+networks:
+  quant-net:
+    driver: bridge

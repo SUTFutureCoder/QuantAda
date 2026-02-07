@@ -2,6 +2,7 @@ import atexit
 import signal
 import sys
 import threading
+import socket
 from .dingtalk_alarm import DingTalkAlarm
 from .wecom_alarm import WeComAlarm
 import config
@@ -31,9 +32,29 @@ class AlarmManager:
             if config.WECOM_WEBHOOK:
                 self.alarms.append(WeComAlarm())
 
+        # 运行时身份上下文
+        self.host_name = socket.gethostname()
+        self.context_tag = ""  # 例如: [IB:7497]
+        self.context_detail = ""  # 例如: 策略参数详情
+
         self._register_dead_letter_handlers()
         self._initialized = True
         print(f"[AlarmManager] Initialized with {len(self.alarms)} channels.")
+
+    # 供 Launcher 调用，注入身份信息
+    def set_runtime_context(self, broker, conn_id, strategy, params):
+        """
+        设置运行时上下文，用于区分多实例
+        """
+        self.context_tag = f"[{broker.upper()}:{conn_id}]"
+
+        # 格式化参数详情，便于在报警中查看
+        param_str = ", ".join([f"{k}={v}" for k, v in params.items()]) if params else "None"
+        self.context_detail = (
+            f"Machine: {self.host_name}\n"
+            f"Strategy: {strategy}\n"
+            f"Params: {param_str}"
+        )
 
     def _register_dead_letter_handlers(self):
         """注册死信监听 (Ctrl+C, Kill, 正常退出)"""
@@ -66,15 +87,19 @@ class AlarmManager:
 
     # --- 统一推送接口 ---
 
-    def push_text(self, content, level):
+    def push_text(self, content, level='INFO'):
+        if self.context_tag:
+            content = f"{self.context_tag} {content}"
+
         for alarm in self.alarms:
             threading.Thread(target=alarm.push_text, args=(content, level)).start()
 
     def push_exception(self, context, error):
+        full_context = f"{self.context_tag} {context} @ {self.host_name}"
         for alarm in self.alarms:
             # 异常推送建议同步发送，防止主进程崩溃导致发不出去
             try:
-                alarm.push_exception(context, error)
+                alarm.push_exception(full_context, error)
             except:
                 pass
 
@@ -83,9 +108,19 @@ class AlarmManager:
             threading.Thread(target=alarm.push_trade, args=(order_info,)).start()
 
     def push_start(self, strategy_name):
-        self.push_status("STARTED", f"Strategy: {strategy_name}")
+        detail = self.context_detail if self.context_detail else f"Strategy: {strategy_name}"
+        self.push_status("STARTED", detail)
 
     def push_status(self, status, detail=""):
+        full_status = f"{status} {self.context_tag}" if self.context_tag else status
+
+        # 如果 detail 里没有包含机器信息，自动补全 (防止重复叠加)
+        full_detail = detail
+        if self.host_name not in detail:
+            if self.context_detail:
+                full_detail = f"{detail}\n---\n{self.context_detail}"
+            else:
+                full_detail = f"{detail}\nHost: {self.host_name}"
+
         for alarm in self.alarms:
-            # 使用线程发送，避免阻塞系统启动或退出流程
-            threading.Thread(target=alarm.push_status, args=(status, detail)).start()
+            threading.Thread(target=alarm.push_status, args=(full_status, full_detail)).start()

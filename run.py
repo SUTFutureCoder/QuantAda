@@ -157,7 +157,7 @@ if __name__ == '__main__':
                         help="[优化模式] 优化目标")
     parser.add_argument('--study_name', type=str, default=None, help="[优化模式] 训练名称")
     parser.add_argument('--train_roll_period', type=str, default=None, help="[优化模式] 动态滚动训练，start_date往前使用T-X作为训练集。例如：1w、1m、6m、1y。需要配合start_date、end_date一起使用")
-    parser.add_argument('--train_ratio', type=float, default=None, help="[优化模式] 比例切分训练集、测试集")
+    parser.add_argument('--train_ratio', type=float, default=None, help="[优化模式] 比例切分训练集、测试集，例如0.5")
     parser.add_argument('--train_period', type=str, default=None, help="[优化模式] 训练集时段")
     parser.add_argument('--test_period', type=str, default=None, help="[优化模式] 测试集时段")
 
@@ -218,7 +218,7 @@ if __name__ == '__main__':
         }
 
         # 延迟导入 launcher，避免回测时引入不必要的依赖
-        from live_trader.launcher import launch_live
+        from live_trader.engine import launch_live
 
         launch_live(broker_name, conn_name, args.strategy, s_params, **exec_args)
         sys.exit(0)

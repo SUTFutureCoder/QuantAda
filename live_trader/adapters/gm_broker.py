@@ -250,6 +250,23 @@ class GmBrokerAdapter(BaseLiveBroker):
             print(f"[GM Error] {e}")
             return None
 
+    # 5. 将券商的原始订单对象（raw_order）转换为框架标准的 BaseOrderProxy
+    def convert_order_proxy(self, raw_order) -> 'BaseOrderProxy':
+        """
+        掘金专用实现：找到对应的 DataFeed 并包装成 GmOrderProxy
+        """
+        target_symbol = raw_order.symbol
+        matched_data = None
+
+        # 在 Broker 内部查找 data 对象
+        for d in self.datas:
+            if d._name == target_symbol:
+                matched_data = d
+                break
+
+        # 返回包装好的对象
+        return GmOrderProxy(raw_order, self.is_live, data=matched_data)
+
     # --- 实现 BaseLiveBroker 的启动协议 ---
     @classmethod
     def launch(cls, conn_cfg: dict, strategy_path: str, params: dict, **kwargs):

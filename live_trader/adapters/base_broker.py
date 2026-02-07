@@ -99,6 +99,15 @@ class BaseLiveBroker(ABC):
         """子类必须实现，用于提交指定标的买入或卖出操作"""
         pass
 
+    @abstractmethod
+    def convert_order_proxy(self, raw_order) -> 'BaseOrderProxy':
+        """
+        将券商的原始订单对象（raw_order）转换为框架标准的 BaseOrderProxy。
+        Engine 会调用此方法，从而无需知道具体券商的实现细节。
+        """
+        raise NotImplementedError("Broker adapter must implement convert_order_proxy(raw_order)")
+
+
     # 实盘启动协议
     @classmethod
     def launch(cls, conn_cfg: dict, strategy_path: str, params: dict, **kwargs):

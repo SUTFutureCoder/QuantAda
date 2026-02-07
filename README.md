@@ -277,6 +277,8 @@ QuantAda/
 │   ├── akshare_provider.py # AkShare数据源适配器
 │   ├── base_provider.py    # 数据源抽象基类
 │   ├── csv_provider.py     # CSV数据源适配器
+│   ├── gm_provider.py      # 万和掘金券商数据源适配器
+│   ├── ibkr_provider.py    # IBKR券商数据源适配器
 │   ├── manager.py          # 数据源调度与缓存管理器
 │   ├── sxsctushare_provider.py       # 山西证券TuShare数据源适配器
 │   ├── tushare_provider.py # TuShare数据源适配器
@@ -296,7 +298,8 @@ QuantAda/
 ├── live_trader/            # 实盘交易模块
 │   ├── adapters/           # 平台适配器层 (将外部API统一)
 │   │   ├── base_broker.py  # Broker 抽象基类
-│   │   └── gm_broker.py    # 掘金(gm)平台具体实现
+│   │   ├── gm_broker.py    # 掘金(gm)券商平台具体实现
+│   │   └── ib_broker.py    # IBKR券商平台具体实现
 │   ├── samples/            # 各平台实盘入口文件样例
 │   │   └── gm_main_sample.py
 │   └── engine.py           # 实盘交易引擎 (驱动策略运行)

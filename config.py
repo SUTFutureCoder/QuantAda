@@ -67,6 +67,13 @@ DB_URL = 'mysql+pymysql://root:yourpassword@localhost:3306/quant'
 OPTUNA_DASHBOARD_PORT = 8090
 
 
+# --- IBKR配置 ---
+IBKR_HOST = '127.0.0.1'
+# 文件-全局配置-API-设置-启用套接字客户端&关闭只读API, 实盘与模拟端口不一样，IB Gateway默认4001
+IBKR_PORT = 7497
+IBKR_CLIENT_ID = 999
+
+
 # --- 框架 → 实盘/仿真连接通道配置 ---
 # BROKER_ENVIRONMENTS 的 Key 必须与 adapters 下的文件名一致 (如 gm_broker.py -> "gm_broker")
 BROKER_ENVIRONMENTS = {
@@ -90,13 +97,16 @@ BROKER_ENVIRONMENTS = {
         'sim': {  # 模拟盘/Paper Trading
             'host': '127.0.0.1',
             'port': 7497,  # TWS Paper默认端口
-            'client_id': 1,
-            'account': 'DU12345'  # 可选
+            'client_id': 99,
+            'schedule': '1d:15:45:00',
+            'timezone': 'America/New_York',
         },
         'real': {  # 实盘/Docker Gateway
             'host': '127.0.0.1',
             'port': 4001,  # Docker Gateway 通常暴露 4001/4002
-            'client_id': 99,  # 实盘建议用不同的ID
+            'client_id': 999,
+            'schedule': '1d:15:45:00',
+            'timezone': 'America/New_York',
         }
     }
 }

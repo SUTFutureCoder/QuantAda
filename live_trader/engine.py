@@ -1,15 +1,17 @@
+import sys
 import importlib
 import inspect
+import traceback
 import time
 from types import SimpleNamespace
 
 import pandas as pd
 
 import config
-from alarms.manager import AlarmManager
 from run import get_class_from_name
-from .adapters.base_broker import BaseLiveBroker
 from data_providers.base_provider import BaseDataProvider
+from alarms.manager import AlarmManager
+from live_trader.adapters.base_broker import BaseLiveBroker
 
 class LiveTrader:
     """实盘交易引擎"""
@@ -246,8 +248,8 @@ class LiveTrader:
         if is_live:
             # 实盘模式: 仅获取最近的预热数据，用于计算指标
             end_date = context.now.strftime('%Y-%m-%d')
-            # 默认一个慷慨的预热期(约2年)以适应各种长周期指标，无需用户配置
-            start_date = (context.now - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
+            # 默认使用年交易日以适应各种长周期指标，无需用户配置
+            start_date = (context.now - pd.Timedelta(days=config.ANNUAL_FACTOR)).strftime('%Y-%m-%d')
             print(f"[Engine] Live mode data fetch (warm-up): from {start_date} to {end_date}")
         else:
             # 平台回测模式: 使用配置的完整时间段
@@ -264,6 +266,9 @@ class LiveTrader:
                         self.p = SimpleNamespace(dataname=df)
                         self._name = name
 
+                    def __repr__(self):
+                        return self._name
+
                 datas[symbol] = DataFeedProxy(df, symbol)
         return datas
 
@@ -279,7 +284,7 @@ class LiveTrader:
         # 重新计算时间窗口 (Warmup ~ Now)
         end_date = context.now.strftime('%Y-%m-%d')
         # 保持与 init 一致的预热长度
-        start_date = (context.now - pd.Timedelta(days=730)).strftime('%Y-%m-%d')
+        start_date = (context.now - pd.Timedelta(days=config.ANNUAL_FACTOR)).strftime('%Y-%m-%d')
 
         # 遍历 Broker 中已有的 DataFeed
         for data_feed in self.broker.datas:
@@ -422,7 +427,7 @@ class LiveTrader:
 
         return triggered_action
 
-def on_order_status_callback(context, order):
+def on_order_status_callback(context, raw_order):
     """
     实盘的订单状态回调函数。
     当订单状态发生变化（部成、全成、撤单、废单）时触发。
@@ -432,43 +437,52 @@ def on_order_status_callback(context, order):
 
     if hasattr(context, 'strategy_instance') and context.strategy_instance:
         try:
-            from .adapters.gm_broker import GmOrderProxy
+            # 1. 获取 Broker 抽象实例
+            strategy = context.strategy_instance
+            broker = strategy.broker
 
-            # 不再依赖 context.mode，而是直接问 broker
-            # 之前的逻辑可能导致 is_live=False，从而把 PendingNew (status 10) 误判为 Completed
-            broker = context.strategy_instance.broker
-            is_live = broker.is_live if hasattr(broker, 'is_live') else True
-
-            # 反向查找 Data Feed 对象
-            # 策略中存储的 self.orders 的 key 是 data 对象，而不是 symbol 字符串
-            # 所以我们必须在这里找到 data 对象，赋值给 Proxy
-            target_symbol = order.symbol
-            matched_data = None
-
-            if hasattr(broker, 'datas'):
-                for d in broker.datas:
-                    # 在 engine.py 中创建的 DataFeedProxy 有 _name 属性
-                    if hasattr(d, '_name') and d._name == target_symbol:
-                        matched_data = d
-                        break
-
-            # 将掘金的原生 order 包装成 Proxy，并传入 data
-            order_proxy = GmOrderProxy(order, is_live, data=matched_data)
+            # --- 关键修改点 ---
+            # 不再 import GmOrderProxy，而是让 broker 自己去“装箱”
+            # 也不需要在 engine 里去遍历 datas 找 matched_data，这也应该是 broker 的责任
+            order_proxy = broker.convert_order_proxy(raw_order)
 
             # 2. 喂给 Broker，让它去维护在途单
             if hasattr(broker, 'on_order_status'):
                 broker.on_order_status(order_proxy)
 
             # 调用策略通知
-            context.strategy_instance.notify_order(order_proxy)
+            strategy.notify_order(order_proxy)
 
             # 安全访问 statusMsg，防止 AttributeError
             # 掘金 order 对象可能是动态属性，statusMsg 不一定存在
-            msg = getattr(order, 'statusMsg', None)
+            msg = getattr(raw_order, 'statusMsg', None)
             if not msg:
-                msg = getattr(order, 'ord_rej_reason_detail', '')  # 尝试获取拒单原因
+                msg = getattr(raw_order, 'ord_rej_reason_detail', '')  # 尝试获取拒单原因
 
-            print(f"[Engine Callback] Notified strategy of order status: {order.status} ({msg})")
+            current_status = getattr(order_proxy, 'status', 'Unknown')
+            print(f"[Engine Callback] Notified strategy of order status: {order_proxy.status} ({msg})")
+            # 如果状态是 "已提交" 但还没 "成交"，且未被拒绝，则推送一条消息
+            if current_status in ['PreSubmitted', 'Submitted', 'PendingSubmit']:
+                # 为了防止刷屏，只有当成交量为0时才推送这个"提交确认"
+                # (如果成交量>0，下面的成交逻辑会接管)
+                if order_proxy.executed.size == 0:
+                    # 尝试获取目标下单数量
+                    total_qty = 0
+                    # 针对 IB: trade.order.totalQuantity
+                    if hasattr(order_proxy, 'trade') and hasattr(order_proxy.trade, 'order'):
+                        total_qty = order_proxy.trade.order.totalQuantity
+                    # 针对其他 Broker (通用回退)
+                    elif hasattr(order_proxy, 'raw_order') and hasattr(order_proxy.raw_order, 'volume'):
+                        total_qty = order_proxy.raw_order.volume
+
+                    action = "BUY" if order_proxy.is_buy() else "SELL"
+                    symbol = order_proxy.data._name if order_proxy.data else "Unknown"
+
+                    # 构造消息: ⏳ 代表等待/进行中
+                    alarm_msg = f"⏳ 订单已提交 ({current_status}): {action} {total_qty} {symbol}"
+                    # 使用 push_text 发送普通文本通知
+                    alarm_manager.push_text(alarm_msg)
+
 
             # 报警通知
             # A. 交易成交推送 (完全成交、部分成交、以及部成后撤单)
@@ -476,7 +490,7 @@ def on_order_status_callback(context, order):
                 # 排除已被拒绝的废单(虽然废单size通常为0，为了严谨双重检查)
                 if not order_proxy.is_rejected():
                     trade_info = {
-                        'symbol': order_proxy.data._name if order_proxy.data else order.symbol,
+                        'symbol': order_proxy.data._name if order_proxy.data else "Unknown",
                         'action': 'BUY' if order_proxy.is_buy() else 'SELL',
                         'price': order_proxy.executed.price,
                         'size': order_proxy.executed.size,
@@ -487,7 +501,7 @@ def on_order_status_callback(context, order):
 
             # B. 异常状态推送 (拒单)
             if order_proxy.is_rejected():
-                alarm_manager.push_text(f"⚠️ 订单被拒绝: {order.symbol} - {msg}", level='WARNING')
+                alarm_manager.push_text(f"⚠️ 订单被拒绝: {order_proxy.data._name} - {msg}", level='WARNING')
 
             # 3. 如果卖单成交（有钱回笼），触发重试
             if order_proxy.is_sell() and order_proxy.executed.size > 0:
@@ -531,3 +545,79 @@ def on_order_status_callback(context, order):
 
     else:
         print("[Engine Callback Warning] No strategy_instance found in context.")
+
+
+def launch_live(broker_name: str, conn_name: str, strategy_path: str, params: dict, **kwargs):
+    """
+    通用实盘启动器
+    动态加载 live_trader.adapters.{broker_name} 模块并执行其 launch 方法
+    """
+
+    # 1. 配置检查 (保持不变)
+    if not hasattr(config, 'BROKER_ENVIRONMENTS'):
+        print("[Error] 'BROKER_ENVIRONMENTS' missing in config.py")
+        sys.exit(1)
+
+    broker_conf = config.BROKER_ENVIRONMENTS.get(broker_name)
+    if not broker_conf:
+        print(f"[Error] Broker '{broker_name}' not in BROKER_ENVIRONMENTS")
+        sys.exit(1)
+
+    conn_cfg = broker_conf.get(conn_name)
+    if not conn_cfg:
+        print(f"[Error] Connection '{conn_name}' not found")
+        sys.exit(1)
+
+    # 2. 动态加载模块
+    module_path = f"live_trader.adapters.{broker_name}"
+    try:
+        adapter_module = importlib.import_module(module_path)
+    except Exception:
+        print(f"[Error] Failed to import module '{module_path}':")
+        traceback.print_exc()
+        sys.exit(1)
+
+    # 3. 自动发现 Broker 类
+    broker_class = None
+    for name, obj in inspect.getmembers(adapter_module):
+        # 查找逻辑：是类 + 是BaseLiveBroker的子类 + 不是BaseLiveBroker本身
+        if (inspect.isclass(obj)
+                and issubclass(obj, BaseLiveBroker)
+                and obj is not BaseLiveBroker):
+            broker_class = obj
+            break
+
+    if not broker_class:
+        print(f"[Error] No subclass of 'BaseLiveBroker' found in {module_path}")
+        sys.exit(1)
+
+    # 4. 执行协议 (Lazy Check)
+    # 这里直接调用，如果用户没覆盖，会抛出基类定义的 NotImplementedError
+    try:
+        identity = conn_name
+        if 'client_id' in conn_cfg:
+            identity = str(conn_cfg['client_id'])
+        elif 'strategy_id' in conn_cfg:
+            # 掘金ID太长，截取前8位
+            identity = str(conn_cfg['strategy_id'])[:8] + "..."
+
+        # 这里的 params 就是运行时透传的策略参数
+        AlarmManager().set_runtime_context(
+            broker=broker_name,
+            conn_id=identity,
+            strategy=strategy_path,
+            params=params
+        )
+
+        # 净化 sys.argv
+        sys.argv = [sys.argv[0]]
+
+        broker_class.launch(conn_cfg, strategy_path, params, **kwargs)
+    except NotImplementedError as e:
+        print(f"[Error] Protocol not implemented: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"[Crash] Launch execution failed:")
+        AlarmManager().push_exception("Launcher Crash", str(e))
+        traceback.print_exc()
+        sys.exit(1)

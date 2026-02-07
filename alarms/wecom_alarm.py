@@ -18,11 +18,11 @@ class WeComAlarm(BaseAlarm):
             print(f"[WeCom Error] Failed to send alarm: {e}")
 
     def push_text(self, content: str, level: str = 'INFO'):
+        color = "info" if level == 'INFO' else "warning"
+        md_text = f"<font color=\"{color}\">{content}</font>"
         payload = {
-            "msgtype": "text",
-            "text": {
-                "content": f"[{level}] QuantAda: {content}"
-            }
+            "msgtype": "markdown",
+            "markdown": {"content": md_text}
         }
         self._send(payload)
 
@@ -62,8 +62,8 @@ class WeComAlarm(BaseAlarm):
         self._send(payload)
 
     def push_status(self, status: str, detail: str = ""):
-        icon = "🚀" if status == "STARTED" else "💀" if status == "DEAD" else "🛑"
-        color = "info" if status == "STARTED" else "warning"
+        icon = "🚀" if status.startswith("STARTED") else "💀" if status == "DEAD" else "🛑"
+        color = "info" if status.startswith("STARTED") else "warning"
 
         md_text = f"""### <font color=\"{color}\">{icon} 系统状态: {status}</font>
 **时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}
