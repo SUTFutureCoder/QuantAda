@@ -8,7 +8,7 @@ services:
       - TWS_USERID=${IB_USER}
       - TWS_PASSWORD=${IB_PASS}
       - TRADING_MODE=${IB_MODE:-paper}   # paper=模拟盘, live=实盘
-      - VNC_PASSWORD=${VNC_PASS:-123456} # VNC 密码
+      - VNC_SERVER_PASSWORD=${VNC_PASS:-123456} # VNC 密码
       - TWOFA_TIMEOUT_ACTION=exit
     # 必须暴露端口，否则宿主机无法连接
     ports:
