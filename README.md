@@ -286,6 +286,17 @@ QuantAda/
 ├── data_extra_providers/   # 额外数据源模块
 │   ├── http_extra_provider.py         # HTTP额外数据获取类
 │   └── mysql_extra_provider.py        # MySQL额外数据获取类
+├── ib_docker/              # ib-gateway服务器部署方案
+│   ├── .env                # ibkr账号密码及vnc密码
+│   └── docker-compose.yml  # docker-compose up -d一键部署ib-gateway
+├── live_trader/            # 实盘交易模块
+│   ├── adapters/           # 平台适配器层 (将外部API统一)
+│   │   ├── base_broker.py  # Broker 抽象基类
+│   │   ├── gm_broker.py    # 掘金(gm)券商平台具体实现
+│   │   └── ib_broker.py    # IBKR券商平台具体实现
+│   ├── samples/            # 各平台实盘入口文件样例
+│   │   └── gm_main_sample.py
+│   └── engine.py           # 实盘交易引擎 (驱动策略运行)
 ├── stock_selectors/        # 自定义选标的包
 │   ├── base_selector.py    # 选标的抽象基类
 │   └── sample_manual_selector.py      # 手动选择三支标的样例类
@@ -295,14 +306,6 @@ QuantAda/
 │   ├── sample_macd_cross_strategy.py  # MACD样例策略
 │   ├── sample_extra_data_strategy.py  # 使用额外数据样例策略
 │   └── sample_multi_portfolio_strategy.py  # 多标的等权样例策略
-├── live_trader/            # 实盘交易模块
-│   ├── adapters/           # 平台适配器层 (将外部API统一)
-│   │   ├── base_broker.py  # Broker 抽象基类
-│   │   ├── gm_broker.py    # 掘金(gm)券商平台具体实现
-│   │   └── ib_broker.py    # IBKR券商平台具体实现
-│   ├── samples/            # 各平台实盘入口文件样例
-│   │   └── gm_main_sample.py
-│   └── engine.py           # 实盘交易引擎 (驱动策略运行)
 ├── recorders/              # 回测记录模块
 │   ├── __init__.py
 │   ├── base_recorder.py    # 定义接口
