@@ -58,14 +58,6 @@ class IbkrDataProvider(BaseDataProvider):
         return True
 
     def _parse_contract(self, symbol: str):
-        """
-        将通用 Symbol 转换为 IB Contract 对象
-        格式支持:
-        1. STK.AAPL.USD  -> Stock('AAPL', 'SMART', 'USD')
-        2. AAPL          -> Stock('AAPL', 'SMART', 'USD') (默认美股)
-        3. CASH.EUR.USD  -> Forex('EURUSD')
-        4. CRYPTO.BTC.USD -> Crypto('BTC', 'PAXOS', 'USD')
-        """
         parts = symbol.split('.')
 
         # 情况 1: 标准 Backtrader 格式 (Type.Ticker.Currency)
@@ -76,20 +68,24 @@ class IbkrDataProvider(BaseDataProvider):
             elif sec_type == 'CASH':
                 return Forex(f"{ticker}{currency}")
             elif sec_type == 'CRYPTO':
-                return Crypto(ticker, 'PAXOS', currency)  # Exchange might vary
+                return Crypto(ticker, 'PAXOS', currency)
 
-        # 情况 2: 简单 Ticker (默认为美股)
-        if len(parts) == 1:
-            return Stock(symbol, 'SMART', 'USD')
-
-        # 情况 3: 港股/A股 (处理起来比较复杂，这里提供基础映射)
-        # 例如: SEHK.9988
+        # 情况 2: 处理两段式 (可能是 Ticker.Exchange 也可能是 Exchange.Ticker)
         if len(parts) == 2:
-            exchange, ticker = parts
-            if exchange in ['SEHK', 'HK']:
-                return Stock(ticker, 'SEHK', 'HKD')
+            p1, p2 = parts
 
-        # 默认尝试作为 Stock 处理
+            # A. 识别美股 Ticker.Exchange (如 QQQ.ISLAND)
+            # 常用美股主交易所白名单
+            us_exchanges = ['ISLAND', 'NASDAQ', 'ARCA', 'NYSE', 'AMEX', 'BATS', 'PINK', 'SMART']
+            if p2 in us_exchanges:
+                # 关键修正：拆分 symbol 和 primaryExchange
+                return Stock(p1, 'SMART', 'USD', primaryExchange=p2)
+
+            # B. 识别港股/A股 Exchange.Ticker (如 SEHK.700)
+            if p1 in ['SEHK', 'HK']:
+                return Stock(p2, 'SEHK', 'HKD')
+
+        # 情况 3: 默认作为美股 Ticker 处理
         return Stock(symbol, 'SMART', 'USD')
 
     def _calc_duration(self, start_date, end_date):

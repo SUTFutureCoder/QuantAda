@@ -1,7 +1,14 @@
-# QuantAda
+# QuantAda: A Dual-Core Quantitative Trading Framework
 
-[](https://opensource.org/licenses/MIT)
-[](https://www.python.org/downloads/release/python-380/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![IEEE Access](https://img.shields.io/badge/Paper-IEEE%20Access-orange.svg)](Link_To_Your_Paper_Later)
+[![Starry Intelligence](https://img.shields.io/badge/R%26D-Starry%20Intelligence-purple.svg)](https://www.starryint.hk)
+
+> **Note**: This is the official reference implementation for the paper *"Bridging the Sim-to-Real Gap in Algorithmic Trading: An Entropy-Based Adaptive Optimizer with Survival-First Composite Metrics"*.
+
+**Developed by Starry Intelligence Technology Limited (Hong Kong).**
+
+---
 
 一个优雅、可扩展、可实盘的量化交易框架，实现算法的分模块独立或协作开发。
 

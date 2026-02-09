@@ -98,13 +98,20 @@ BROKER_ENVIRONMENTS = {
             'host': '127.0.0.1',
             'port': 7497,  # TWS Paper默认端口
             'client_id': 99,
-            'schedule': '1d:15:45:00',
+            'schedule': '1d:22:09:00',
             'timezone': 'America/New_York',
         },
         'real': {  # 实盘/Docker Gateway
             'host': '127.0.0.1',
-            'port': 4001,  # Docker Gateway 通常暴露 4001/4002
+            'port': 7496,
             'client_id': 999,
+            'schedule': '1d:21:50:00',
+            'timezone': 'America/New_York',
+        },
+        'real_docker': {  # 实盘/Docker Gateway
+            'host': '127.0.0.1',
+            'port': 4001,  # Docker Gateway 通常暴露 4001/4002
+            'client_id': 9999,
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
         }

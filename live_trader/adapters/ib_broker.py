@@ -108,30 +108,48 @@ class IBBrokerAdapter(BaseLiveBroker):
     @staticmethod
     def parse_contract(symbol: str) -> Contract:
         """
-        [关键] 将框架的代码字符串转换为 IB Contract 对象
-        规则可根据你的交易品种自定义：
-        - AAPL -> Stock('AAPL', 'SMART', 'USD')
-        - 00700 -> Stock('700', 'SEHK', 'HKD')
-        - EURUSD -> Forex('EURUSD')
+        [升级版] 合约解析器
+        支持格式:
+        1. "QQQ.ISLAND" -> 美股指定主交易所 (PrimaryExchange)
+        2. "SHSE.600000" -> A股 (保持兼容)
+        3. "00700" -> 港股 (保持兼容)
+        4. "AAPL" -> 默认 SMART/USD
         """
         symbol = symbol.upper()
 
+        # --- A. 特殊前缀处理 (A股/外汇等) ---
         if symbol.startswith('SHSE.') or symbol.startswith('SZSE.'):
-            # 提取代码 (如 510300)
             code = symbol.split('.')[-1]
-            # IBKR 上交易 A 股通常走 SEHK (Stock Connect)，货币为 CNH
-            return Stock(code, 'SEHK', 'CNH')
+            return Stock(code, 'SEHK', 'CNH')  # A股走深港/沪港通
 
-        # 简单规则示例：
-        if symbol == 'EURUSD':
-            return Forex('EURUSD')
+        if symbol.startswith('CASH.'):
+            # CASH.EUR.USD -> Forex('EURUSD')
+            parts = symbol.split('.')
+            return Forex(f"{parts[1]}{parts[2]}")
 
+        # --- B. 核心升级：支持 SYMBOL.EXCHANGE 格式 ---
+        # 识别逻辑：如果包含点，且点后面的是已知的交易所代码
+        if '.' in symbol:
+            parts = symbol.split('.')
+            # 确保切分后只有两部分，防止干扰其他复杂格式
+            if len(parts) == 2:
+                code, exch = parts
+
+                # 定义美股常用主交易所白名单 (防止误判)
+                # ISLAND=Nasdaq, ARCA=NYSE Arca, BATS=Cboe BZX
+                us_exchanges = ['ISLAND', 'NASDAQ', 'ARCA', 'NYSE', 'AMEX', 'BATS', 'PINK']
+
+                if exch in us_exchanges:
+                    # 关键点：Routing 依然用 SMART (保证流动性)，但指定 primaryExchange (消除歧义)
+                    return Stock(code, 'SMART', 'USD', primaryExchange=exch)
+
+        # --- C. 港股纯数字逻辑 (保持兼容) ---
         if symbol.isdigit() or (len(symbol) == 5 and symbol.startswith('0')):
-            # 假设纯数字是港股 (去除 .HK 后缀)
-            code = int(symbol)  # 00700 -> 700
+            code = int(symbol)
             return Stock(str(code), 'SEHK', 'HKD')
 
-        # 默认美股
+        # --- D. 默认兜底 (Fall back to SMART) ---
+        # 这是你要求的：仅当没有交易所信息时，才使用默认 SMART
         return Stock(symbol, 'SMART', 'USD')
 
     # 1. 查钱
@@ -396,43 +414,33 @@ class IBBrokerAdapter(BaseLiveBroker):
         IBKR 全天候启动入口
         """
         import config
+        import time
+        import asyncio
+        from ib_insync import IB
+
         host = conn_cfg.get('host', config.IBKR_HOST)
         port = int(conn_cfg.get('port', config.IBKR_PORT))
         client_id = int(conn_cfg.get('client_id', config.IBKR_CLIENT_ID))
 
+        # 1. 获取调度配置 (格式示例: "1d:14:50:00")
+        schedule_rule = conn_cfg.get('schedule')
+        if not schedule_rule:
+            # 尝试从 kwargs 获取 (兼容命令行传参)
+            schedule_rule = kwargs.get('schedule')
+
         symbols = kwargs.get('symbols', [])
         selection_name = kwargs.get('selection')
 
-        # 获取定时配置
-        schedule_rule = conn_cfg.get('schedule')
-        schedule_time = None
-        target_timezone = conn_cfg.get('timezone', None)
-        if target_timezone:
-            print(f"\n>>> 🌍 Timezone Override: Forces {target_timezone} <<<")
-
+        print(f"\n>>> 🛡️ Launching IBKR Phoenix Mode (Host: {host}:{port}) <<<")
         if schedule_rule:
-            try:
-                # 解析格式 "1d:14:50:00" -> 提取 "14:50:00"
-                if ':' in schedule_rule:
-                    _, time_part = schedule_rule.split(':', 1)
-                    schedule_time = datetime.datetime.strptime(time_part, '%H:%M:%S').time()
-                    print(f"\n>>> ⏰ Schedule Enabled: Run daily at {schedule_time} <<<")
-                else:
-                    print(
-                        f"\n[Warning] Invalid schedule format '{schedule_rule}'. Expected '1d:HH:MM:SS'. Using default Heartbeat.")
-            except Exception as e:
-                print(f"\n[Error] Failed to parse schedule: {e}")
+            print(f">>> ⏰ Schedule Active: {schedule_rule} (Strategy will ONLY run at this time)")
+        else:
+            print(f">>> ⚠️ No Schedule Found: Strategy will NOT run automatically. (Heartbeat Only)")
 
-        print(f"\n>>> Launching {cls.__name__} connecting to {host}:{port} <<<")
-
+        # 1. 创建全局唯一的 IB 实例
         ib = IB()
-        try:
-            ib.connect(host, port, clientId=client_id)
-        except Exception as e:
-            print(f"[Critical] Cannot connect to IBKR: {e}")
-            return
 
-        # 注入 context
+        # 2. 预初始化 Engine Context
         class Context:
             now = pd.Timestamp.now()
             ib_instance = ib
@@ -440,137 +448,156 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         ctx = Context()
 
-        # 初始化 Engine
-        import config
+        # 初始化 Engine (只做一次)
         from live_trader.engine import LiveTrader, on_order_status_callback
-
         engine_config = config.__dict__.copy()
         engine_config['strategy_name'] = strategy_path
         engine_config['params'] = params
-        engine_config['platform'] = 'ib'  # 标记平台
+        engine_config['platform'] = 'ib'
         engine_config['symbols'] = symbols
-
-        if selection_name:
-            print(f"[IB] Selection Strategy enabled: {selection_name}")
-            engine_config['selection_name'] = selection_name
+        if selection_name: engine_config['selection_name'] = selection_name
 
         trader = LiveTrader(engine_config)
+        # 注入 IB 实例到 data_provider (如果有)
         if hasattr(trader.data_provider, 'ib'):
-            print("[IB] Injecting IB connection into DataProvider...")
             trader.data_provider.ib = ib
 
         trader.init(ctx)
-
-        # 将策略实例注入到 Context 中，解决回调报错
         ctx.strategy_instance = trader.strategy
 
+        # 确定标的列表
         target_symbols = []
         if hasattr(trader.broker, 'datas'):
             target_symbols = [d._name for d in trader.broker.datas]
-            print(f"[IB] Strategy loaded {len(target_symbols)} symbols: {target_symbols}")
         else:
             target_symbols = symbols
 
-        # 订阅行情 (关键步骤)
-        print("[IB] Requesting Market Data subscriptions...")
-        active_tickers = {}
-        for sym in target_symbols:  # 使用最终确定的标的列表
-            contract = cls.parse_contract(sym)
-            ib.qualifyContracts(contract)
-            ticker = ib.reqMktData(contract, '', False, False)
-            active_tickers[sym] = ticker
-
-        trader.broker._tickers = active_tickers
-
-        # 注册订单回调
+        # 注册回调
         def on_trade_update(trade):
             on_order_status_callback(ctx, trade)
 
         ib.orderStatusEvent += on_trade_update
 
-        last_run_date = None
+        # --- 调度器状态变量 ---
+        last_schedule_run_date = None  # 记录上次运行的日期 (防止同一分钟重复运行)
+        is_first_connect = True
 
-        # 统一获取当前时间的方法，确保时区一致
-        def get_now_aware():
-            if target_timezone:
-                return pd.Timestamp.now(tz=target_timezone).to_pydatetime()
-            else:
-                return datetime.datetime.now()
+        # --- 3. 进入“不死鸟”主循环 ---
+        while True:
+            try:
+                # --- A. 连接阶段 ---
+                if not ib.isConnected():
+                    print(f"[System] Connecting to IB Gateway ({host}:{port})...")
+                    try:
+                        ib.connect(host, port, clientId=client_id)
+                        print("[System] ✅ Connected successfully.")
+                    except Exception as e:
+                        # 捕获所有连接时的异常 (如 ConnectionRefusedError)
+                        print(f"[System] ⏳ Connection failed: {e}. Retrying in 10s...")
+                        time.sleep(10)
+                        continue
 
-        # 使用统一的方法获取当前时间
-        now = get_now_aware()
+                # --- B. 状态恢复 (Re-Subscribe) ---
+                if is_first_connect or not ib.tickers():  # 如果没有 tickers 说明订阅丢了
+                    print(f"[System] 📡 (Re)Subscribing market data for {len(target_symbols)} symbols...")
+                    active_tickers = {}
+                    for sym in target_symbols:
+                        try:
+                            contract = cls.parse_contract(sym)
+                            ib.qualifyContracts(contract)
+                            # snapshot=False 建立流式订阅
+                            ticker = ib.reqMktData(contract, '', False, False)
+                            active_tickers[sym] = ticker
+                        except Exception as e:
+                            print(f"[Warning] Failed to subscribe {sym}: {e}")
 
-        if schedule_time:
-            # 检查：如果启动时已经超过了当天的计划时间
-            if now.time() >= schedule_time:
-                # 检查是否开启了调试模式 (从 params 或 kwargs 获取 debug 标记)
-                # 可以在启动命令中加入 --params debug=True
-                is_debug = params.get('debug', False) or kwargs.get('debug', False)
+                    # 更新 Broker 的引用
+                    trader.broker._tickers = active_tickers
 
-                if str(is_debug).lower() in ['true', '1', 'yes']:
-                    print(
-                        f"\n[⚠️ Debug Mode] Current time {now.strftime('%H:%M:%S')} is past schedule {schedule_time}.")
-                    print(f"[⚠️ Debug Mode] System WILL execute strategy immediately as requested.")
-                    # last_run_date 保持为 None，这会导致下方的循环立即触发一次 run
-                else:
-                    print(
-                        f"\n[🛡️ Safety Check] System started at {now.strftime('%H:%M:%S')}, which is past schedule {schedule_time}.")
-                    print(
-                        f"[🛡️ Safety Check] Today's run is SKIPPED to prevent accidental double-execution (Restart Risk).")
-                    print(f"[🛡️ Safety Check] System will standby for tomorrow's schedule.")
+                    if not is_first_connect:
+                        print("[System] 🔄 Re-connection logic triggered (Data Stream Restored).")
 
-                    # 关键操作：将今天标记为"已运行"，从而让循环跳过今天的触发
-                    last_run_date = now.date()
+                is_first_connect = False
 
-        # 主循环
-        print("[IB] Starting Event Loop...")
-        if schedule_time:
-            print(f"     Mode: Scheduled (Daily @ {schedule_time})")
-        else:
-            print(f"     Mode: Heartbeat (Every 60s)")
+                # --- C. 运行阶段 (Event Loop) ---
+                print("[System] Entering Event Loop...")
+                last_check = datetime.datetime.now()
 
-        last_check = get_now_aware()
+                while ib.isConnected():
+                    # 1. 驱动 IB 事件
+                    # 如果断线，ib.sleep 会抛出 OSError 或 ConnectionResetError
+                    ib.sleep(1)
 
-        try:
-            while ib.isConnected():
-                # 1. 驱动 IB 事件循环
-                ib.sleep(1)  # 休眠1秒，允许后台线程处理数据
+                    # 2. 执行策略
+                    now = datetime.datetime.now()
+                    ctx.now = pd.Timestamp(now)
 
-                # 2. 定时运行 Engine 逻辑 (模拟 Bar 事件)
-                if target_timezone:
-                    # 使用 pandas 转换到目标时区，再转回 python datetime (带时区信息)
-                    now = pd.Timestamp.now(tz=target_timezone).to_pydatetime()
-                else:
-                    # 默认行为：使用服务器本地时间
-                    now = get_now_aware()
-
-                ctx.now = pd.Timestamp(now)
-
-                # --- 调度逻辑分支 ---
-                if schedule_time:
-                    # [模式 A] 定时执行
-                    # 只有当：现在时间到了 AND 今天还没跑过 (last_run_date != today) 时才触发
-                    if now.time() >= schedule_time and now.date() != last_run_date:
-                        print(f"\n[Schedule Trigger] {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                        trader.run(ctx)
-                        # 运行完立刻标记今天已完成
-                        last_run_date = now.date()
-                        print(f"[Schedule] Finished. Next run date: {last_run_date + datetime.timedelta(days=1)}")
-
-                    # 心跳日志
+                    # 心跳日志 (每分钟)
                     if (now - last_check).total_seconds() >= 60:
-                        last_check = now
+                        last_heartbeat = now
 
-                else:
-                    # [模式 B] 默认每分钟轮询
-                    if (now - last_check).total_seconds() >= 60:
-                        print(f"[Heartbeat] {now.strftime('%H:%M:%S')}")
-                        trader.run(ctx)
-                        last_check = now
+                        # (A) 仅打印心跳 (不触发数据刷新)
+                        print(f"[Heartbeat] {now.strftime('%H:%M:%S')} | Connected: True")
 
-        except KeyboardInterrupt:
-            print("\n[Stop] User interrupted")
-        except Exception as e:
-            print(f"[Error] IB Loop crash: {e}")
-        finally:
-            ib.disconnect()
+                        # (B) 调度检查逻辑
+                        if schedule_rule:
+                            try:
+                                # 解析 "1d:HH:MM:SS" (仅处理 1d 每日任务)
+                                # 如果你的 schedule_rule 格式是 "1d:14:50:00"
+                                if schedule_rule.startswith('1d:'):
+                                    _, target_time_str = schedule_rule.split(':', 1)
+                                    target_h, target_m = map(int, target_time_str.split(':')[:2])
+
+                                    # 检查是否到达指定分钟 (精度为分钟)
+                                    if now.hour == target_h and now.minute == target_m:
+                                        # 检查今天是否已经跑过
+                                        today_str = now.strftime('%Y-%m-%d')
+                                        if last_schedule_run_date != today_str:
+                                            print(f"\n>>> ⏰ Schedule Triggered: {schedule_rule} <<<")
+
+                                            # === 触发策略运行 ===
+                                            trader.run(ctx)
+
+                                            last_schedule_run_date = today_str
+                                            print(f">>> Run Finished. Next run: Tomorrow {target_time_str}\n")
+                                else:
+                                    # 如果以后支持其他频率 (如 1h)，在这里扩展
+                                    pass
+
+                            except Exception as e:
+                                print(f"[Schedule Error] Check failed: {e}")
+
+            # --- D. 异常处理 ---
+            except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, TimeoutError, ConnectionError,
+                    asyncio.TimeoutError) as e:
+                # 捕获这些明确的网络层异常
+                print(f"\n[⚠️ Disconnect] Network Error: {e}")
+                print("[System] Entering Recovery Mode. Waiting for TWS/Gateway...")
+
+                try:
+                    ib.disconnect()
+                except:
+                    pass
+
+                time.sleep(10)  # 稍微长一点的冷却
+                continue
+
+            except Exception as e:
+                # 捕获其他未知的崩溃 (如数据解析错误)
+                print(f"[CRITICAL] Unexpected crash in Main Loop: {e}")
+                import traceback
+                traceback.print_exc()
+
+                # 防止死循环刷屏
+                time.sleep(5)
+                # 尝试重启
+                try:
+                    ib.disconnect()
+                except:
+                    pass
+                continue
+
+            except KeyboardInterrupt:
+                print("\n[Stop] User interrupted. Exiting.")
+                ib.disconnect()
+                break

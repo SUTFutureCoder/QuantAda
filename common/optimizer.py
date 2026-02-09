@@ -1,4 +1,14 @@
 """
+QuantAda Heuristic Parallel Bayesian Optimizer
+-------------------------------------------------------------------
+Copyright (c) 2026 Starry Intelligence Technology Limited. All rights reserved.
+
+This module implements the Entropy-Based Computational Budgeting and
+Mix-Score evaluation mechanism described in our IEEE Access research.
+
+Author: Xingchen Lin (ceo@starryint.hk)
+Grant: SIT-2026-Q1
+-------------------------------------------------------------------
 QuantAda 启发式并行贝叶斯优化器
 ===============================
 
