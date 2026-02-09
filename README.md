@@ -1,7 +1,7 @@
 # QuantAda: A Dual-Core Quantitative Trading Framework
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![IEEE Access](https://img.shields.io/badge/Paper-IEEE%20Access-orange.svg)](Link_To_Your_Paper_Later)
+[![Paper Status](https://img.shields.io/badge/Paper-Under%20Review-yellow.svg)](YOUR_PAPER_LINK_OR_ARXIV)
 [![Starry Intelligence](https://img.shields.io/badge/R%26D-Starry%20Intelligence-purple.svg)](https://www.starryint.hk)
 
 > **Note**: This is the official reference implementation for the paper *"Bridging the Sim-to-Real Gap in Algorithmic Trading: An Entropy-Based Adaptive Optimizer with Survival-First Composite Metrics"*.
@@ -372,6 +372,23 @@ QuantAda/
 
 - **个人博客**: [project256.com](https://project256.com)
 - **GitHub**: [SUTFutureCoder](https://github.com/SUTFutureCoder)
+
+## 引用 (Citation)
+
+如果您在研究中使用了 QuantAda，请引用我们的相关论文：
+
+> **Bridging the Sim-to-Real Gap in Algorithmic Trading: An Entropy-Based Adaptive Optimizer with Survival-First Composite Metrics**
+> *Xingchen Lin (Starry Intelligence Technology Limited)*
+> *Submitted to IEEE Access, 2026.*
+
+```bibtex
+@article{Lin2026QuantAda,
+  title={Bridging the Sim-to-Real Gap in Algorithmic Trading: An Entropy-Based Adaptive Optimizer with Survival-First Composite Metrics},
+  author={Lin, Xingchen},
+  journal={IEEE Access (Under Review)},
+  year={2026},
+  publisher={IEEE}
+}
 
 ## 许可证 (License)
 
