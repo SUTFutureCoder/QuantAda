@@ -23,21 +23,37 @@ class GmDataProvider(BaseDataProvider):
 
     PRIORITY = 40
 
-    def __init__(self, token=config.GM_TOKEN):
-        if not token or token == 'your_token_here|host:port':
-            print("Warning: Gm token is not configured. GmProvider will be skipped.")
-            self.token = None
-            return
+    def __init__(self, token=None):
+        # 如果未传入，尝试从 config 读取默认值
+        if token is None and hasattr(config, 'GM_TOKEN'):
+            token = config.GM_TOKEN
 
-        self.valid_config = False
         self.token = None
-        cfg_token, serv_addr = config.GM_TOKEN.split("|", 1)
-        if cfg_token:
-            self.token = cfg_token
-            self.valid_config = True
-            set_token(cfg_token)
-        if serv_addr:
-            set_serv_addr(serv_addr)
+        self.is_external_mode = False
+
+        # 1. 尝试解析并设置 Token (主动模式)
+        if token and token != 'your_token_here|host:port':
+            try:
+                # 兼容 "token|host:port" 格式
+                if '|' in token:
+                    cfg_token, serv_addr = token.split("|", 1)
+                    self.token = cfg_token
+                    if set_token: set_token(cfg_token)
+                    if serv_addr and set_serv_addr: set_serv_addr(serv_addr)
+                else:
+                    self.token = token
+                    if set_token: set_token(token)
+
+                # print(f"[GmDataProvider] Token set from config: {self.token[:4]}****")
+            except Exception as e:
+                print(f"[GmDataProvider] Error parsing config token: {e}")
+
+        # 2. 如果没有有效配置，启用外部托管模式 (被动模式)
+        #    这样 LiveTrader 在 engine.py 里无参实例化时，不会导致 Provider 失效
+        if not self.token:
+            # print("[GmDataProvider] No valid token in config. Assuming global set_token() is called externally.")
+            self.token = "EXTERNAL_MODE"
+            self.is_external_mode = True
 
     def _map_frequency(self, timeframe: str, compression: int) -> str:
         if timeframe == 'Days':
