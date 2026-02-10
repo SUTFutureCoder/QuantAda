@@ -58,6 +58,10 @@
   - **链式防御**：支持命令行动态挂载多个风控组件（如 `--risk stop_loss,trend_protection`）。
   - **独立配置**：风控规则与策略逻辑解耦，可针对不同账户灵活组合。
 
+- **智能仓位管理 (Smart Rebalancer)**
+  - 内置 `PortfolioRebalancer` 组件，专注解决 TopK 轮动策略中的资金分配难题。
+  - 自动处理 **"先卖后买"** (Sell-then-Buy) 的资金释放逻辑，最大化资金利用率，彻底消除 Cash Drag。
+  - 支持 **"让利润奔跑"** (Let Winners Run) 模式，避免因强制再平衡导致的早期止盈。
 
 ![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/diagram.png?raw=true)
 
@@ -278,7 +282,8 @@ QuantAda/
 ├── common/                 # 通用逻辑模块
 │   ├── indicators.py       # 指标算法聚合库，自定义使用Ta-Lib及MyTT
 │   ├── mytt.py             # MyTT指标计算库
-│   └── optimizer.py        # 参数优化核心逻辑 (Optuna)
+│   ├── optimizer.py        # 参数优化核心逻辑 (Optuna)
+│   └── rebalancer.py       # 智能仓位管理、资金分配器
 ├── data/                   # 行情数据缓存目录
 ├── data_providers/         # 主数据源模块
 │   ├── akshare_provider.py # AkShare数据源适配器
