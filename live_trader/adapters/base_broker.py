@@ -80,6 +80,14 @@ class BaseLiveBroker(ABC):
     #  用户只需实现下述原子接口 (The Minimum Set)
     # =========================================================
     @abstractmethod
+    def getvalue(self):
+        """
+        兼容 Backtrader 接口: 获取当前账户总权益 (Net Liquidation Value)
+        默认实现: 现金 + 所有持仓的市值
+        """
+        return self._get_portfolio_nav()
+
+    @abstractmethod
     def _fetch_real_cash(self) -> float:
         """子类必须实现，用于获取真实账户的可用资金"""
         pass

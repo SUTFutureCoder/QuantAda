@@ -92,8 +92,11 @@ class IBBrokerAdapter(BaseLiveBroker):
         return self.get_cash()
 
     def getvalue(self):
-        """兼容 Backtrader 标准接口: getvalue -> get_value"""
-        return self.get_value()
+        """
+        兼容 Backtrader 标准接口: 获取账户总权益
+        注意：IB Adapter 的 _fetch_real_cash 实现取的就是 NetLiquidation
+        """
+        return self._fetch_real_cash()
 
     @staticmethod
     def is_live_mode(context) -> bool:

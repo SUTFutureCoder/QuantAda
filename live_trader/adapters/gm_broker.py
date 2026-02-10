@@ -119,6 +119,11 @@ class GmBrokerAdapter(BaseLiveBroker):
         """ 获取可用资金 (Backtrader 命名风格)"""
         return self._fetch_real_cash()
 
+    def getvalue(self):
+        """获取账户总资产 (NAV)"""
+        # get_cash() 返回的是 AccountCash 对象，.nav 即为总资产
+        return get_cash().nav
+
     # 实盘引擎调用此方法设置当前时间时，我们将其转换为无时区的北京时间
     # 这样 engine.py 中对比 df.index (无时区) 和 current_dt (无时区) 就不会报错了
     def set_datetime(self, dt):
