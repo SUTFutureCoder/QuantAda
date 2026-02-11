@@ -419,11 +419,16 @@ class IBBrokerAdapter(BaseLiveBroker):
         import config
         import time
         import asyncio
+        import pytz
         from ib_insync import IB
 
         host = conn_cfg.get('host', config.IBKR_HOST)
         port = int(conn_cfg.get('port', config.IBKR_PORT))
         client_id = int(conn_cfg.get('client_id', config.IBKR_CLIENT_ID))
+
+        # 默认为空，表示使用服务器本地时间
+        timezone_str = conn_cfg.get('timezone')
+        target_tz = pytz.timezone(timezone_str) if timezone_str else None
 
         # 1. 获取调度配置 (格式示例: "1d:14:50:00")
         schedule_rule = conn_cfg.get('schedule')
@@ -436,7 +441,8 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         print(f"\n>>> 🛡️ Launching IBKR Phoenix Mode (Host: {host}:{port}) <<<")
         if schedule_rule:
-            print(f">>> ⏰ Schedule Active: {schedule_rule} (Strategy will ONLY run at this time)")
+            tz_info = timezone_str if timezone_str else "Server Local Time"
+            print(f">>> ⏰ Schedule Active: {schedule_rule} (Zone: {tz_info})")
         else:
             print(f">>> ⚠️ No Schedule Found: Strategy will NOT run automatically. (Heartbeat Only)")
 
@@ -524,51 +530,70 @@ class IBBrokerAdapter(BaseLiveBroker):
 
                 # --- C. 运行阶段 (Event Loop) ---
                 print("[System] Entering Event Loop...")
-                last_check = datetime.datetime.now()
 
                 while ib.isConnected():
                     # 1. 驱动 IB 事件
                     # 如果断线，ib.sleep 会抛出 OSError 或 ConnectionResetError
                     ib.sleep(1)
 
+                    # 基于时区的时间计算
+                    if target_tz:
+                        # 如果配置了时区，获取带时区的当前时间
+                        now = datetime.datetime.now(target_tz)
+                    else:
+                        # 否则使用本地时间
+                        now = datetime.datetime.now()
+
                     # 2. 执行策略
-                    now = datetime.datetime.now()
                     ctx.now = pd.Timestamp(now)
 
-                    # 心跳日志 (每分钟)
-                    if (now - last_check).total_seconds() >= 60:
-                        last_heartbeat = now
 
-                        # (A) 仅打印心跳 (不触发数据刷新)
-                        print(f"[Heartbeat] {now.strftime('%H:%M:%S')} | Connected: True")
+                    # (B) 调度检查逻辑
+                    if schedule_rule:
+                        try:
+                            # 解析 "1d:HH:MM:SS" (仅处理 1d 每日任务)
+                            # 如果你的 schedule_rule 格式是 "1d:14:50:00"
+                            if schedule_rule.startswith('1d:'):
+                                _, target_time_str = schedule_rule.split(':', 1)
 
-                        # (B) 调度检查逻辑
-                        if schedule_rule:
-                            try:
-                                # 解析 "1d:HH:MM:SS" (仅处理 1d 每日任务)
-                                # 如果你的 schedule_rule 格式是 "1d:14:50:00"
-                                if schedule_rule.startswith('1d:'):
-                                    _, target_time_str = schedule_rule.split(':', 1)
-                                    target_h, target_m = map(int, target_time_str.split(':')[:2])
+                                parts = target_time_str.split(':')
+                                target_h = int(parts[0])
+                                target_m = int(parts[1])
+                                target_s = int(parts[2]) if len(parts) > 2 else 0
 
-                                    # 检查是否到达指定分钟 (精度为分钟)
-                                    if now.hour == target_h and now.minute == target_m:
-                                        # 检查今天是否已经跑过
-                                        today_str = now.strftime('%Y-%m-%d')
-                                        if last_schedule_run_date != today_str:
-                                            print(f"\n>>> ⏰ Schedule Triggered: {schedule_rule} <<<")
+                                target_dt = now.replace(hour=target_h, minute=target_m, second=target_s,
+                                                        microsecond=0)
 
-                                            # === 触发策略运行 ===
-                                            trader.run(ctx)
+                                # 2. 计算当前时间与目标时间的偏差 (秒)
+                                delta = (now - target_dt).total_seconds()
 
-                                            last_schedule_run_date = today_str
-                                            print(f">>> Run Finished. Next run: Tomorrow {target_time_str}\n")
-                                else:
-                                    # 如果以后支持其他频率 (如 1h)，在这里扩展
-                                    pass
+                                # 3. 判定触发条件：
+                                #    (a) 时间落在 [0, 5] 秒的窗口内 (允许迟到 5 秒)
+                                #    (b) 今天还没跑过 (防止 5 秒内重复触发)
+                                TOLERANCE_WINDOW = 5.0
 
-                            except Exception as e:
-                                print(f"[Schedule Error] Check failed: {e}")
+                                current_date_str = now.strftime('%Y-%m-%d')
+
+                                if 0 <= delta <= TOLERANCE_WINDOW:
+                                    if last_schedule_run_date != current_date_str:
+                                        print(
+                                            f"\n>>> ⏰ Schedule Triggered: {schedule_rule} (Delta: {delta:.2f}s) <<<")
+
+                                        # === 触发策略运行 ===
+                                        trader.run(ctx)
+
+                                        # === 更新状态锁 ===
+                                        last_schedule_run_date = current_date_str
+                                        print(f">>> Run Finished. Next run: Tomorrow {target_time_str}\n")
+                                    else:
+                                        # (可选) 如果在窗口内但已经跑过，说明正在窗口期内sleep，无需操作
+                                        pass
+                            else:
+                                # 如果以后支持其他频率 (如 1h)，在这里扩展
+                                pass
+
+                        except Exception as e:
+                            print(f"[Schedule Error] Check failed: {e}")
 
             # --- D. 异常处理 ---
             except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, TimeoutError, ConnectionError,
