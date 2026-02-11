@@ -18,8 +18,7 @@ class IBOrderProxy(BaseOrderProxy):
 
     @property
     def id(self):
-        # 使用 permId (永久ID) 或 orderId
-        return str(self.trade.order.permId)
+        return str(self.trade.order.orderId)
 
     @property
     def status(self):
@@ -33,10 +32,18 @@ class IBOrderProxy(BaseOrderProxy):
                 self.size = fill.filled
                 self.price = fill.avgFillPrice
                 self.value = self.size * self.price
-                # IBKR佣金通常在 completed 后才准确，早期可能为 None
+                # IBKR佣金信息在 commissionReport 对象中
+                # 必须检查 commissionReport 是否存在，否则会报 AttributeError
                 self.comm = 0.0
                 if trade.fills:
-                    self.comm = sum(f.commission for f in trade.fills)
+                    try:
+                        self.comm = sum(
+                            (f.commissionReport.commission if f.commissionReport else 0.0)
+                            for f in trade.fills
+                        )
+                    except AttributeError:
+                        # 防御性编程：万一结构有变，默认为0不崩亏
+                        self.comm = 0.0
 
         return ExecutedStats(self.trade)
 
@@ -85,6 +92,7 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 从 context 中获取由 launch 注入的 ib 实例
         self.ib: IB = getattr(context, 'ib_instance', None)
         self._tickers = {}  # 缓存实时行情 snapshot
+        self._fx_tickers = {}  # 缓存汇率行情
         super().__init__(context, cash_override, commission_override)
 
     def getcash(self):
@@ -111,7 +119,7 @@ class IBBrokerAdapter(BaseLiveBroker):
     @staticmethod
     def parse_contract(symbol: str) -> Contract:
         """
-        [升级版] 合约解析器
+        合约解析器
         支持格式:
         1. "QQQ.ISLAND" -> 美股指定主交易所 (PrimaryExchange)
         2. "SHSE.600000" -> A股 (保持兼容)
@@ -159,11 +167,14 @@ class IBBrokerAdapter(BaseLiveBroker):
     def _fetch_real_cash(self) -> float:
         """
         获取账户净资产(NetLiquidation)并强制转换为 USD。
-        支持: 直接读取 USD -> 自动汇率转换 (如 HKD/USD)
+        逻辑升级：
+        1. 优先获取 NetLiquidation (无论基准货币是 USD/HKD/JPY)。
+        2. 如果不是 USD，则自动查询汇率进行折算。
+        3. 增加 FX Ticker 缓存，解决在 EventLoop 回调中无法获取实时汇率的问题。
         """
         if not hasattr(self, 'ib') or not self.ib: return 0.0
 
-        # 检测当前是否在事件循环中 (例如在回调函数中)
+        # 检测当前是否在事件循环中
         in_loop = False
         try:
             if asyncio.get_running_loop():
@@ -171,9 +182,13 @@ class IBBrokerAdapter(BaseLiveBroker):
         except RuntimeError:
             pass
 
-        tags_priority = ['NetLiquidation', 'TotalCashValue', 'AvailableFunds', 'TotalCashBalance']
+        base_cash = 0.0
+        base_currency = None
+        found_tag = None
 
-        # --- Method A: 尝试通过 accountSummary 直接请求 USD ---
+        tags_priority = ['NetLiquidation', 'TotalCashValue', 'AvailableFunds']
+
+        # --- Method A: 通过 accountSummary 获取 NetLiquidation ---
         if not in_loop:
             try:
                 summary = self.ib.accountSummary()
@@ -181,95 +196,116 @@ class IBBrokerAdapter(BaseLiveBroker):
                     self.ib.sleep(0.5)
                     summary = self.ib.accountSummary()
 
+                # 1. 优先找 NetLiquidation (这是真正的 NAV)
                 for tag in tags_priority:
-                    items = [v for v in summary if v.tag == tag and v.currency == 'USD']
-                    if items:
-                        return float(items[0].value)
+                    # 先找 USD
+                    items_usd = [v for v in summary if v.tag == tag and v.currency == 'USD']
+                    if items_usd:
+                        return float(items_usd[0].value)
+
+                    # 没找到 USD，找任意货币
+                    items_any = [v for v in summary if v.tag == tag and v.currency]
+                    if items_any:
+                        item = items_any[0]
+                        val = float(item.value)
+                        if tag == 'NetLiquidation' or val > 0:
+                            base_cash = val
+                            base_currency = item.currency
+                            found_tag = tag
+                            break
             except Exception:
                 pass
 
-        # --- Method B: 降级到 accountValues (查找任意基础货币) ---
-        print("[IB Debug] Fallback to raw accountValues (Auto-FX Mode)...")
-        account_values = self.ib.accountValues()
-        if not account_values: return 0.0
+        # --- Method B: 降级到 accountValues (兜底) ---
+        if not base_currency:
+            # print("[IB Debug] Fallback to raw accountValues (Auto-FX Mode)...")
+            account_values = self.ib.accountValues()
+            if not account_values: return 0.0
 
-        base_cash = 0.0
-        base_currency = None
-        found_tag = None
-
-        # 1. 先找到一个有钱的非 USD 货币
-        for tag in tags_priority:
-            # 排除 'BASE' 这种虚拟单位，找具体的 currency 如 'HKD', 'CNH'
-            items = [v for v in account_values if
-                     v.tag == tag and v.currency and v.currency != 'USD' and v.currency != 'BASE']
-            for item in items:
-                try:
-                    val = float(item.value)
-                    if val > 0:
-                        base_cash = val
-                        base_currency = item.currency
-                        found_tag = tag
-                        break
-                except:
-                    continue
-            if base_currency: break
+            for tag in tags_priority:
+                items = [v for v in account_values if
+                         v.tag == tag and v.currency and v.currency != 'USD' and v.currency != 'BASE']
+                for item in items:
+                    try:
+                        val = float(item.value)
+                        if tag == 'NetLiquidation' or val > 0:
+                            base_cash = val
+                            base_currency = item.currency
+                            found_tag = tag
+                            break
+                    except:
+                        continue
+                if base_currency: break
 
         if not base_currency:
-            print("[IB Error] No positive cash balance found in ANY currency.")
+            print("[IB Error] No NetLiquidation or positive cash found in ANY currency.")
             return 0.0
 
-        print(f"[IB Debug] Found {base_cash} {base_currency} ({found_tag}). Fetching exchange rate...")
+        # print(f"[IB Debug] Found {base_cash} {base_currency} ({found_tag}). Fetching exchange rate...")
 
-        # --- Method C: 实时查询汇率并转换 ---
+        # --- Method C: 实时查询汇率并转换 (FX Conversion) ---
         try:
-            # 构造外汇对：通常 IB 的格式是 "USD" + "Base" (例如 USDHKD)
-            # 我们需要知道 1 USD = ? Base，然后用 Base Cash 除以这个汇率
+            if base_currency == 'USD':
+                return base_cash
+
             pair_symbol = f"USD{base_currency}"
-            contract = Forex(pair_symbol)
+            # 简单处理：如果是 EUR/GBP/AUD/NZD，通常是 EURUSD 格式
+            inverse_pair = False
+            if base_currency in ['EUR', 'GBP', 'AUD', 'NZD']:
+                pair_symbol = f"{base_currency}USD"
+                inverse_pair = True
 
-            # 获取实时行情
-            # 如果在 Loop 中，不能调用 qualifyContracts (阻塞)
-            if not in_loop:
-                self.ib.qualifyContracts(contract)
+            # 使用缓存的 Ticker，避免重复创建和订阅
+            # 在 Loop 中重复 reqMktData 而不 yield 会导致数据永远无法返回
+            ticker = self._fx_tickers.get(pair_symbol)
 
-            # reqMktData 是非阻塞的，可以安全调用
-            # 如果没有 qualify，IB 通常也能识别简单的 Forex 对
-            ticker = self.ib.reqMktData(contract, '', False, False)
+            if not ticker:
+                contract = Forex(pair_symbol)
+                # 只有不在 Loop 中时才 qualify，否则可能会阻塞或报错
+                if not in_loop:
+                    self.ib.qualifyContracts(contract)
 
-            # 等待数据回包 (最多等 2 秒)
-            exchange_rate = 0.0
+                # 建立订阅并缓存
+                ticker = self.ib.reqMktData(contract, '', False, False)
+                self._fx_tickers[pair_symbol] = ticker
 
-            if not in_loop:
-                # 正常模式：可以 sleep 等待数据
-                start_wait = datetime.datetime.now()
-                while (datetime.datetime.now() - start_wait).total_seconds() < 2.0:
-                    self.ib.sleep(0.1)
-                    rate = self._extract_rate_from_ticker(ticker)
-                    if rate > 0:
-                        exchange_rate = rate
-                        break
-            else:
-                # 回调模式：不能 sleep，只能看一眼当前数据
-                # print("[IB Debug] Inside EventLoop, attempting immediate rate fetch...")
-                exchange_rate = self._extract_rate_from_ticker(ticker)
+                # 首次订阅，稍微等待数据 (如果在 Loop 中则无法等待，只能依赖下一次调用或 Fallback)
+                if not in_loop:
+                    start_wait = datetime.datetime.now()
+                    while (datetime.datetime.now() - start_wait).total_seconds() < 2.0:
+                        self.ib.sleep(0.1)
+                        if self._extract_rate_from_ticker(ticker) > 0:
+                            break
 
-            # 针对 HKD 的强锚定硬兜底
-            if exchange_rate <= 0:
-                if base_currency == 'HKD':
-                    # HKD 锚定区间 7.75 - 7.85
-                    # 换算公式: USD = HKD / Rate
-                    # 为了风控安全，除以最大值 7.85 (得到最小的 USD 估值)
+            exchange_rate = self._extract_rate_from_ticker(ticker)
+
+            # --- 针对 HKD/JPY/CNH 的强锚定硬兜底 ---
+            # 使用 not (rate > 0) 这种判断方式，可以同时捕获 0、负数 以及 NaN
+            # 因为 NaN <= 0 是 False，会导致代码跳过兜底逻辑
+            if not (exchange_rate > 0):
+                bc = base_currency.strip().upper()
+                if bc == 'HKD':
                     exchange_rate = 7.85
-                    print(
-                        f"[IB Warning] Failed to fetch rates. Using conservative fallback for HKD: {exchange_rate}")
+                    print(f"[IB Warning] Using hardcoded fallback for HKD: {exchange_rate}")
+                elif bc == 'JPY':
+                    exchange_rate = 150.0
+                    print(f"[IB Warning] Using hardcoded fallback for JPY: {exchange_rate}")
+                elif bc == 'CNH':
+                    exchange_rate = 7.3
+                    print(f"[IB Warning] Using hardcoded fallback for CNH: {exchange_rate}")
+                else:
+                    pass
 
             if exchange_rate > 0:
-                usd_value = base_cash / exchange_rate
-                print(
-                    f"[IB FX] Rate {pair_symbol}: {exchange_rate:.4f} | Converted: {base_cash} {base_currency} -> {usd_value:.2f} USD")
+                if inverse_pair:
+                    usd_value = base_cash * exchange_rate
+                else:
+                    usd_value = base_cash / exchange_rate
+
+                # print(f"[IB FX] {pair_symbol}: {exchange_rate:.4f} | NAV: {base_cash} {base_currency} -> {usd_value:.2f} USD")
                 return usd_value
             else:
-                print(f"[IB Error] Failed to fetch valid rate for {pair_symbol}. Ticker state: {ticker}")
+                print(f"[IB Error] Failed to fetch valid rate for {pair_symbol}. Ticker: {ticker}")
                 return 0.0
 
         except Exception as e:
@@ -284,12 +320,15 @@ class IBBrokerAdapter(BaseLiveBroker):
                 return ticker.close
             elif ticker.last and ticker.last > 0:
                 return ticker.last
+            # 尝试 midPoint (Forex 有时用这个)
+            elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
+                return (ticker.bid + ticker.ask) / 2
         return rate
 
     # 2. 查持仓
     def get_position(self, data):
         class Pos:
-            size = 0;
+            size = 0
             price = 0.0
 
         if not self.ib: return Pos()
