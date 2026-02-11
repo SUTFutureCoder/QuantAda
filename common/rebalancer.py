@@ -64,21 +64,22 @@ class OrderExecutor:
         self.debug = debug
 
     def execute_plan(self, plan):
-        """执行由 Rebalancer 生成的计划"""
+        """执行调仓计划：利用 order_target_value 及其内部智能逻辑"""
 
-        # 1. 先执行清仓 (释放资金)
+        # 第一步：处理所有卖出动作 (清仓 + 减仓)
+        # 必须先执行卖出，以注册在途资金，激活后续买单的延迟重试逻辑
         for data in plan['sell_clear']:
-            self._log(f"清仓: {data._name}")
-            self.broker.order_target_percent(data=data, target=0.0)
+            self._log(f"执行清仓: {data._name}")
+            self.broker.order_target_value(data=data, target=0.0)
 
-        # 2. 执行减仓 (释放资金)
         for data, target in plan['reduce']:
-            self._log(f"减仓: {data._name} -> {target:.2f}")
+            self._log(f"执行减仓: {data._name} -> {target:.2f}")
             self.broker.order_target_value(data=data, target=target)
 
-        # 3. 执行加仓 (消耗资金)
+        # 第二步：处理所有买入动作 (补仓/开仓)
+        # 如果此时现金不足，BaseLiveBroker 会检测到上面的卖单，自动进入 Deferred 队列
         for data, target in plan['increase']:
-            self._log(f"买入: {data._name} -> {target:.2f}")
+            self._log(f"执行补仓/开仓: {data._name} -> {target:.2f}")
             self.broker.order_target_value(data=data, target=target)
 
     def _log(self, txt):
@@ -87,7 +88,6 @@ class OrderExecutor:
 
 
 from abc import ABC, abstractmethod
-import numpy as np
 
 class BaseSizingMethod(ABC):
     @abstractmethod
