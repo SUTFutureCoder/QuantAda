@@ -128,7 +128,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_source', type=str, default=None,
                         help="指定数据源 (例如: csv yf akshare tushare sxsc_tushare gm)")
     parser.add_argument('--symbols', type=str, default='SHSE.510300', help="以,分割的回测标的代码 (默认: SHSE.510300)")
-    parser.add_argument('--cash', type=float, default=100000.0, help="初始资金 (默认: 100000.0)")
+    parser.add_argument('--cash', type=float, default=None, help="初始资金 (回测默认: 100000.0、实盘默认全仓)")
     parser.add_argument('--commission', type=float, default=0, help="手续费率，例如：万1.5为:0.00015 (默认：0)")
     parser.add_argument('--slippage', type=float, default=0.001, help="滑点，模拟真实市场的冲击成本 (默认: 0.001)")
     parser.add_argument('--start_date', type=str, default=None, help="回测起始日期 (例如: 20241111)")
@@ -156,7 +156,10 @@ if __name__ == '__main__':
                         choices=['sharpe', 'return', 'final_value', 'calmar', 'mix_score'],  # 添加 mix_score
                         help="[优化模式] 优化目标")
     parser.add_argument('--study_name', type=str, default=None, help="[优化模式] 训练名称")
-    parser.add_argument('--train_roll_period', type=str, default=None, help="[优化模式] 动态滚动训练，start_date往前使用T-X作为训练集。例如：1w、1m、6m、1y。需要配合start_date、end_date一起使用")
+    parser.add_argument('--train_roll_period', type=str, default=None,
+                        help="[优化模式] 训练集滚动周期 (从测试集开始时间往前推)。例如：1y, 3y")
+    parser.add_argument('--test_roll_period', type=str, default=None,
+                        help="[优化模式] 测试集滚动周期 (从当前时间/end_date往前推)。例如：1y, 3m, 6m。默认为无独立测试集")
     parser.add_argument('--train_ratio', type=float, default=None, help="[优化模式] 比例切分训练集、测试集，例如0.5")
     parser.add_argument('--train_period', type=str, default=None, help="[优化模式] 训练集时段")
     parser.add_argument('--test_period', type=str, default=None, help="[优化模式] 测试集时段")
@@ -263,7 +266,7 @@ if __name__ == '__main__':
             recorder_manager.add_recorder(DBRecorder(
                 strategy_name=args.strategy, description=args.desc, params=s_params,
                 start_date=args.start_date, end_date=args.end_date,
-                initial_cash=args.cash, commission=args.commission
+                initial_cash=args.cash if args.cash is not None else 100000.0, commission=args.commission
             ))
         except Exception as e:
             print(f"Failed to init DBRecorder: {e}")
@@ -275,7 +278,7 @@ if __name__ == '__main__':
         selection_filename=args.selection,
         strategy_filename=args.strategy,
         symbols=symbol_list,
-        cash=args.cash,
+        cash=args.cash if args.cash is not None else 100000.0,
         commission=args.commission,
         slippage=args.slippage,
         data_source=args.data_source,

@@ -94,7 +94,7 @@ class OrderExecutor:
     专门的执行器，负责把计划变成订单。
     """
 
-    def __init__(self, broker, debug=True):
+    def __init__(self, broker, debug=False):
         self.broker = broker
         self.debug = debug
 

@@ -4,6 +4,7 @@ import backtrader as bt
 import pandas as pd
 
 import config
+from common import log
 
 
 class OrderProxy:
@@ -93,9 +94,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
         return self.broker.getcommissioninfo(data)
 
     def log(self, txt, dt=None):
-        if self.verbose and config.LOG:
-            dt = dt or self.datas[0].datetime.date(0)
-            print(f'{dt.isoformat()} {txt}')
+        if self.verbose:
+            dt = dt or self.datas[0].datetime.datetime(0)
+            log.info(txt, dt=dt)
 
     def next(self):
         # 每次进入新的 K 线周期，重置预计释放资金为 0
@@ -406,6 +407,31 @@ class BacktraderStrategyWrapper(bt.Strategy):
             if self.verbose:
                 print(f"Error logging decision: {e}")
 
+
+class SignalLoggingBroker(bt.brokers.BackBroker):
+    """
+    继承自 Backtrader 原生 Broker，仅用于在回测时拦截下单信号并打印日志。
+    """
+
+    def buy(self, owner, data, size, price=None, **kwargs):
+        if size > 0:
+            exec_price = price if price else data.close[0]
+            # 获取回测当前时间
+            current_dt = self.cerebro.datas[0].datetime.datetime(0)
+
+            log.signal('BUY', data._name, size, exec_price, tag="回测信号", dt=current_dt)
+
+        return super().buy(owner, data, size, price, **kwargs)
+
+    def sell(self, owner, data, size, price=None, **kwargs):
+        if size > 0:
+            exec_price = price if price else data.close[0]
+            current_dt = self.cerebro.datas[0].datetime.datetime(0)
+
+            log.signal('SELL', data._name, size, exec_price, tag="回测信号", dt=current_dt)
+
+        return super().sell(owner, data, size, price, **kwargs)
+
 class Backtester:
     # 回测执行器
     def __init__(self, datas, strategy_class, params=None, start_date=None, end_date=None, cash=100000.0,
@@ -414,6 +440,7 @@ class Backtester:
                  timeframe: str = 'Days', compression: int = 1,
                  recorder = None, enable_plot = True, verbose=True):
         self.cerebro = bt.Cerebro()
+        self.cerebro.broker = SignalLoggingBroker()
         self.datas = datas
         self.strategy_class = strategy_class
         self.params = params

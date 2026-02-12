@@ -26,6 +26,7 @@ QuantAda 启发式并行贝叶斯优化器
 """
 
 import copy
+import datetime
 import math
 import os
 import sys
@@ -110,37 +111,51 @@ class OptimizationJob:
         self.raw_datas = self._fetch_all_data()
         self.train_datas, self.test_datas, self.train_range, self.test_range = self._split_data()
 
+        # 根据实际日期和市场类型自动精细化 study_name
+        self._auto_refine_study_name()
+
         self.has_debugged_data = False
 
     def _fetch_all_data(self):
         print("\n--- Fetching Data for Optimization ---")
-        req_start = self.args.start_date
+
+        # 1. 锚点初始化 (Anchor Point: Test End)
         req_end = self.args.end_date
+        if not req_end:
+            req_end = pd.Timestamp.now().strftime('%Y%m%d')
+            self.args.end_date = req_end  # 回写
 
-        # 只有启用了 train_roll_period 且没有显式指定 train_period 时
-        # 我们才需要自动把 req_start 往前推，以包含训练集数据
-        if getattr(self.args, 'train_roll_period', None) and not self.args.train_period:
-            offset = parse_period_string(self.args.train_roll_period)
-            if offset and req_start:
-                try:
-                    # 假设 req_start 是测试集的开始，我们需要往前推 offset 作为训练集的开始
-                    s_dt = pd.to_datetime(str(req_start))
-                    # 额外多留一点 buffer (比如7天) 防止边界效应
-                    train_start_dt = s_dt - offset - pd.DateOffset(days=7)
-                    train_start_str = train_start_dt.strftime('%Y%m%d')
-                    print(
-                        f"[Auto-Fetch] Dynamic Rolling Detected ({self.args.train_roll_period}): Extending data fetch start from {req_start} to {train_start_str}")
-                    req_start = train_start_str
-                except Exception as e:
-                    print(f"[Warning] Failed to calculate dynamic start date: {e}")
+        req_start = self.args.start_date
 
-        if self.args.train_period and self.args.test_period:
-            # 自动计算覆盖整个训练+测试的日期范围
-            train_s, train_e = self.args.train_period.split('-')
-            test_s, test_e = self.args.test_period.split('-')
-            dates = [pd.to_datetime(d) for d in [train_s, train_e, test_s, test_e]]
-            req_start = min(dates).strftime('%Y%m%d')
-            req_end = max(dates).strftime('%Y%m%d')
+        # 2. 动态周期计算 (支持 Train Roll + Test Roll)
+        if getattr(self.args, 'train_roll_period', None):
+
+            # A. 计算测试集长度
+            test_duration = pd.Timedelta(0)
+            if getattr(self.args, 'test_roll_period', None):
+                offset_test = parse_period_string(self.args.test_roll_period)
+                if offset_test:
+                    test_duration = offset_test
+
+            # B. 计算训练集长度
+            train_duration = parse_period_string(self.args.train_roll_period)
+
+            # C. 计算总回溯起点
+            if train_duration:
+                anchor_dt = pd.to_datetime(str(req_end))
+
+                # 依次扣除：测试期 -> 训练期 -> 14天缓冲区
+                fetch_start_dt = anchor_dt - test_duration - train_duration - pd.DateOffset(days=14)
+
+                req_start = fetch_start_dt.strftime('%Y%m%d')
+
+                # 回写 start_date
+                self.args.start_date = req_start
+
+                print(f"[Auto-Fetch] Dynamic Rolling Detected:")
+                print(f"  Train Roll: {self.args.train_roll_period}")
+                print(f"  Test Roll:  {getattr(self.args, 'test_roll_period', 'None (Refit Mode)')}")
+                print(f"  => Fetching data from {req_start} to {req_end}")
 
         datas = {}
         for symbol in self.target_symbols:
@@ -151,7 +166,8 @@ class OptimizationJob:
                 end_date=req_end,
                 specified_sources=self.args.data_source,
                 timeframe=self.args.timeframe,
-                compression=self.args.compression
+                compression=self.args.compression,
+                refresh=self.args.refresh
             )
             if df is not None and not df.empty:
                 datas[symbol] = df
@@ -178,40 +194,43 @@ class OptimizationJob:
 
         # 2. 动态滚动训练模式 (Dynamic Rolling)
         elif getattr(self.args, 'train_roll_period', None):
-            roll_window = self.args.train_roll_period
-            print(f"Split Mode: Dynamic Rolling (Lookback: {roll_window})")
+            train_roll = self.args.train_roll_period
+            test_roll = getattr(self.args, 'test_roll_period', None)
 
-            # A. 确定目标(测试)区间
-            # 如果没指定 test_period，就用 run.py 传入的 start/end 作为想要验证的区间
-            if self.args.test_period:
-                te_s, te_e = self.args.test_period.split('-')
+            print(f"Split Mode: Dynamic Rolling")
+
+            # A. 确定时间锚点 (Anchor: Test End)
+            # self.args.end_date 已经在 _fetch_all_data 中补全
+            anchor_dt = pd.to_datetime(str(self.args.end_date))
+
+            # B. 计算切分点
+            if test_roll:
+                # 有测试集：Split Point = End - Test Roll
+                test_offset = parse_period_string(test_roll)
+                split_dt = anchor_dt - test_offset
             else:
-                te_s = self.args.start_date
-                te_e = self.args.end_date
-                if not te_s:
-                    raise ValueError(
-                        "[Error] Dynamic rolling requires --start_date to define the target/test period start.")
+                # 无测试集 (Refit模式)：Split Point = End
+                split_dt = anchor_dt
 
-            # B. 推断训练区间
-            offset = parse_period_string(roll_window)
-            target_start_dt = pd.to_datetime(str(te_s))
-
-            # 训练集结束 = 测试集开始 (无缝衔接)
-            # 训练集开始 = 测试集开始 - 滚动周期
-            train_end_dt = target_start_dt
-            train_start_dt = train_end_dt - offset
+            # Train Start = Split Point - Train Roll
+            train_offset = parse_period_string(train_roll)
+            train_start_dt = split_dt - train_offset
 
             tr_s = train_start_dt.strftime('%Y%m%d')
-            tr_e = train_end_dt.strftime('%Y%m%d')
+            tr_e = split_dt.strftime('%Y%m%d')
+            te_s = split_dt.strftime('%Y%m%d')
+            te_e = anchor_dt.strftime('%Y%m%d')
 
-            # 格式化 Test 结束时间 (如果是 None/Latest)
-            te_e_display = te_e if te_e else "Latest"
+            print(f"  [Auto-Inferred] Train Set: {tr_s} -> {tr_e} ({train_roll})")
 
-            print(f"  [Auto-Inferred] Train Set: {tr_s} -> {tr_e}")
-            print(f"  [Target/Test]   Test Set:  {te_s} -> {te_e_display}")
+            if test_roll:
+                print(f"  [Auto-Inferred] Test Set:  {te_s} -> {te_e} ({test_roll})")
+                test_d = self.slice_datas(te_s, te_e)
+            else:
+                print(f"  [Auto-Inferred] Test Set:  (Skipped / Production Refit Mode)")
+                test_d = {}  # 空测试集
 
             train_d = self.slice_datas(tr_s, tr_e)
-            test_d = self.slice_datas(te_s, te_e)
 
             return train_d, test_d, (tr_s, tr_e), (te_s, te_e)
 
@@ -251,6 +270,41 @@ class OptimizationJob:
         else:
             print("Warning: No split method defined. Running optimization on FULL dataset.")
             return self.raw_datas, {}, (self.args.start_date, self.args.end_date), (None, None)
+
+    def _auto_refine_study_name(self):
+        """
+        基于时间维度的自动化命名逻辑
+        格式：[训练周期]_[测试周期]_[起止日期]_[时间戳]
+        """
+        # 仅在默认命名 (以 study_ 开头) 或未命名时覆盖
+        if self.args.study_name and not self.args.study_name.startswith("study_"):
+            return
+
+        # 1. 提取周期标签 (Period Tags)
+        # 训练周期名 (如: 3Y, 1Y)
+        tr_p = self.args.train_roll_period.upper() if self.args.train_roll_period else "ALL"
+
+        # 测试周期名 (如: 3M, 6M) 或标记为 Refit (全量模式)
+        te_p = getattr(self.args, 'test_roll_period', '').upper()
+        if not te_p:
+            te_p = "REFIT"  # 代表没有独立测试集，是用于生成的实盘参数
+
+        # 2. 提取日期边界 (Date Bounds)
+        # 训练开始日期
+        start_str = self.train_range[0]
+        # 整体结束日期 (如果有测试集则取测试集结束日期，否则取训练集结束日期)
+        end_str = self.test_range[1] if self.test_range[1] else self.train_range[1]
+
+        # 3. 构造语义化名称
+        # 格式示例：3Y_3M_20220212_20260212_153022
+        # 含义：3年训练，3个月测试，覆盖 2022-2026，下午3点50分执行
+        timestamp = datetime.datetime.now().strftime("%H%M%S")
+
+        # 移除可能导致路径问题的特殊字符
+        new_name = f"{tr_p}_{te_p}_{start_str}_{end_str}_{timestamp}"
+
+        print(f"[Optimizer] Auto-refining study_name (Date-Based): {new_name}")
+        self.args.study_name = new_name
 
     def _launch_dashboard(self, log_file, port=8080):
         """
@@ -503,19 +557,24 @@ class OptimizationJob:
                 if total_trades < 10:
                     penalty = -10.0
 
-                # 让分数连续变化，即使是负数，优化器也能找到上升方向
-                # 亏 5% (Score -0.5) 优于 亏 50% (Score -5.0)
-
-                # 权重微调：“盯着回撤（Calmar）和总收益（Return），几乎完全无视波动（Sharpe）” 的进攻型猛兽。
-                # Calmar: 2.0 (生存第一)
-                # Return: 2.0 (收益第二，不用给太高，防止大起大落)
-                # Sharpe: 1.0 (平滑第三 $\sqrt{252} \approx 15.8$，因此权重除以16，防止变为保守派老头（重波动率平滑）)
-
                 # 保护逻辑：防止 infinite
                 if math.isinf(calmar): calmar = 0.0
                 if math.isinf(sharpe): sharpe = 0.0
 
-                raw_score = (calmar * 2.0) + (total_return * 2.0) + (sharpe * 1.0 / 16)
+                # =========================================================
+                # 最终建议公式 (Final Recommended Formula)
+                # =========================================================
+                # 1. Calmar (权重 2.0): 核心锚点。每 1 单位卡玛比贡献 2 分。
+                #    典型值 2.27 -> 4.54 分 (占比约 60%)
+                #
+                # 2. Return (权重 2.0): 收益基础。每 100% 收益贡献 2 分。
+                #    典型值 0.30 -> 0.60 分 (占比约 8%)
+                #
+                # 3. Sharpe (权重 1.5): 稳定性修正。每 1 单位年化夏普贡献 1.5 分。
+                #    典型值 1.30 -> 1.95 分 (占比约 27%)
+                #    * 移除了 /16，因为 sharpe 变量已经是年化值。
+                #    * 权重设为 1.5，强迫优化器重视净值曲线的平滑度，自然排斥高波动的 TopK=1。
+                raw_score = (calmar * 2.0) + (total_return * 2.0) + (sharpe * 1.5)
 
                 metric_val = raw_score + penalty
 

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from common import log
 
 import pandas as pd
 
@@ -245,6 +246,8 @@ class BaseLiveBroker(ABC):
             shares = int(shares)
 
         if shares > 0:
+            log.signal('BUY', data._name, shares, price, tag="实盘信号")
+
             return self._submit_order(data, shares, 'BUY', price)
         return None
 
@@ -257,6 +260,8 @@ class BaseLiveBroker(ABC):
             shares = int(shares)
 
         if shares > 0:
+            log.signal('SELL', data._name, shares, price, tag="实盘信号")
+
             proxy = self._submit_order(data, shares, 'SELL', price)
             if proxy: self._pending_sells.add(proxy.id)  # 自动监控
             return proxy
@@ -321,7 +326,12 @@ class BaseLiveBroker(ABC):
 
     def get_cash(self):
         """公有接口：获取资金"""
-        return self._fetch_real_cash()
+        real_cash = self._fetch_real_cash()
+        # 虚拟分仓逻辑: min(实盘资金, 设定的虚拟资金)
+        # 如果 self._cash_override 是 None，说明用户想全仓，则返回 real_cash
+        if self._cash_override is not None:
+            return min(real_cash, self._cash_override)
+        return real_cash
 
     def _has_pending_sells(self):
         return len(self._pending_sells) > 0
@@ -340,8 +350,10 @@ class BaseLiveBroker(ABC):
         return val
 
     def _init_cash(self):
-        if self._cash_override: return self._cash_override
-        return self._fetch_real_cash()
+        real_cash = self._fetch_real_cash()
+        if self._cash_override is not None:
+            return min(real_cash, self._cash_override)
+        return real_cash
 
     def _init_commission(self):
         """初始化：使用费率"""
@@ -366,7 +378,6 @@ class BaseLiveBroker(ABC):
         # 检查时间是否推进 (进入了新的 Bar/Day，跨周期)
         if self._datetime and dt > self._datetime:
 
-            # 【逻辑修正】
             # 不要因为 tick/bar 的更新就清理订单（会误杀 HFT 买单）。
             # 只有在以下两种情况才清理：
             # 1. 跨日了 (New Trading Day) -> 昨天的单子肯定是死单
@@ -397,10 +408,6 @@ class BaseLiveBroker(ABC):
             def __init__(self, dt): self._dt = dt
             def datetime(self, ago=0): return self._dt
         return dt_proxy(self._datetime)
-
-    def log(self, txt, dt=None):
-        log_time = dt or self._datetime or pd.Timestamp.now()
-        print(f"[{log_time.strftime('%Y-%m-%d %H:%M:%S')}] {txt}")
 
     def _reset_stale_state(self, new_dt):
         """
