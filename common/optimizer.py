@@ -689,6 +689,14 @@ class OptimizationJob:
                 load_if_exists=True,
                 sampler=sampler,
             )
+
+            # 将命令行参数记录到 Study User Attributes
+            # vars(args) 可以将 Namespace 转换为字典，方便遍历
+            for key, value in vars(self.args).items():
+                # 为了防止日志干扰或 token 泄露，可以根据需要做简单过滤
+                # 这里将所有参数转为字符串存储，方便在 Dashboard 右下角直接查阅
+                study.set_user_attr(key, str(value))
+
         except OSError as e:
             # 捕获 WinError 1314 (Symlink 权限不足)
             if hasattr(e, 'winerror') and e.winerror == 1314:
