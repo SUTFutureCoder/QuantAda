@@ -440,9 +440,9 @@ class IBBrokerAdapter(BaseLiveBroker):
         import pytz
         from ib_insync import IB
 
-        host = conn_cfg.get('host', config.IBKR_HOST)
-        port = int(conn_cfg.get('port', config.IBKR_PORT))
-        client_id = int(conn_cfg.get('client_id', config.IBKR_CLIENT_ID))
+        host = config.IBKR_HOST
+        port = config.IBKR_PORT
+        client_id = config.IBKR_CLIENT_ID
 
         # 默认为空，表示使用服务器本地时间
         timezone_str = conn_cfg.get('timezone')
