@@ -53,7 +53,8 @@ class PortfolioRebalancer:
                 if target_value > 0:
                     plan['increase'].append((data, target_value))
 
-        # PortfolioRebalancer._log_plan(plan, current_positions, target_symbols, target_value, rebalance_threshold)
+        if config.PRINT_PLAN:
+            PortfolioRebalancer._log_plan(plan, current_positions, target_symbols, target_value, rebalance_threshold)
 
         return plan
 

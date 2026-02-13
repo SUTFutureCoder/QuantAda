@@ -1,6 +1,6 @@
 # --- 交易及框架基础配置 ---
 # 股数取整（A股100，IBKR、国际市场或加密货币1）
-DEFAULT_LOT_SIZE = 100
+LOT_SIZE = 100
 
 # 年交易日，如果是加密货币请设置为365
 ANNUAL_FACTOR = 252
@@ -13,6 +13,9 @@ CACHE_DATA = False
 
 # 是否打印详细交易日志
 LOG = True
+
+# 是否打印交易计划
+PRINT_PLAN = False
 
 
 # --- 数据源配置 ---

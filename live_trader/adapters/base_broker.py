@@ -3,7 +3,10 @@ from abc import ABC, abstractmethod
 
 import pandas as pd
 
+import config
 from common import log
+
+from alarms.manager import AlarmManager
 
 
 class BaseOrderProxy(ABC):
@@ -230,7 +233,7 @@ class BaseLiveBroker(ABC):
 
     def _smart_buy(self, data, shares, price, target_pct, **kwargs):
         """智能买入 (Percent模式)：资金检查 + 延迟重试 + 自动降级"""
-        lot_size = kwargs.get('lot_size', 100)
+        lot_size = config.LOT_SIZE
         cash = self.get_cash()
 
         # 动态安全垫
@@ -262,7 +265,7 @@ class BaseLiveBroker(ABC):
 
     def _smart_buy_value(self, data, shares, price, target_value, **kwargs):
         """智能买入 (Value模式)：资金检查 + 延迟重试 + 自动降级"""
-        lot_size = kwargs.get('lot_size', 100)
+        lot_size = config.LOT_SIZE
         cash = self.get_cash()
 
         # 动态安全垫
@@ -293,10 +296,27 @@ class BaseLiveBroker(ABC):
 
     def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):
         """通用的下单收尾逻辑：取整 + 提交"""
+        raw_shares = shares
         if lot_size > 1:
             shares = int(shares // lot_size) * lot_size
         else:
             shares = int(shares)
+
+        # lot取整异常
+        if raw_shares > 0 >= shares:
+            error_msg = (f"🚨 [Broker Warning] {data._name} 订单取整后股数为0！\n"
+                         f"原始需求: {raw_shares:.2f} 股\n"
+                         f"当前最小交易单位 (LotSize): {lot_size}\n"
+                         f"原因: 原始需求不足一手，订单已自动取消。请检查 LOT_SIZE 配置。")
+
+            print(f"\n{'-' * 30}\n{error_msg}\n{'-' * 30}")
+
+            try:
+                AlarmManager().push_text(error_msg, level='WARNING')
+            except Exception as e:
+                print(f"[Alarm Error] 无法发送截断警告: {e}")
+
+            return None
 
         if shares > 0:
             # 根据是否为重试改变日志标签
@@ -319,7 +339,7 @@ class BaseLiveBroker(ABC):
 
     def _smart_sell(self, data, shares, price, **kwargs):
         """智能卖出：自动注册监控"""
-        lot_size = kwargs.get('lot_size', 100)
+        lot_size = config.LOT_SIZE
         if lot_size > 1:
             shares = int(shares // lot_size) * lot_size
         else:

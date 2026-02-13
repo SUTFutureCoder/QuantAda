@@ -164,16 +164,36 @@ class LiveTrader:
             # 1. 检查策略是否有挂单
             strategy_order = getattr(self.strategy, 'order', None)
 
-            # 如果策略持有“虚拟延迟单”，但 Broker 的延迟队列已经被清空（例如跨日清理了），
-            # 那么这个订单就是“僵尸单”，必须强制复位，否则策略会死锁。
+            # 如果策略持有“虚拟延迟单”，但 Broker 的延迟队列已经被清空
+            # 需要引入“宽限期”（Grace Period），防止交易所回调慢于本地队列清理导致重复下单 (Double Spend)
             if strategy_order and getattr(strategy_order, 'id', None) == "DEFERRED_VIRTUAL_ID":
-                # 检查 Broker 内部队列
                 deferred_queue = getattr(self.broker, '_deferred_orders', [])
                 if len(deferred_queue) == 0:
-                    print(f"[Engine] Detected ZOMBIE deferred order in strategy. "
-                          f"Broker queue is empty. Forcing strategy.order = None")
-                    self.strategy.order = None
-                    strategy_order = None  # 本次循环视为无单，允许继续执行
+                    import time
+                    current_time = time.time()
+
+                    # 1. 如果这是首次发现队列为空，打上时间戳并开始等待
+                    if not hasattr(self, '_deferred_empty_time'):
+                        self._deferred_empty_time = current_time
+                        print("[Engine] ⏳ 内部延迟队列已排空。正在等待柜台真实订单回调 (进入 5 秒宽限期)...")
+                        # 强行返回，继续保持策略锁定，给网络回调一点时间
+                        return
+
+                    # 2. 检查宽限期是否超时 (例如设定为 5.0 秒，可根据券商网络状况调整)
+                    grace_period = 5.0
+                    if current_time - self._deferred_empty_time > grace_period:
+                        print(f"[Engine] ⚠️ 宽限期 ({grace_period}s) 结束，未收到柜台回调。确认为僵尸单，强制复位状态！")
+                        self.strategy.order = None
+                        strategy_order = None
+                        delattr(self, '_deferred_empty_time')  # 清除计时器
+                    else:
+                        # 还在宽限期内，继续静默等待
+                        print(f"[Engine] ⏳ 宽限期等待中... (已等待 {current_time - self._deferred_empty_time:.1f}s)")
+                        return
+                else:
+                    # 防御性逻辑：如果队列里又有了新的延迟单，重置并清除可能的倒计时
+                    if hasattr(self, '_deferred_empty_time'):
+                        delattr(self, '_deferred_empty_time')
 
             if strategy_order:
                 print("[Engine] Strategy has a pending order. Notifying and skipping logic.")

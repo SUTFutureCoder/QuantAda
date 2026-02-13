@@ -159,7 +159,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
     def order_target_percent(self, data=None, target=0.0, **kwargs):
         data = data or self.datas[0]
-        lot_size = kwargs.get('lot_size', config.DEFAULT_LOT_SIZE)
+        lot_size = kwargs.get('lot_size', config.LOT_SIZE)
 
         # 防守逻辑：如果该标的正在被风控接管，且策略试图买入，则拦截
         if hasattr(self.strategy, 'risk_handled_symbols'):
@@ -244,7 +244,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
         3. 风控拦截 (Risk Control Lock)
         """
         data = data or self.datas[0]
-        lot_size = kwargs.get('lot_size', config.DEFAULT_LOT_SIZE)
+        lot_size = kwargs.get('lot_size', config.LOT_SIZE)
 
         # 0. 风控拦截：如果该标的正在被风控接管，且策略试图买入/持有，则拦截
         if hasattr(self.strategy, 'risk_handled_symbols'):

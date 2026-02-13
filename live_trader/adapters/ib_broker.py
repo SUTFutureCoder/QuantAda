@@ -92,6 +92,8 @@ class IBBrokerAdapter(BaseLiveBroker):
         self.ib: IB = getattr(context, 'ib_instance', None)
         self._tickers = {}  # 缓存实时行情 snapshot
         self._fx_tickers = {}  # 缓存汇率行情
+        # 最后已知有效汇率缓存 (Last Known Good Rate)
+        self._last_valid_fx_rates = {}
         super().__init__(context, cash_override, commission_override, slippage_override)
 
     def _fetch_real_cash(self) -> float:
@@ -179,12 +181,11 @@ class IBBrokerAdapter(BaseLiveBroker):
     # 1. 查钱 (重构为通用方法，支持指定 Tag)
     def _fetch_smart_value(self, target_tags=None) -> float:
         """
-        获取账户特定价值（如现金或净值），支持自动汇率转换。
-        :param target_tags: 优先级 Tag 列表，例如 ['TotalCashValue']
+        获取账户特定价值（如现金或净值），支持多币种自动加总并统一转换为 USD。
+        修复了因单一币种（如USD）为负债时，忽略其他币种正资产的问题。
         """
         if not hasattr(self, 'ib') or not self.ib: return 0.0
 
-        # 检测当前是否在事件循环中
         in_loop = False
         try:
             if asyncio.get_running_loop():
@@ -192,123 +193,103 @@ class IBBrokerAdapter(BaseLiveBroker):
         except RuntimeError:
             pass
 
-        base_cash = 0.0
-        base_currency = None
-
-        # 使用传入的 tags，若未传入则使用默认优先级 (兼容旧代码兜底)
         tags_priority = target_tags if target_tags else ['NetLiquidation', 'TotalCashValue', 'AvailableFunds']
 
-        # --- Method A: 通过 accountSummary 获取 ---
+        # 尝试获取账户数据源
+        source_data = []
         if not in_loop:
             try:
-                summary = self.ib.accountSummary()
-                if not summary:
+                source_data = self.ib.accountSummary()
+                if not source_data:
                     self.ib.sleep(0.5)
-                    summary = self.ib.accountSummary()
-
-                # 1. 优先找 tags_priority 中的项目
-                for tag in tags_priority:
-                    # 先找 USD
-                    items_usd = [v for v in summary if v.tag == tag and v.currency == 'USD']
-                    if items_usd:
-                        return float(items_usd[0].value)
-
-                    # 没找到 USD，找任意货币
-                    items_any = [v for v in summary if v.tag == tag and v.currency]
-                    if items_any:
-                        item = items_any[0]
-                        val = float(item.value)
-                        # 只要数值有效或明确查询净值，即视为找到
-                        if val > 0 or tag == 'NetLiquidation':
-                            base_cash = val
-                            base_currency = item.currency
-                            break
+                    source_data = self.ib.accountSummary()
             except Exception:
                 pass
 
-        # --- Method B: 降级到 accountValues (兜底) ---
-        if not base_currency:
-            # print("[IB Debug] Fallback to raw accountValues (Auto-FX Mode)...")
-            account_values = self.ib.accountValues()
-            if not account_values: return 0.0
+        # 兜底到 accountValues
+        if not source_data:
+            try:
+                source_data = self.ib.accountValues()
+            except:
+                pass
+            if not source_data: return 0.0
 
-            for tag in tags_priority:
-                items = [v for v in account_values if
-                         v.tag == tag and v.currency and v.currency != 'USD' and v.currency != 'BASE']
-                for item in items:
-                    try:
-                        val = float(item.value)
-                        if val > 0 or tag == 'NetLiquidation':
-                            base_cash = val
-                            base_currency = item.currency
-                            break
-                    except:
+        for tag in tags_priority:
+            # 提取该 tag 下所有的币种记录 (排除 BASE，由我们自己精准换算 USD)
+            items = [v for v in source_data if v.tag == tag and v.currency and v.currency != 'BASE']
+            if not items:
+                continue
+
+            total_usd = 0.0
+            found_valid = False
+
+            for item in items:
+                try:
+                    val = float(item.value)
+                    # 忽略为0的货币项 (除非是查净值)
+                    if val == 0 and tag != 'NetLiquidation':
                         continue
-                if base_currency: break
 
-        if not base_currency:
-            # 只有在真的找不到任何正资产时才报错，避免刷屏
-            # print(f"[IB Error] No positive value found for {tags_priority} in ANY currency.")
-            return 0.0
+                    if item.currency == 'USD':
+                        total_usd += val
+                        found_valid = True
+                    else:
+                        # --- 汇率转换逻辑 ---
+                        pair_symbol = f"USD{item.currency}"
+                        inverse_pair = False
+                        if item.currency in ['EUR', 'GBP', 'AUD', 'NZD']:
+                            pair_symbol = f"{item.currency}USD"
+                            inverse_pair = True
 
-        # --- Method C: 实时查询汇率并转换 (FX Conversion) ---
-        try:
-            if base_currency == 'USD':
-                return base_cash
+                        ticker = self._fx_tickers.get(pair_symbol)
+                        if not ticker:
+                            contract = Forex(pair_symbol)
+                            if not in_loop:
+                                self.ib.qualifyContracts(contract)
+                            ticker = self.ib.reqMktData(contract, '', False, False)
+                            self._fx_tickers[pair_symbol] = ticker
+                            if not in_loop:
+                                start_wait = datetime.datetime.now()
+                                while (datetime.datetime.now() - start_wait).total_seconds() < 1.0:
+                                    self.ib.sleep(0.1)
+                                    if self._extract_rate_from_ticker(ticker) > 0:
+                                        break
 
-            pair_symbol = f"USD{base_currency}"
-            # 简单处理：如果是 EUR/GBP/AUD/NZD，通常是 EURUSD 格式
-            inverse_pair = False
-            if base_currency in ['EUR', 'GBP', 'AUD', 'NZD']:
-                pair_symbol = f"{base_currency}USD"
-                inverse_pair = True
+                        exchange_rate = self._extract_rate_from_ticker(ticker)
 
-            # 使用缓存的 Ticker，避免重复创建和订阅
-            ticker = self._fx_tickers.get(pair_symbol)
+                        # LKGR 和 历史兜底
+                        if not (exchange_rate > 0):
+                            if pair_symbol in self._last_valid_fx_rates:
+                                exchange_rate = self._last_valid_fx_rates[pair_symbol]
+                            else:
+                                if not in_loop:
+                                    try:
+                                        bars = self.ib.reqHistoricalData(
+                                            Forex(pair_symbol), endDateTime='', durationStr='2 D',
+                                            barSizeSetting='1 day', whatToShow='MIDPOINT', useRTH=True
+                                        )
+                                        if bars: exchange_rate = bars[-1].close
+                                    except:
+                                        pass
 
-            if not ticker:
-                contract = Forex(pair_symbol)
-                if not in_loop:
-                    self.ib.qualifyContracts(contract)
-                ticker = self.ib.reqMktData(contract, '', False, False)
-                self._fx_tickers[pair_symbol] = ticker
-                if not in_loop:
-                    start_wait = datetime.datetime.now()
-                    while (datetime.datetime.now() - start_wait).total_seconds() < 2.0:
-                        self.ib.sleep(0.1)
-                        if self._extract_rate_from_ticker(ticker) > 0:
-                            break
+                        if exchange_rate > 0:
+                            self._last_valid_fx_rates[pair_symbol] = exchange_rate
+                            if inverse_pair:
+                                total_usd += val * exchange_rate
+                            else:
+                                total_usd += val / exchange_rate
+                            found_valid = True
+                        else:
+                            if val != 0:
+                                print(f"[IB Warning] 无法获取 {item.currency} 汇率, 金额 {val} 未计入。")
+                except Exception:
+                    continue
 
-            exchange_rate = self._extract_rate_from_ticker(ticker)
+            # 只要在这个 tag 下成功计算了哪怕一个有效条目（即便加总是负数），都直接返回
+            if found_valid:
+                return total_usd
 
-            # --- 针对 HKD/JPY/CNH 的强锚定硬兜底 ---
-            if not (exchange_rate > 0):
-                bc = base_currency.strip().upper()
-                if bc == 'HKD':
-                    exchange_rate = 7.85
-                    print(f"[IB Warning] Using hardcoded fallback for HKD: {exchange_rate}")
-                elif bc == 'JPY':
-                    exchange_rate = 150.0
-                    print(f"[IB Warning] Using hardcoded fallback for JPY: {exchange_rate}")
-                elif bc == 'CNH':
-                    exchange_rate = 7.3
-                    print(f"[IB Warning] Using hardcoded fallback for CNH: {exchange_rate}")
-                else:
-                    pass
-
-            if exchange_rate > 0:
-                if inverse_pair:
-                    usd_value = base_cash * exchange_rate
-                else:
-                    usd_value = base_cash / exchange_rate
-                return usd_value
-            else:
-                print(f"[IB Error] Failed to fetch valid rate for {pair_symbol}. Ticker: {ticker}")
-                return 0.0
-
-        except Exception as e:
-            print(f"[IB Error] FX Conversion failed: {e}")
-            return 0.0
+        return 0.0
 
     def _extract_rate_from_ticker(self, ticker):
         """辅助方法：从 ticker 中提取有效汇率，含 Close/Last 兜底"""
@@ -533,13 +514,24 @@ class IBBrokerAdapter(BaseLiveBroker):
             try:
                 # --- A. 连接阶段 ---
                 if not ib.isConnected():
-                    print(f"[System] Connecting to IB Gateway ({host}:{port})...")
+                    print(f"[System] Connecting to IB Gateway ({host}:{port}) with clientId={client_id}...")
                     try:
                         ib.connect(host, port, clientId=client_id)
                         print("[System] ✅ Connected successfully.")
                     except Exception as e:
-                        # 捕获所有连接时的异常 (如 ConnectionRefusedError)
-                        print(f"[System] ⏳ Connection failed: {e}. Retrying in 10s...")
+                        # 🔴 关键修复：使用 repr(e) 捕获空字面量异常
+                        err_msg = repr(e)
+                        print(f"[System] ⏳ Connection failed: {err_msg}")
+
+                        # 幽灵占用与超时自愈逻辑
+                        if "already in use" in err_msg or "326" in err_msg or "Timeout" in err_msg:
+                            client_id += 1
+                            print(f"[System] 🔄 发现幽灵占用或握手超时，自动将 clientId 切换为 {client_id} 并重试...")
+                            time.sleep(2)  # 冲突时重试快一点
+                            continue
+
+                        # 其他真网络错误保持较长的冷却
+                        print("[System] ⏳ Retrying in 10s...")
                         time.sleep(10)
                         continue
 

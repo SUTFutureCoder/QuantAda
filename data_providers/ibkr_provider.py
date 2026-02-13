@@ -50,12 +50,30 @@ class IbkrDataProvider(BaseDataProvider):
             return False
 
         if not self.ib.isConnected():
-            try:
-                # print(f"[IBKR] Connecting to {self.host}:{self.port}...")
-                self.ib.connect(self.host, self.port, clientId=self.client_id)
-            except Exception as e:
-                print(f"[IBKR] Connection failed: {e}")
-                return False
+            import time
+            max_retries = 10
+            for attempt in range(max_retries):
+                try:
+                    self.ib.connect(self.host, self.port, clientId=self.client_id)
+                    return True
+                except Exception as e:
+                    # 使用 repr 捕获 TimeoutError 字面量
+                    err_msg = repr(e)
+
+                    # 只要是超时（TWS拒载抛出的默认异常）或明确的报错，全部执行换号重试
+                    if "Timeout" in err_msg or "already in use" in err_msg or "326" in err_msg:
+                        self.client_id += 1
+                        print(f"[IBKR] 🔄 遇到幽灵占用或握手超时，自动将 clientId 切换为 {self.client_id} 并重试...")
+                        time.sleep(1)
+                        continue
+
+                    # 如果是 ConnectionRefusedError 等真正的硬核网络错误，直接打印并失败
+                    print(f"[IBKR] 真网络硬错误: {err_msg}")
+                    return False
+
+            print("[IBKR] ❌ 重试次数耗尽，无法连接到 TWS/Gateway。")
+            return False
+
         return True
 
     def _parse_contract(self, symbol: str):
