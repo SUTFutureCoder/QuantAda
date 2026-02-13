@@ -185,17 +185,7 @@ class LiveTrader:
 
             # 2. 执行风控检查
             if self.risk_control and self._check_risk_controls():
-                # 风控已触发平仓
-                print("[Engine] Risk control triggered an exit. Skipping strategy.next().")
-                # 检查风控是否设置了 self.strategy.order
-                risk_order = getattr(self.strategy, 'order', None)
-                if risk_order:
-                    print("[Engine] Notifying about risk-triggered order...")
-                    if self.risk_control:
-                        self.risk_control.notify_order(risk_order)
-                    self.strategy.notify_order(risk_order)
-                print("--- LiveTrader Run Finished (Risk Triggered) ---")
-                return
+                print("[Engine] 🛡️ 发现风控动作。底层已自动物理上锁，策略流水线继续向下执行...")
 
             # 3. 执行策略的 'next'
             self.strategy.next()
@@ -330,6 +320,10 @@ class LiveTrader:
                     self.broker.log(f"[Risk] Position is closed for {data_name}. Clearing pending risk status.")
                     del self._pending_risk_orders[data_name]
 
+                # 仓位已清零，风控解除，解锁该标的，允许策略重新考察它
+                if hasattr(self.broker, 'unlock_for_risk'):
+                    self.broker.unlock_for_risk(data_name)
+
                 # 同步清理 risk_control 内部可能存在的标记 (兼容旧有的 exit_triggered 逻辑)
                 if hasattr(self.risk_control, 'exit_triggered') and isinstance(self.risk_control.exit_triggered, set):
                     if data_name in self.risk_control.exit_triggered:
@@ -407,16 +401,16 @@ class LiveTrader:
                 if action == 'SELL':
                     self.broker.log(f"Risk module triggered SELL for {data_feed._name}")
 
+                    # 底层物理上锁，瞬间切断策略层买入该标的的可能
+                    if hasattr(self.broker, 'lock_for_risk'):
+                        self.broker.lock_for_risk(data_name)
+
                     # 执行平仓
                     order = self.broker.order_target_percent(data=data_feed, target=0.0)
 
                     if order:
                         # 记录订单对象，而不是依赖价格
                         self._pending_risk_orders[data_name] = order
-
-                        # 同步给策略（可选，保持兼容性）
-                        if hasattr(self.strategy, 'order'):
-                            self.strategy.order = order
 
                         triggered_action = True
 

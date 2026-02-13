@@ -85,6 +85,8 @@ class BaseLiveBroker(ABC):
         self._active_buys = {}
         # 虚拟账本读写锁
         self._ledger_lock = threading.RLock()
+        # 风控锁定黑名单
+        self._risk_locked_symbols = set()
 
     @property
     def safety_multiplier(self):
@@ -208,6 +210,11 @@ class BaseLiveBroker(ABC):
         expected_shares = target / price
         pos_obj = self.get_position(data)
         delta_shares = expected_shares - pos_obj.size
+
+        # 风控拦截
+        if data._name in self._risk_locked_symbols and delta_shares > 0:
+            print(f"[Broker Risk Block] 🚫 风控拦截: {data._name} 触发风控，买单已被底层静默吃掉。")
+            return None
 
         # 3. 决策分发
         if delta_shares > 0:
@@ -469,6 +476,14 @@ class BaseLiveBroker(ABC):
 
     def set_datas(self, datas):
         self.datas = datas
+
+    def lock_for_risk(self, symbol: str):
+        """风控专用：锁定标的，禁止买入"""
+        self._risk_locked_symbols.add(symbol)
+
+    def unlock_for_risk(self, symbol: str):
+        """风控专用：解除标的锁定"""
+        self._risk_locked_symbols.discard(symbol)
 
     def set_datetime(self, dt):
         """设置当前时间，并进行跨周期检查"""
