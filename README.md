@@ -18,15 +18,16 @@
 
 ## 核心特性
 
+- **全场景运行模式 (Flexible Execution Modes)**
+  - **全球市场与多币种支持**：已打通 IBKR（盈透证券），支持 A股（100股一手）与美股/外汇（1股取整）的无缝切换，内置跨币种（如 HKD/USD）动态保证金与购买力自动折算。
+  - **工业级失效安全**：独创“不死鸟”事件引擎。具备僵尸 ID 自动顺延重连、资金不足自动降级发单（Downgrade）、底层订单取整截断保护，以及防双花（Double Spend）宽限期锁，极致防爆仓。
+  - **分布式远程调用**：支持通过 `Launcher` 主动发起远程连接，实现**计算（Linux）与交易（Windows）分离**的实盘部署。
+
+
 - **策略与引擎解耦 (Adapter Pattern)**
   - **一次编写，多处运行**：基于适配器模式，纯粹的策略逻辑可无缝运行于 `Backtester` 本地回测或实盘环境。
   - **自动持久化**：支持交易流水与资金快照自动写入 MySQL/SQLite 或投递至消息队列，实现数据沉淀。
-
-
-- **全场景运行模式 (Flexible Execution Modes)**
-  - **本地框架回测**：脱离外部依赖，直接使用本地数据 (`CSV`/`DB`) 进行高效策略验证。
-  - **嵌入式运行**：适配券商 SDK（如掘金量化），支持策略代码直接在券商终端内运行。
-  - **分布式远程调用**：支持通过 `Launcher` 主动发起远程连接，实现**计算（Linux）与交易（Windows）分离**的实盘部署。
+  - **本地框架回测**：脱离外部依赖，直接使用本地数据 (`CSV`/`DB`) 进行离线高效策略验证。
 
 
 - **模块化与工程分离 (SDK Mode)**
@@ -340,6 +341,8 @@ QuantAda/
 
 ### 券商平台执行实盘
 ![live_mode_in_broker](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/live_mode_in_broker.png?raw=true)
+
+![live_mode_in_broker_ibkr](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/live_mode_in_broker_ibkr.png?raw=true)
 
 ### 框架和自定义策略工程分离
 ![public_private_split](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/public_private_split.png?raw=true)  
