@@ -1,12 +1,13 @@
-import time
-import hmac
-import hashlib
 import base64
+import hashlib
+import hmac
+import time
 import urllib.parse
+
 import requests
-import json
-from .base_alarm import BaseAlarm
+
 import config
+from .base_alarm import BaseAlarm
 
 
 class DingTalkAlarm(BaseAlarm):

@@ -1,11 +1,12 @@
 import atexit
 import signal
+import socket
 import sys
 import threading
-import socket
+
+import config
 from .dingtalk_alarm import DingTalkAlarm
 from .wecom_alarm import WeComAlarm
-import config
 
 
 class AlarmManager:

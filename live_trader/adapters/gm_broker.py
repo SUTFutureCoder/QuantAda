@@ -1,14 +1,12 @@
 import datetime
-import os
 
 import pandas as pd
 
+import config
 from alarms.manager import AlarmManager
 from data_providers.gm_provider import GmDataProvider as UnifiedGmDataProvider
-from .base_broker import BaseLiveBroker, BaseOrderProxy
-
-import config
 from live_trader.engine import LiveTrader, on_order_status_callback
+from .base_broker import BaseLiveBroker, BaseOrderProxy
 
 try:
     from gm.api import order_target_percent, order_target_value, order_volume, current, get_cash, subscribe, OrderType_Market, OrderType_Limit, MODE_LIVE, MODE_BACKTEST, \
@@ -111,8 +109,8 @@ class GmDataProvider(UnifiedGmDataProvider):
 class GmBrokerAdapter(BaseLiveBroker):
     """掘金平台的交易执行器实现"""
 
-    def __init__(self, context, cash_override=None, commission_override=None):
-        super().__init__(context, cash_override, commission_override)
+    def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
+        super().__init__(context, cash_override, commission_override, slippage_override)
         self.is_live = self.is_live_mode(context)  # 保存当前是否为实盘
 
     def getcash(self):
@@ -177,7 +175,7 @@ class GmBrokerAdapter(BaseLiveBroker):
         return Pos()
 
     # 3. 查价
-    def _get_current_price(self, data):
+    def get_current_price(self, data):
         ticks = current(symbols=data._name)
         return ticks[0]['price'] if ticks else 0.0
 
@@ -194,7 +192,7 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         if self.is_live:
             # --- 实盘逻辑 (Limit) ---
-            slippage = getattr(config, 'LIVE_LIMIT_ORDER_SLIPPAGE', 0.02)
+            slippage = self._slippage_override if self._slippage_override is not None else 0.01
             if side == 'BUY':
                 actual_price = price * (1 + slippage)
                 actual_price = float(round(actual_price, 4))  # 保留精度
@@ -220,14 +218,19 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         # 2. 资金预检查与自动降级 (仅买入)
         if side == 'BUY':
-            available_cash = self._fetch_real_cash()
-            # 预估成本
-            estimated_cost = volume * freeze_price * 1.0005
+            # 必须扣除虚拟账本，双重保险
+            available_cash = self._fetch_real_cash() - getattr(self, '_virtual_spent_cash', 0.0)
+            if available_cash < 0:
+                available_cash = 0.0
+
+            # 使用基类的动态安全垫计算
+            buffer_rate = self.safety_multiplier
+            estimated_cost = volume * freeze_price * buffer_rate
 
             if estimated_cost > available_cash:
                 old_volume = volume
                 # 倒推最大股数
-                volume = int(available_cash / (freeze_price * 1.0005) // 100) * 100
+                volume = int(available_cash / (freeze_price * buffer_rate) // 100) * 100
 
                 if volume < 100:
                     # 只有真的买不起了才打印 (避免刷屏)
@@ -280,7 +283,6 @@ class GmBrokerAdapter(BaseLiveBroker):
         """
         import time
         import traceback
-        import sys
 
         print(f"\n>>> Launching {cls.__name__} (Phoenix Mode) <<<")
 
@@ -314,9 +316,9 @@ class GmBrokerAdapter(BaseLiveBroker):
             print(f"  Mode: LIVE")
 
         # 资金与费率
-        initial_cash = float(kwargs.get('cash', 100000))
-        commission = float(kwargs.get('commission', 0.0003))
-        slippage = float(kwargs.get('slippage', 0.0001))
+        initial_cash = float(kwargs.get('cash')) if kwargs.get('cash') is not None else 100000.0
+        commission = float(kwargs.get('commission')) if kwargs.get('commission') is not None else 0.0003
+        slippage = float(kwargs.get('slippage')) if kwargs.get('slippage') is not None else 0.0001
 
         # 提取选股器和标的
         selection_name = kwargs.get('selection')
@@ -341,6 +343,11 @@ class GmBrokerAdapter(BaseLiveBroker):
                 engine_config['strategy_name'] = strategy_path
                 engine_config['params'] = params
                 engine_config['platform'] = 'gm'
+
+                # 将资金和费率头传到 LiveTrader 引擎
+                if kwargs.get('cash') is not None: engine_config['cash'] = initial_cash
+                if kwargs.get('commission') is not None: engine_config['commission'] = commission
+                if kwargs.get('slippage') is not None: engine_config['slippage'] = slippage
 
                 # 注入选股器或标的
                 if selection_name:

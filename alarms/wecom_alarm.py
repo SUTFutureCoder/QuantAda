@@ -1,8 +1,9 @@
-import requests
-import json
 import time
-from .base_alarm import BaseAlarm
+
+import requests
+
 import config
+from .base_alarm import BaseAlarm
 
 
 class WeComAlarm(BaseAlarm):

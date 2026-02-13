@@ -1,7 +1,9 @@
+import threading
 from abc import ABC, abstractmethod
-from common import log
 
 import pandas as pd
+
+from common import log
 
 
 class BaseOrderProxy(ABC):
@@ -65,17 +67,42 @@ class BaseLiveDataProvider(ABC):
 class BaseLiveBroker(ABC):
     """交易执行器适配器的抽象基类，模拟 backtrader 的 broker 接口"""
 
-    def __init__(self, context, cash_override=None, commission_override=None):
+    def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None,):
         self.is_live = True
         self._context = context
         self.datas = []
         self._datetime = None
         self._cash_override = cash_override
         self._commission_override = commission_override
+        self._slippage_override = slippage_override
         # 内部状态机
         self._cash = self._init_cash()
         self._deferred_orders = []
         self._pending_sells = set()
+        # 虚拟账本，类似backtester能快速回笼资金
+        self._virtual_spent_cash = 0.0
+        # 活跃买单追踪器，用于被拒单时的降级重试
+        self._active_buys = {}
+        # 虚拟账本读写锁
+        self._ledger_lock = threading.RLock()
+
+    @property
+    def safety_multiplier(self):
+        """
+        动态计算买入资金安全垫：
+        1.0 + 委托滑点 + 手续费率 + 绝对防线(0.2%，抵御A股不足5元收5元等边缘情况)
+        """
+        comm = self._commission_override if self._commission_override is not None else 0.0003
+        slip = self._slippage_override if self._slippage_override is not None else 0.001
+        return 1.0 + slip + comm + 0.002
+
+    def log(self, txt, dt=None):
+        """
+        兼容 Backtrader 的日志接口。
+        供策略层调用 (self.broker.log)。
+        在实盘模式下，如果没有传入时间，log.info 会自动使用当前系统时间。
+        """
+        log.info(txt, dt=dt)
 
     # =========================================================
     #  用户只需实现下述原子接口 (The Minimum Set)
@@ -99,7 +126,7 @@ class BaseLiveBroker(ABC):
         pass
 
     @abstractmethod
-    def _get_current_price(self, data) -> float:
+    def get_current_price(self, data) -> float:
         """子类必须实现，用于获取指定标的实时价格"""
         pass
 
@@ -149,7 +176,7 @@ class BaseLiveBroker(ABC):
 
     def order_target_percent(self, data, target, **kwargs):
         # 1. 原子操作：查价
-        price = self._get_current_price(data)
+        price = self.get_current_price(data)
         if not price or price <= 0: return None
 
         # 2. 通用逻辑：算净值 (支持子类覆盖优化)
@@ -174,7 +201,7 @@ class BaseLiveBroker(ABC):
         target: 目标持仓金额 (例如 1000 USD)
         """
         # 1. 原子操作：查价
-        price = self._get_current_price(data)
+        price = self.get_current_price(data)
         if not price or price <= 0: return None
 
         # 2. 核心算法：直接用目标金额除以价格
@@ -198,7 +225,10 @@ class BaseLiveBroker(ABC):
         """智能买入 (Percent模式)：资金检查 + 延迟重试 + 自动降级"""
         lot_size = kwargs.get('lot_size', 100)
         cash = self.get_cash()
-        estimated_cost = shares * price * 1.01  # 1% 缓冲
+
+        # 动态安全垫
+        buffer_rate = self.safety_multiplier
+        estimated_cost = shares * price * buffer_rate
 
         if cash < estimated_cost:
             if self._has_pending_sells():
@@ -209,18 +239,28 @@ class BaseLiveBroker(ABC):
                 return _DeferredOrderProxy(data)
             else:
                 # 没钱了 -> 降级购买
-                max_shares = cash / (price * 1.01)
+                max_shares = cash / (price * buffer_rate)
                 shares = min(shares, max_shares)
                 if shares < 1:
                     print(f"[Broker Warning] Buy {data._name} skipped. Cash ({cash:.2f}) insufficient.")
 
-        return self._finalize_and_submit(data, shares, price, lot_size)
+        # 将提交和记账包裹在同一把锁内，拒绝间隙抢占
+        with self._ledger_lock:
+            proxy = self._finalize_and_submit(data, shares, price, lot_size)
+            # 记账到虚拟账本
+            if proxy:
+                with self._ledger_lock:
+                    self._virtual_spent_cash += (shares * price * buffer_rate)
+        return proxy
 
     def _smart_buy_value(self, data, shares, price, target_value, **kwargs):
         """智能买入 (Value模式)：资金检查 + 延迟重试 + 自动降级"""
         lot_size = kwargs.get('lot_size', 100)
         cash = self.get_cash()
-        estimated_cost = shares * price * 1.01
+
+        # 动态安全垫
+        buffer_rate = self.safety_multiplier
+        estimated_cost = shares * price * buffer_rate
 
         if cash < estimated_cost:
             if self._has_pending_sells():
@@ -231,14 +271,20 @@ class BaseLiveBroker(ABC):
                 return _DeferredOrderProxy(data)
             else:
                 # 没钱了 -> 降级购买
-                max_shares = cash / (price * 1.01)
+                max_shares = cash / (price * buffer_rate)
                 shares = min(shares, max_shares)
                 if shares < 1:
                     print(f"[Broker Warning] Buy {data._name} skipped. Cash ({cash:.2f}) insufficient.")
 
-        return self._finalize_and_submit(data, shares, price, lot_size)
+        # 将提交和记账包裹在同一把锁内，拒绝间隙抢占
+        with self._ledger_lock:
+            proxy = self._finalize_and_submit(data, shares, price, lot_size)
+            if proxy:
+                with self._ledger_lock:
+                    self._virtual_spent_cash += (shares * price * buffer_rate)
+        return proxy
 
-    def _finalize_and_submit(self, data, shares, price, lot_size):
+    def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):
         """通用的下单收尾逻辑：取整 + 提交"""
         if lot_size > 1:
             shares = int(shares // lot_size) * lot_size
@@ -246,9 +292,22 @@ class BaseLiveBroker(ABC):
             shares = int(shares)
 
         if shares > 0:
-            log.signal('BUY', data._name, shares, price, tag="实盘信号")
+            # 根据是否为重试改变日志标签
+            tag = "实盘降级重试" if retries > 0 else "实盘信号"
+            log.signal('BUY', data._name, shares, price, tag=tag)
 
-            return self._submit_order(data, shares, 'BUY', price)
+            with self._ledger_lock:
+                proxy = self._submit_order(data, shares, 'BUY', price)
+                if proxy:
+                    # 注册到活跃买单库，记录当前的参数和重试次数
+                    self._active_buys[proxy.id] = {
+                        'data': data,
+                        'shares': shares,
+                        'price': price,
+                        'lot_size': lot_size,
+                        'retries': retries
+                    }
+            return proxy
         return None
 
     def _smart_sell(self, data, shares, price, **kwargs):
@@ -262,47 +321,82 @@ class BaseLiveBroker(ABC):
         if shares > 0:
             log.signal('SELL', data._name, shares, price, tag="实盘信号")
 
-            proxy = self._submit_order(data, shares, 'SELL', price)
-            if proxy: self._pending_sells.add(proxy.id)  # 自动监控
+            with self._ledger_lock:
+                proxy = self._submit_order(data, shares, 'SELL', price)
+                if proxy:
+                    self._pending_sells.add(proxy.id)  # 自动监控
             return proxy
         return None
 
     def on_order_status(self, proxy: BaseOrderProxy):
-        """由 Engine 回调，自动维护在途单状态"""
-        if not proxy.is_sell(): return
-
+        """由 Engine 回调，自动维护在途单状态与降级重试"""
         oid = proxy.id
 
-        # 1. 正常完成
-        if proxy.is_completed():
-            self._pending_sells.discard(oid)
+        # 整个回调必须排队，防止抢占主线程刚发出的订单
+        with self._ledger_lock:
+            # ==========================================
+            # 1. 买单异步降级逻辑 (Buy Order Downgrade)
+            # ==========================================
+            if proxy.is_buy():
+                if proxy.is_completed() or proxy.is_canceled():
+                    self._active_buys.pop(oid, None)
 
-        # 2. 卖单失败 (撤单/拒单) -> 触发自动解除死锁
-        elif proxy.is_canceled() or proxy.is_rejected():
-            self._pending_sells.discard(oid)
+                elif proxy.is_rejected():
+                    with self._ledger_lock:
+                        buy_info = self._active_buys.pop(oid, None)
+                        if buy_info:
+                            retries = buy_info['retries']
+                            max_retries = 3  # 默认允许尝试降级 3 次
 
-            # 自动解除死锁 (Auto-Resolve Deadlock)
-            # 之前我们在这里抛出 RuntimeError 终止程序以暴露问题。
-            # 现在我们将其改为“优雅降级”：
-            # 既然卖单挂了（钱回不来了），那么依赖这笔钱的延迟买单也必须作废。
-            if self._deferred_orders:
-                print(f"[Broker] WARNING: Sell order {oid} failed (Status: {getattr(proxy, 'status', 'Unknown')}). "
-                      f"Cancelling {len(self._deferred_orders)} deferred buy orders due to funding failure.")
+                            # A. 退回上一笔订单预扣的虚拟资金 (使用动态滑点)
+                            refund_amount = buy_info['shares'] * buy_info['price'] * self.safety_multiplier
+                            self._virtual_spent_cash = max(0.0, getattr(self, '_virtual_spent_cash', 0.0) - refund_amount)
 
-                # 直接清空延迟队列，防止它们变成第二天的幽灵单
-                self._deferred_orders.clear()
+                            # B. 检查是否还有重试机会
+                            if retries < max_retries:
+                                lot_size = buy_info['lot_size']
+                                data = buy_info['data']
+                                price = buy_info['price']
 
-                # 不抛出异常，允许程序继续运行（活着才有机会！）
-                # raise RuntimeError(
-                #     f"CRITICAL: Sell order {oid} failed (Status: {proxy.status}), "
-                #     f"and no other sells are pending. "
-                #     f"{len(self._deferred_orders)} deferred buy orders are stranded! "
-                #     f"Execution terminated to prevent ghost orders."
-                # )
+                                # 降级递减
+                                new_shares = buy_info['shares'] - lot_size
 
-        # 3. 挂单中
-        elif proxy.is_pending():
-            self._pending_sells.add(oid)
+                                print(f"⚠️ [Broker] 买单 {oid} 被拒绝。触发自动降级 {retries + 1}/{max_retries}...")
+                                print(f"   => {data._name} 尝试数量: {buy_info['shares']} -> {new_shares}")
+
+                                if new_shares > 0:
+                                    # 再次预扣降级后的虚拟资金
+                                    deduct_amount = new_shares * price * self.safety_multiplier
+                                    self._virtual_spent_cash += deduct_amount
+
+                                    # 带着新的 retries 计数再次发单，获取返回值
+                                    new_proxy = self._finalize_and_submit(data, new_shares, price, lot_size,
+                                                                          retries + 1)
+
+                                    # 如果同步发单失败(比如断网)，必须把预扣的钱退回来
+                                    if not new_proxy:
+                                        self._virtual_spent_cash = max(0.0, getattr(self, '_virtual_spent_cash',
+                                                                                    0.0) - deduct_amount)
+                                        print(f"❌ [Broker] 降级发单同步失败，资金已回退。")
+                                else:
+                                    print(f"❌ [Broker] 降级终止: {data._name} 数量已降至 0。")
+                return
+
+            # ==========================================
+            # 2. 卖单在途维护逻辑 (Sell Order Pending)
+            # ==========================================
+            if not proxy.is_sell(): return
+
+            if proxy.is_completed():
+                self._pending_sells.discard(oid)
+            elif proxy.is_canceled() or proxy.is_rejected():
+                self._pending_sells.discard(oid)
+                if self._deferred_orders:
+                    print(
+                        f"[Broker] WARNING: Sell order {oid} failed. Cancelling {len(self._deferred_orders)} deferred buy orders.")
+                    self._deferred_orders.clear()
+            elif proxy.is_pending():
+                self._pending_sells.add(oid)
 
     def process_deferred_orders(self):
         """资金回笼触发重试"""
@@ -326,9 +420,12 @@ class BaseLiveBroker(ABC):
 
     def get_cash(self):
         """公有接口：获取资金"""
-        real_cash = self._fetch_real_cash()
-        # 虚拟分仓逻辑: min(实盘资金, 设定的虚拟资金)
-        # 如果 self._cash_override 是 None，说明用户想全仓，则返回 real_cash
+        # 扣除本地已经花掉的钱，防止穿透
+        with self._ledger_lock:
+            real_cash = self._fetch_real_cash() - getattr(self, '_virtual_spent_cash', 0.0)
+            if real_cash < 0:
+                real_cash = 0.0
+
         if self._cash_override is not None:
             return min(real_cash, self._cash_override)
         return real_cash
@@ -345,7 +442,7 @@ class BaseLiveBroker(ABC):
         for d in self.datas:
             pos = self.get_position(d)
             if pos.size:
-                p = self._get_current_price(d)
+                p = self.get_current_price(d)
                 val += pos.size * p
         return val
 
@@ -377,6 +474,8 @@ class BaseLiveBroker(ABC):
         """设置当前时间，并进行跨周期检查"""
         # 检查时间是否推进 (进入了新的 Bar/Day，跨周期)
         if self._datetime and dt > self._datetime:
+            # 跨周期时清空虚拟账本
+            self._virtual_spent_cash = 0.0
 
             # 不要因为 tick/bar 的更新就清理订单（会误杀 HFT 买单）。
             # 只有在以下两种情况才清理：
@@ -429,6 +528,9 @@ class BaseLiveBroker(ABC):
             self._pending_sells.clear()
             print(f"  >>> Auto-cleared {count} pending sell monitors (Reset).")
 
+        # 3. 清理买单跟踪器
+        if hasattr(self, '_active_buys'):
+            self._active_buys.clear()
         print("  >>> Broker state reset completed.")
 
     def force_reset_state(self):

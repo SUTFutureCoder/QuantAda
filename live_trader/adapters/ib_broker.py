@@ -1,12 +1,11 @@
-import pandas as pd
-import datetime
-import config
 import asyncio
-from ib_insync import IB, Stock, MarketOrder, LimitOrder, OrderStatus, Trade, Forex, Contract
+import datetime
 
-from .base_broker import BaseLiveBroker, BaseOrderProxy
+import pandas as pd
+from ib_insync import IB, Stock, MarketOrder, Trade, Forex, Contract
+
 from data_providers.ibkr_provider import IbkrDataProvider
-from alarms.manager import AlarmManager
+from .base_broker import BaseLiveBroker, BaseOrderProxy
 
 
 class IBOrderProxy(BaseOrderProxy):
@@ -88,23 +87,37 @@ class IBDataProvider(IbkrDataProvider):
 class IBBrokerAdapter(BaseLiveBroker):
     """Interactive Brokers 适配器"""
 
-    def __init__(self, context, cash_override=None, commission_override=None):
+    def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
         # 从 context 中获取由 launch 注入的 ib 实例
         self.ib: IB = getattr(context, 'ib_instance', None)
         self._tickers = {}  # 缓存实时行情 snapshot
         self._fx_tickers = {}  # 缓存汇率行情
-        super().__init__(context, cash_override, commission_override)
+        super().__init__(context, cash_override, commission_override, slippage_override)
+
+    def _fetch_real_cash(self) -> float:
+        """
+        [必须实现] 基类要求的底层查钱接口
+        用于初始化(_init_cash)和资金同步(sync_balance)
+        """
+        # 优先获取 TotalCashValue (现金账户) 或 AvailableFunds (保证金账户可用资金)
+        return self._fetch_smart_value(['TotalCashValue', 'AvailableFunds'])
 
     def getcash(self):
-        """兼容 Backtrader 标准接口: getcash -> get_cash"""
-        return self.get_cash()
+        """兼容 Backtrader 标准接口: 获取可用资金 (Buying Power)"""
+        # 明确获取可用资金 (优先 TotalCashValue，其次 AvailableFunds)，而非总资产
+        # 如果是现金账户，必须用 TotalCashValue；如果是保证金账户，AvailableFunds 包含融资额度
+        return self._fetch_smart_value(['TotalCashValue', 'AvailableFunds'])
+
+    def get_cash(self):
+        """ 覆盖 BaseLiveBroker 的 get_cash，确保策略层调用的也是正确的购买力"""
+        return self.getcash()
 
     def getvalue(self):
         """
-        兼容 Backtrader 标准接口: 获取账户总权益
-        注意：IB Adapter 的 _fetch_real_cash 实现取的就是 NetLiquidation
+        兼容 Backtrader 标准接口: 获取账户总权益 (NetLiquidation)
         """
-        return self._fetch_real_cash()
+        # 明确获取净清算价值
+        return self._fetch_smart_value(['NetLiquidation'])
 
     @staticmethod
     def is_live_mode(context) -> bool:
@@ -163,14 +176,11 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 这是你要求的：仅当没有交易所信息时，才使用默认 SMART
         return Stock(symbol, 'SMART', 'USD')
 
-    # 1. 查钱
-    def _fetch_real_cash(self) -> float:
+    # 1. 查钱 (重构为通用方法，支持指定 Tag)
+    def _fetch_smart_value(self, target_tags=None) -> float:
         """
-        获取账户净资产(NetLiquidation)并强制转换为 USD。
-        逻辑升级：
-        1. 优先获取 NetLiquidation (无论基准货币是 USD/HKD/JPY)。
-        2. 如果不是 USD，则自动查询汇率进行折算。
-        3. 增加 FX Ticker 缓存，解决在 EventLoop 回调中无法获取实时汇率的问题。
+        获取账户特定价值（如现金或净值），支持自动汇率转换。
+        :param target_tags: 优先级 Tag 列表，例如 ['TotalCashValue']
         """
         if not hasattr(self, 'ib') or not self.ib: return 0.0
 
@@ -184,11 +194,11 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         base_cash = 0.0
         base_currency = None
-        found_tag = None
 
-        tags_priority = ['NetLiquidation', 'TotalCashValue', 'AvailableFunds']
+        # 使用传入的 tags，若未传入则使用默认优先级 (兼容旧代码兜底)
+        tags_priority = target_tags if target_tags else ['NetLiquidation', 'TotalCashValue', 'AvailableFunds']
 
-        # --- Method A: 通过 accountSummary 获取 NetLiquidation ---
+        # --- Method A: 通过 accountSummary 获取 ---
         if not in_loop:
             try:
                 summary = self.ib.accountSummary()
@@ -196,7 +206,7 @@ class IBBrokerAdapter(BaseLiveBroker):
                     self.ib.sleep(0.5)
                     summary = self.ib.accountSummary()
 
-                # 1. 优先找 NetLiquidation (这是真正的 NAV)
+                # 1. 优先找 tags_priority 中的项目
                 for tag in tags_priority:
                     # 先找 USD
                     items_usd = [v for v in summary if v.tag == tag and v.currency == 'USD']
@@ -208,10 +218,10 @@ class IBBrokerAdapter(BaseLiveBroker):
                     if items_any:
                         item = items_any[0]
                         val = float(item.value)
-                        if tag == 'NetLiquidation' or val > 0:
+                        # 只要数值有效或明确查询净值，即视为找到
+                        if val > 0 or tag == 'NetLiquidation':
                             base_cash = val
                             base_currency = item.currency
-                            found_tag = tag
                             break
             except Exception:
                 pass
@@ -228,20 +238,18 @@ class IBBrokerAdapter(BaseLiveBroker):
                 for item in items:
                     try:
                         val = float(item.value)
-                        if tag == 'NetLiquidation' or val > 0:
+                        if val > 0 or tag == 'NetLiquidation':
                             base_cash = val
                             base_currency = item.currency
-                            found_tag = tag
                             break
                     except:
                         continue
                 if base_currency: break
 
         if not base_currency:
-            print("[IB Error] No NetLiquidation or positive cash found in ANY currency.")
+            # 只有在真的找不到任何正资产时才报错，避免刷屏
+            # print(f"[IB Error] No positive value found for {tags_priority} in ANY currency.")
             return 0.0
-
-        # print(f"[IB Debug] Found {base_cash} {base_currency} ({found_tag}). Fetching exchange rate...")
 
         # --- Method C: 实时查询汇率并转换 (FX Conversion) ---
         try:
@@ -256,20 +264,14 @@ class IBBrokerAdapter(BaseLiveBroker):
                 inverse_pair = True
 
             # 使用缓存的 Ticker，避免重复创建和订阅
-            # 在 Loop 中重复 reqMktData 而不 yield 会导致数据永远无法返回
             ticker = self._fx_tickers.get(pair_symbol)
 
             if not ticker:
                 contract = Forex(pair_symbol)
-                # 只有不在 Loop 中时才 qualify，否则可能会阻塞或报错
                 if not in_loop:
                     self.ib.qualifyContracts(contract)
-
-                # 建立订阅并缓存
                 ticker = self.ib.reqMktData(contract, '', False, False)
                 self._fx_tickers[pair_symbol] = ticker
-
-                # 首次订阅，稍微等待数据 (如果在 Loop 中则无法等待，只能依赖下一次调用或 Fallback)
                 if not in_loop:
                     start_wait = datetime.datetime.now()
                     while (datetime.datetime.now() - start_wait).total_seconds() < 2.0:
@@ -280,8 +282,6 @@ class IBBrokerAdapter(BaseLiveBroker):
             exchange_rate = self._extract_rate_from_ticker(ticker)
 
             # --- 针对 HKD/JPY/CNH 的强锚定硬兜底 ---
-            # 使用 not (rate > 0) 这种判断方式，可以同时捕获 0、负数 以及 NaN
-            # 因为 NaN <= 0 是 False，会导致代码跳过兜底逻辑
             if not (exchange_rate > 0):
                 bc = base_currency.strip().upper()
                 if bc == 'HKD':
@@ -301,8 +301,6 @@ class IBBrokerAdapter(BaseLiveBroker):
                     usd_value = base_cash * exchange_rate
                 else:
                     usd_value = base_cash / exchange_rate
-
-                # print(f"[IB FX] {pair_symbol}: {exchange_rate:.4f} | NAV: {base_cash} {base_currency} -> {usd_value:.2f} USD")
                 return usd_value
             else:
                 print(f"[IB Error] Failed to fetch valid rate for {pair_symbol}. Ticker: {ticker}")
@@ -349,7 +347,7 @@ class IBBrokerAdapter(BaseLiveBroker):
         return Pos()
 
     # 3. 查价
-    def _get_current_price(self, data):
+    def get_current_price(self, data):
         """
         获取标的当前价格。
         增强版：支持周末/休市期间使用 Close/Last 价格兜底，防止无法计算下单数量。

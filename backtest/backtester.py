@@ -1,4 +1,5 @@
 import datetime
+import math
 
 import backtrader as bt
 import pandas as pd
@@ -446,9 +447,9 @@ class Backtester:
         self.params = params
         self.start_date = start_date
         self.end_date = end_date
-        self.cash = cash
-        self.commission = commission
-        self.slippage = slippage
+        self.cash = float(cash) if cash is not None else 100000.0
+        self.commission = float(commission) if commission is not None else 0.0003
+        self.slippage = float(slippage) if slippage is not None else 0.001
         self.sizer_class = sizer_class
         self.sizer_params = sizer_params
         self.risk_control_classes = risk_control_classes
@@ -730,6 +731,11 @@ class Backtester:
         pnl_ratio = avg_win_pnl / abs(avg_loss_pnl) if avg_loss_pnl != 0 else float('inf')
 
         # --- 2. 打印性能报告 ---
+        def safe_fmt(val, fmt=".2f"):
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                return "N/A"
+            return f"{val:{fmt}}"
+
         print("\n" + "=" * 50)
         print("            Backtest Performance Metrics")
         print("=" * 50)
@@ -737,14 +743,14 @@ class Backtester:
         print(f" Initial Portfolio:    {self.cash:,.2f}")
         print(f" Final Portfolio:      {self.cerebro.broker.getvalue():,.2f}")
         print("-" * 50)
-        print(f" Total Return:         {total_return: .2%}")
-        print(f" Annualized Return:    {annual_return: .2%}")
-        print(f" Sharpe Ratio:         {sharpe_ratio: .2f}")
-        print(f" Max Drawdown:         {max_drawdown: .2%}")
-        print(f" Calmar Ratio:         {calmar_ratio: .2f}")
+        print(f" Total Return:         {safe_fmt(total_return, '.2%')}")
+        print(f" Annualized Return:    {safe_fmt(annual_return, '.2%')}")
+        print(f" Sharpe Ratio:         {safe_fmt(sharpe_ratio, '.2f')}")
+        print(f" Max Drawdown:         {safe_fmt(max_drawdown, '.2%')}")
+        print(f" Calmar Ratio:         {safe_fmt(calmar_ratio, '.2f')}")
         print("-" * 50)
         print(f" Total Trades:         {total_trades}")
-        print(f" Win Rate:             {win_rate: .2f}%")
-        print(f" Profit Factor:        {profit_factor: .2f}")
-        print(f" Avg. Win / Avg. Loss: {pnl_ratio: .2f}")
+        print(f" Win Rate:             {safe_fmt(win_rate, '.2f')}%")
+        print(f" Profit Factor:        {safe_fmt(profit_factor, '.2f')}")
+        print(f" Avg. Win / Avg. Loss: {safe_fmt(pnl_ratio, '.2f')}")
         print("=" * 50 + "\n")

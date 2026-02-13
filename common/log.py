@@ -1,5 +1,7 @@
 import datetime
+
 import config
+
 
 def _fmt_dt(dt=None):
     """
@@ -53,12 +55,23 @@ def signal(action, symbol, size, price, tag="信号触发", dt=None):
     :param dt: (可选) 显式指定时间，回测时传入回测时间，实盘时传 None 自动取当前
     """
     if getattr(config, 'LOG', True):
+        # 增加防御性判断，确保 size 和 price 为数字
+        safe_size = size if size is not None else 0
+        safe_price = price if price is not None else 0.0
+
         emoji = "🚀" if action == 'BUY' else "🔻"
         act_cn = "买入" if action == 'BUY' else "卖出"
 
-        est_val = size * price
-        val_str = f"{est_val / 10000:.2f}万" if est_val > 10000 else f"{est_val:.2f}元"
+        # est_val 必须确保是数字计算结果
+        est_val = float(safe_size) * float(safe_price)
+
+        # 修正格式化逻辑
+        if est_val > 10000:
+            val_str = f"{est_val / 10000:.2f}万"
+        else:
+            val_str = f"{est_val:.2f}元"
 
         time_str = _fmt_dt(dt)
-
-        print(f"{emoji} [{tag}] {time_str} {act_cn} {symbol:<12} 数量: {int(size):<8} 价格: {price:.2f} (约 {val_str})")
+        # 使用 safe_size 和 safe_price 打印
+        print(
+            f"{emoji} [{tag}] {time_str} {act_cn} {symbol:<12} 数量: {int(safe_size):<8} 价格: {safe_price:.2f} (约 {val_str})")

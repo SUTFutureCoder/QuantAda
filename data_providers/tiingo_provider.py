@@ -1,5 +1,6 @@
 import pandas as pd
 from tiingo import TiingoClient
+
 import config
 from data_providers.base_provider import BaseDataProvider
 

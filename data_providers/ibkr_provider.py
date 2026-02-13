@@ -1,6 +1,7 @@
-import pandas as pd
-from datetime import datetime
 import math
+from datetime import datetime
+
+import pandas as pd
 
 try:
     from ib_insync import IB, Stock, Forex, Crypto, ContFuture, util

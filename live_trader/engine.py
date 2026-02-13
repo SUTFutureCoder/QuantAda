@@ -1,17 +1,18 @@
-import sys
 import importlib
 import inspect
-import traceback
+import sys
 import time
+import traceback
 from types import SimpleNamespace
 
 import pandas as pd
 
 import config
-from run import get_class_from_name
-from data_providers.base_provider import BaseDataProvider
 from alarms.manager import AlarmManager
+from data_providers.base_provider import BaseDataProvider
 from live_trader.adapters.base_broker import BaseLiveBroker
+from run import get_class_from_name
+
 
 class LiveTrader:
     """实盘交易引擎"""
@@ -109,7 +110,8 @@ class LiveTrader:
 
         # 后续流程使用 self.config
         self.broker = self.BrokerClass(context, cash_override=self.config.get('cash'),
-                                       commission_override=self.config.get('commission'))
+                                       commission_override=self.config.get('commission'),
+                                       slippage_override=self.config.get('slippage'))
         symbols = self._determine_symbols()
         if not symbols: raise ValueError("No symbols to trade.")
 

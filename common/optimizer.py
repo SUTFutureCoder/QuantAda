@@ -29,6 +29,7 @@ import copy
 import datetime
 import math
 import os
+import socket
 import sys
 import threading
 import time
@@ -64,6 +65,11 @@ try:
     HAS_DASHBOARD = True
 except ImportError:
     HAS_DASHBOARD = False
+
+def is_port_in_use(port):
+    """检查本地端口是否被占用"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
 
 class OptimizationJob:
     def __init__(self, args, fixed_params, opt_params_def, risk_params):
@@ -285,8 +291,10 @@ class OptimizationJob:
         tr_p = self.args.train_roll_period.upper() if self.args.train_roll_period else "ALL"
 
         # 测试周期名 (如: 3M, 6M) 或标记为 Refit (全量模式)
-        te_p = getattr(self.args, 'test_roll_period', '').upper()
-        if not te_p:
+        test_val = getattr(self.args, 'test_roll_period', None)
+        if test_val:
+            te_p = test_val.upper()
+        else:
             te_p = "REFIT"  # 代表没有独立测试集，是用于生成的实盘参数
 
         # 2. 提取日期边界 (Date Bounds)
@@ -352,8 +360,8 @@ class OptimizationJob:
                 # 2. 启动服务 (这是一个阻塞操作，会一直运行)
                 run_server(storage, host="127.0.0.1", port=port)
             except OSError as e:
-                if "Address already in use" in str(e):
-                    print(f"\n[Error] Port {port} is occupied! Dashboard failed to start.")
+                if "Address already in use" in str(e) or (hasattr(e, 'winerror') and e.winerror == 10048):
+                    print(f"\n[Error] Port {port} was seized by another process just now! Dashboard failed.")
                 else:
                     print(f"\n[Error] Dashboard thread failed: {e}")
             except Exception as e:
@@ -539,11 +547,11 @@ class OptimizationJob:
                 if calmar == -999.0 or calmar is None: calmar = 0.0
 
                 # Sharpe
-                sharpe = bt_instance.get_custom_metric('sharpe')  # 复用现成逻辑
+                sharpe = bt_instance.get_custom_metric('sharpe') or 0.0  # 复用现成逻辑
                 if sharpe is None: sharpe = 0.0
 
                 # Total Return
-                total_return = bt_instance.get_custom_metric('return')  # 复用现成逻辑
+                total_return = bt_instance.get_custom_metric('return') or 0.0 # 复用现成逻辑
 
                 # Trades Count (必须直接读 Analyzer)
                 trade_analyzer = strat.analyzers.getbyname('tradeanalyzer')
@@ -591,7 +599,9 @@ class OptimizationJob:
             return metric_val
 
         except Exception as e:
+            import traceback
             print(f"Trial failed: {e}")
+            traceback.print_exc()
             return -9999.0
 
     def prepare_data_index(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -648,7 +658,8 @@ class OptimizationJob:
                 log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
                 os.makedirs(log_dir, exist_ok=True)
 
-                log_file = os.path.join(log_dir, "optuna_shared_history.log")
+                # 为每个 study 创建独立的日志文件，彻底消除跨任务的锁争抢
+                log_file = os.path.join(log_dir, f"optuna_{self.args.study_name}.log")
 
                 try:
                     # 尝试创建文件存储
@@ -731,7 +742,19 @@ class OptimizationJob:
             print(f"[Optimizer] Auto-inferred n_trials: {n_trials} (based on param complexity)")
 
         if log_file and os.path.exists(log_file):
-            self._launch_dashboard(log_file, port=config.OPTUNA_DASHBOARD_PORT)
+            # 端口检测与递增逻辑
+            base_port = getattr(config, 'OPTUNA_DASHBOARD_PORT', 8090)
+            target_port = base_port
+
+            # 尝试寻找可用端口，最多尝试 100 次
+            for i in range(100):
+                if not is_port_in_use(target_port):
+                    break
+                target_port += 1
+            else:
+                print(f"[Warning] Could not find an available port starting from {base_port}. Dashboard might fail.")
+
+            self._launch_dashboard(log_file, port=target_port)
 
         print(f"\n--- Starting Optimization ({n_trials} trials, {n_jobs} parallel jobs) ---")
 
@@ -758,7 +781,9 @@ class OptimizationJob:
         print(f"Best Parameters Found (Train Set):")
         for k, v in best_params.items():
             print(f"  {k}: {v}")
-        print(f"Best Training Score ({self.args.metric}): {best_value:.4f}")
+
+        best_val_display = f"{best_value:.4f}" if best_value is not None else "N/A"
+        print(f"Best Training Score ({self.args.metric}): {best_val_display}")
 
         if self.test_datas:
             print("-" * 60)
