@@ -45,46 +45,65 @@ class IbkrDataProvider(BaseDataProvider):
             self.ib = None
 
     def _connect(self):
-        """确保连接处于活动状态"""
+        """确保连接处于活动状态 (带静默降级、防幽灵占用与自愈重建)"""
+        # 如果实例丢失，尝试自动重建
         if not self.ib:
-            return False
-
-        if not self.ib.isConnected():
-            import time
-            import logging
-
-            # 1. 给 ib_insync 的原生系统报错装上“消音器”
-            ib_client_logger = logging.getLogger('ib_insync.client')
-            original_level = ib_client_logger.level
-            ib_client_logger.setLevel(logging.CRITICAL)
-
             try:
-                max_retries = 10
-                for attempt in range(max_retries):
-                    try:
-                        self.ib.connect(self.host, self.port, clientId=self.client_id)
-                        return True
-                    except Exception as e:
-                        # 使用 repr 捕获 TimeoutError 字面量
-                        err_msg = repr(e)
-
-                        # 只要是超时（TWS拒载抛出的默认异常）或明确的报错，全部执行换号重试
-                        if "Timeout" in err_msg or "already in use" in err_msg or "326" in err_msg:
-                            self.client_id += 1
-                            print(f"[IBKR] 🔄 遇到幽灵占用或握手超时，自动将 clientId 切换为 {self.client_id} 并重试...")
-                            time.sleep(1)
-                            continue
-
-                        # 如果是 ConnectionRefusedError 等真正的硬核网络错误，直接打印并失败
-                        # print(f"[IBKR] 真网络硬错误: {err_msg}")
-                        return False
-
-                print("[IBKR] ❌ 重试次数耗尽，无法连接到 TWS/Gateway。")
+                from ib_insync import IB
+                self.ib = IB()
+            except ImportError:
                 return False
 
-            finally:
-                # 2. 无论连接成功还是失败跳过，都恢复原有的日志级别，保证后续实盘日志正常打印
-                ib_client_logger.setLevel(original_level)
+        if self.ib.isConnected():
+            return True
+
+        import time
+        import logging
+
+        # 给 ib_insync 的原生报错装上“消音器”
+        ib_client_logger = logging.getLogger('ib_insync.client')
+        original_level = ib_client_logger.level
+        ib_client_logger.setLevel(logging.CRITICAL)
+
+        try:
+            max_retries = 5  # 减少重试次数，5次足够了
+            for attempt in range(max_retries):
+                try:
+                    self.ib.connect(self.host, self.port, clientId=self.client_id)
+                    return True
+                except Exception as e:
+                    err_msg = repr(e)
+
+                    # A. 遇到占用或握手超时，换号重试
+                    if "Timeout" in err_msg or "already in use" in err_msg or "326" in err_msg:
+                        self.client_id += 1
+                        time.sleep(1)
+                        continue
+
+                    # B. 真网络硬错误 (没开 TWS) -> 静默跳过，让给下一个数据源
+                    if "ConnectionRefusedError" in err_msg or "1225" in err_msg or "OSError" in err_msg:
+                        return False
+
+                    # C. 💥 核心修复：事件循环崩溃 -> 尝试自动重建 IB 实例 (浴火重生)
+                    if "Event loop is closed" in err_msg or "RuntimeError" in err_msg:
+                        # print(f"[IBKR] 自动修复：事件循环关闭，正在重建实例...")
+                        try:
+                            from ib_insync import IB
+                            self.ib = IB()
+                        except:
+                            pass
+                        time.sleep(1)
+                        continue
+
+                    # D. 其他未知异常 -> 打印出来排查！且【绝对不能】再写 self.ib = None 了
+                    print(f"[IBKR] 连接遇到异常: {err_msg}")
+                    return False
+
+            return False
+
+        finally:
+            # 无论成功失败，恢复日志级别
+            ib_client_logger.setLevel(original_level)
 
     def _parse_contract(self, symbol: str):
         parts = symbol.split('.')
