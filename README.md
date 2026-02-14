@@ -22,6 +22,7 @@
   - **全球市场与多币种支持**：已打通 IBKR（盈透证券）、GM（万和掘金）实盘券商，支持 A股（100股一手）与美股/外汇（1股取整）的无缝切换，内置跨币种（如 HKD/USD）动态保证金与购买力自动折算。
   - **工业级失效安全**：独创“不死鸟”事件引擎。具备僵尸 ID 自动顺延重连、资金不足自动降级发单（Downgrade）、底层订单取整截断保护，以及防双花（Double Spend）宽限期锁，极致防爆仓。
   - **分布式远程调用**：支持通过 `Launcher` 主动发起远程连接，实现**计算（Linux）与交易（Windows）分离**的实盘部署。
+  - **保护自定义标的**：支持通过 `ignored_symbols` 参数配置，保护标的不参与策略计算。保护SGOV、BIL、USFR、SHY等压舱石；尊重客户主观选择实现虚拟多租户分仓；跨越法币-券商通道摩擦，券商内部转换标的，避免银行无法打款。
 
 
 - **策略与引擎解耦 (Adapter Pattern)**
@@ -111,38 +112,37 @@ DB_URL = 'mysql+pymysql://root:yourpassword@localhost:3306/quant'
 使用 `run.py` 脚本执行回测。您可以通过命令行参数灵活地选择策略、标的、资金和手续费。
 
 ```bash
-# 运行示例MACD策略（使用默认参数）
-python ./run.py sample_macd_cross_strategy
+#### 3.a. 运行回测 (内部模式)
 
-# 兼容驼峰类名
-python ./run.py SampleMacdCrossStrategy
+此模式适用于直接在框架的 `strategies/`、`stock_selectors/` 等目录中编写逻辑。
 
-# 回测贵州茅台(SHSE.600519)，并设置50万初始资金
-python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000
+使用 `run.py` 脚本执行回测。引擎已内置严密的资金盘点与交易截断保护，您只需通过命令行参数组合，即可解锁各种高级交易形态：
 
-# 设置回测开始时间以加快运行
-python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --cash 500000 --start_date 20250101
+```bash
+# 1. 极简开局：运行经典的 MACD 单标的趋势策略
+python run.py sample_macd_cross_strategy
 
-# 使用风控策略
-python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit
+# 2. 旗舰演示：全自动调仓与底仓物理隔离机制
+# (框架会自动保护 SHSE.511880 理财底仓不被卖出，仅用剩余活水资金轮动前3只宽基 ETF)
+python run.py sample_auto_rebalance_strategy --symbols=SHSE.510300,SHSE.510500,SZSE.159915,SHSE.511880 --start_date=20230101
 
-# 使用风控策略并传入自定义参数
-python ./run.py sample_macd_cross_strategy --symbols SHSE.600519 --risk sample_stop_loss_take_profit,trend_protection --risk_params "{'stop_loss_pct':0.03,'take_profit_pct':0.08,'method':'ma','period':120}"
+# 3. 变量控制：指定标的、设置 50 万初始资金，并限定回测时间以加快运行
+python run.py sample_macd_cross_strategy --symbols=SHSE.600519 --cash=500000 --start_date=20230101
 
-# 设置多个标的及指定数据源
-python ./run.py sample_multi_portfolio_strategy --symbols=SHSE.510300,SZSE.000001,SHSE.600519 --data_source=tushare
+# 4. 接入动态选股器：抛弃固定列表，让选股器每天自动从全市场拉取符合条件的票池
+python run.py sample_auto_rebalance_strategy --selection=sample_manual_selector --start_date=20240101
 
-# 自定义选股策略
-python ./run.py sample_multi_portfolio_strategy --selection sample_manual_selector
+# 5. 挂载独立风控：为策略外挂“止盈止损”或“大盘趋势保护”模块 (策略与风控彻底解耦)
+python run.py sample_macd_cross_strategy --symbols=SHSE.600519 --risk=sample_stop_loss_take_profit,sample_trend_protection
 
-# 命令行覆盖策略params参数
-python ./run.py sample_momentum_strategy --symbols SHSE.600519 --params "{'momentum_period': 10}"
+# 6. 极客调参：通过命令行直接覆写策略与风控的内部运行参数 (Params)
+python run.py sample_auto_rebalance_strategy --symbols=SZSE.159915 --params "{'selectTopK': 2, 'roc_period': 10}" --risk_params "{'stop_loss_pct': 0.05}"
 
-# 使用额外数据源
-python ./run.py sample_extra_data_strategy --symbols=SZSE.000001
+# 7. 动态环境部署：通过命令行直接覆写 config.py 中的底层系统配置 (极度适合 CI/CD 与自动化跑批脚本)
+python run.py sample_macd_cross_strategy --config "{'LOG': False, 'GM_TOKEN': 'your_token|127.0.0.1:7001'}"
 
-# 查看所有可用参数
-python ./run.py --help
+# 查看所有可用参数与帮助说明
+python run.py --help
 ```
 
 `--symbols`和`--risk`可传入多个逗号分隔的标的及风控策略。

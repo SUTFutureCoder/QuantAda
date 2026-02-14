@@ -124,6 +124,9 @@ class LiveTrader:
         datas = self._fetch_all_history_data(symbols, context, is_live=is_live, timeframe=timeframe, compression=compression)
         self.broker.set_datas(list(datas.values()))
         params = self.config.get('params', {})
+        # 将环境级的豁免名单透传给策略
+        if 'ignored_symbols' in self.config:
+            params['env_ignored_symbols'] = self.config['ignored_symbols']
         self.strategy = self.strategy_class(broker=self.broker, params=params)
         self.strategy.init()
 

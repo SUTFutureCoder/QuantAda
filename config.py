@@ -17,6 +17,9 @@ LOG = True
 # 是否打印交易计划
 PRINT_PLAN = False
 
+# 保护标的不参与策略计算，优先级低于策略参数。适用于压舱石；尊重客户主观选择实现虚拟多租户分仓；跨越法币-券商通道摩擦，券商内部转换标的，避免银行无法打款。
+IGNORED_SYMBOLS = ['SGOV', 'BIL', 'USFR', 'SHY']
+
 
 # --- 数据源配置 ---
 # Tushare API Token
@@ -95,14 +98,14 @@ BROKER_ENVIRONMENTS = {
         'sim': {  # 模拟盘/Paper Trading
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
+            # 实盘特定不卖的长线资产
+            # 'ignored_symbols': ['AAPL', 'TSLA']
         },
         'real': {  # 实盘/Docker Gateway
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
-        },
-        'real_docker': {  # 实盘/Docker Gateway
-            'schedule': '1d:15:45:00',
-            'timezone': 'America/New_York',
+            # 实盘特定不卖的长线资产
+            # 'ignored_symbols': ['AAPL', 'TSLA']
         }
     }
 }

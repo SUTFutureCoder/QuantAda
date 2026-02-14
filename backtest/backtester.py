@@ -86,9 +86,17 @@ class BacktraderStrategyWrapper(bt.Strategy):
         """代理调用真实 Broker 的 getcash"""
         return self.broker.getcash()
 
+    def get_cash(self):
+        """统一实盘与回测的获取现金接口"""
+        return self.broker.getcash()
+
     def getvalue(self):
         """代理调用真实 Broker 的 getvalue"""
         return self.broker.getvalue()
+
+    def get_current_price(self, data):
+        """统一实盘与回测的获取最新价格接口"""
+        return data.close[0]
 
     def getcommissioninfo(self, data):
         """代理调用真实 Broker 的 getcommissioninfo"""

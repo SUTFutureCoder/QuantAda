@@ -65,7 +65,7 @@ class GmDataProvider(BaseDataProvider):
     def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
                  timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
 
-        if not self.token:
+        if not self.token or self.token == "EXTERNAL_MODE":
             return None
         
         try:

@@ -51,30 +51,40 @@ class IbkrDataProvider(BaseDataProvider):
 
         if not self.ib.isConnected():
             import time
-            max_retries = 10
-            for attempt in range(max_retries):
-                try:
-                    self.ib.connect(self.host, self.port, clientId=self.client_id)
-                    return True
-                except Exception as e:
-                    # 使用 repr 捕获 TimeoutError 字面量
-                    err_msg = repr(e)
+            import logging
 
-                    # 只要是超时（TWS拒载抛出的默认异常）或明确的报错，全部执行换号重试
-                    if "Timeout" in err_msg or "already in use" in err_msg or "326" in err_msg:
-                        self.client_id += 1
-                        print(f"[IBKR] 🔄 遇到幽灵占用或握手超时，自动将 clientId 切换为 {self.client_id} 并重试...")
-                        time.sleep(1)
-                        continue
+            # 1. 给 ib_insync 的原生系统报错装上“消音器”
+            ib_client_logger = logging.getLogger('ib_insync.client')
+            original_level = ib_client_logger.level
+            ib_client_logger.setLevel(logging.CRITICAL)
 
-                    # 如果是 ConnectionRefusedError 等真正的硬核网络错误，直接打印并失败
-                    print(f"[IBKR] 真网络硬错误: {err_msg}")
-                    return False
+            try:
+                max_retries = 10
+                for attempt in range(max_retries):
+                    try:
+                        self.ib.connect(self.host, self.port, clientId=self.client_id)
+                        return True
+                    except Exception as e:
+                        # 使用 repr 捕获 TimeoutError 字面量
+                        err_msg = repr(e)
 
-            print("[IBKR] ❌ 重试次数耗尽，无法连接到 TWS/Gateway。")
-            return False
+                        # 只要是超时（TWS拒载抛出的默认异常）或明确的报错，全部执行换号重试
+                        if "Timeout" in err_msg or "already in use" in err_msg or "326" in err_msg:
+                            self.client_id += 1
+                            print(f"[IBKR] 🔄 遇到幽灵占用或握手超时，自动将 clientId 切换为 {self.client_id} 并重试...")
+                            time.sleep(1)
+                            continue
 
-        return True
+                        # 如果是 ConnectionRefusedError 等真正的硬核网络错误，直接打印并失败
+                        # print(f"[IBKR] 真网络硬错误: {err_msg}")
+                        return False
+
+                print("[IBKR] ❌ 重试次数耗尽，无法连接到 TWS/Gateway。")
+                return False
+
+            finally:
+                # 2. 无论连接成功还是失败跳过，都恢复原有的日志级别，保证后续实盘日志正常打印
+                ib_client_logger.setLevel(original_level)
 
     def _parse_contract(self, symbol: str):
         parts = symbol.split('.')
