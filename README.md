@@ -370,7 +370,7 @@ QuantAda/
 只需喝杯咖啡的时间，你就可以将 QuantAda 接入全球任何一家提供 Python SDK 的券商（如嘉信理财、长桥、盈立等）：
 
 1. **获取法典**：打开项目根目录下的 `PROMPT_TEMPLATE.md`。
-2. **喂给算力**：将这份 Prompt 与目标券商的官方 API 文档（或 Github 上的 SDK 示例）打包，发送给 Claude 3.5 Sonnet 或 GPT-4o。
+2. **喂给算力**：将这份 Prompt 与目标券商的官方 API 文档（或 Github 上的 SDK 示例）打包，发送给 Claude 、Codex 或 GLM等。
 3. **开箱即用**：AI 会严格遵循 QuantAda 的接口签名，吐出一份名为 `[broker]_broker.py` 的代码。将其直接丢进 `live_trader/adapters/` 目录下，并在 `config.py` 中配置，即可瞬间完成实盘点火！
 
 ### 🛡️ 为什么 AI 生成的代码在 QuantAda 中绝对安全？
