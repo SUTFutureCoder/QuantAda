@@ -5,6 +5,7 @@ import logging
 import sys
 
 import pandas
+import pandas as pd
 
 import config
 from backtest.backtester import Backtester
@@ -170,6 +171,24 @@ if __name__ == '__main__':
 
     # 3. 解析参数
     args = parser.parse_args()
+
+    # ==========================================
+    # 全局时间自动推断逻辑 (Auto-Inference)
+    # 作用：支持缺省 start_date/end_date 的自动化回测
+    # ==========================================
+    # 1. 自动补全 end_date (默认为当前系统时间)
+    if not args.end_date:
+        args.end_date = datetime.datetime.now().strftime('%Y%m%d')
+
+    # 2. 自动补全 start_date
+    # 注意：如果是实盘模式(--connect)，引擎有自己的 1 年预热逻辑，无需在此强行干预
+    if not args.start_date and not args.connect:
+        # 默认最大公约数回溯周期：3年
+        # 使用 pd.DateOffset 可以完美处理闰年(Leap Year)的天数差异
+        end_dt = pd.to_datetime(args.end_date)
+        start_dt = end_dt - pandas.DateOffset(years=3)
+        args.start_date = start_dt.strftime('%Y%m%d')
+        print(f"\n[System] 💡 start_date omitted. Auto-inferred to: {args.start_date} (3 years lookback).")
 
     # 覆盖config.py
     if args.config:

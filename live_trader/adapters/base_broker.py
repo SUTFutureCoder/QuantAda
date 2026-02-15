@@ -136,6 +136,14 @@ class BaseLiveBroker(ABC):
         pass
 
     @abstractmethod
+    def get_pending_orders(self) -> list:
+        """
+        [实盘防爆仓] 子类必须实现。获取所有未完成的在途订单。
+        返回统一格式: [{'symbol': 'SHSE.510300', 'direction': 'BUY', 'size': 1000}, ...]
+        """
+        pass
+
+    @abstractmethod
     def _submit_order(self, data, volume, side, price):
         """子类必须实现，用于提交指定标的买入或卖出操作"""
         pass
@@ -190,8 +198,10 @@ class BaseLiveBroker(ABC):
         # 3. 核心算法：算股数
         target_value = portfolio_value * target
         expected_shares = target_value / price
-        pos_obj = self.get_position(data)
-        delta_shares = expected_shares - pos_obj.size
+
+        # 改用预期仓位计算差额
+        current_size = self.get_expected_size(data)
+        delta_shares = expected_shares - current_size
 
         # 4. 决策分发
         if delta_shares > 0:
@@ -211,8 +221,10 @@ class BaseLiveBroker(ABC):
 
         # 2. 核心算法：直接用目标金额除以价格
         expected_shares = target / price
-        pos_obj = self.get_position(data)
-        delta_shares = expected_shares - pos_obj.size
+
+        # 改用预期仓位计算差额
+        current_size = self.get_expected_size(data)
+        delta_shares = expected_shares - current_size
 
         # 风控拦截
         if data._name in self._risk_locked_symbols and delta_shares > 0:
@@ -340,18 +352,28 @@ class BaseLiveBroker(ABC):
     def _smart_sell(self, data, shares, price, **kwargs):
         """智能卖出：自动注册监控"""
         lot_size = config.LOT_SIZE
-        if lot_size > 1:
-            shares = int(shares // lot_size) * lot_size
+
+        # 获取当前【真实的已结算仓位】
+        current_pos = self.get_position(data).size
+
+        # 防止做空。你最多只能卖出现有持仓！(防止在途买单导致超额卖出)
+        shares = min(shares, current_pos)
+
+        # 碎股放行逻辑。如果是清仓(或卖出量等于当前持仓)，无视 A股 100手 限制，直接全卖
+        if shares >= current_pos > 0:
+            shares = current_pos
         else:
-            shares = int(shares)
+            if lot_size > 1:
+                shares = int(shares // lot_size) * lot_size
+            else:
+                shares = int(shares)
 
         if shares > 0:
             log.signal('SELL', data._name, shares, price, tag="实盘信号")
-
             with self._ledger_lock:
                 proxy = self._submit_order(data, shares, 'SELL', price)
                 if proxy:
-                    self._pending_sells.add(proxy.id)  # 自动监控
+                    self._pending_sells.add(proxy.id)
             return proxy
         return None
 
@@ -416,6 +438,11 @@ class BaseLiveBroker(ABC):
 
             if proxy.is_completed():
                 self._pending_sells.discard(oid)
+                # 唤醒扳机，卖单成交释放资金后，立刻唤醒被挂起的买单
+                if not self._pending_sells and self._deferred_orders:
+                    print(f"[Broker] 卖单 {oid} 已成交，触发买单队列...")
+                    self.process_deferred_orders()
+
             elif proxy.is_canceled() or proxy.is_rejected():
                 self._pending_sells.discard(oid)
                 if self._deferred_orders:
@@ -424,6 +451,22 @@ class BaseLiveBroker(ABC):
                     self._deferred_orders.clear()
             elif proxy.is_pending():
                 self._pending_sells.add(oid)
+
+    def get_expected_size(self, data):
+        """获取包含在途订单的【预期仓位】，防止底层下单方法出现认知撕裂"""
+        pos_size = self.get_position(data).size
+        try:
+            pending_orders = self.get_pending_orders()
+            for po in pending_orders:
+                sym = str(po['symbol']).upper()
+                data_name = data._name.upper()
+                # 兼容 QQQ.ISLAND 和 QQQ 的匹配
+                if sym == data_name or sym == data_name.split('.')[0]:
+                    if po['direction'] == 'BUY': pos_size += po['size']
+                    if po['direction'] == 'SELL': pos_size -= po['size']
+        except Exception as e:
+            print(f"[Broker] 获取预期仓位异常: {e}")
+        return pos_size
 
     def process_deferred_orders(self):
         """资金回笼触发重试"""

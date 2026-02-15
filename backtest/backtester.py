@@ -198,7 +198,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
             # 获取可用现金
             # 可用现金 = 账户当前现金 + 本次循环中卖单预计回笼的资金
             current_cash = self.broker.getcash()
-            total_purchasing_power = current_cash + self.expected_freed_cash
+            total_purchasing_power = current_cash + self.expected_freed_cash - self.virtual_spent_cash
 
             # 估算包含手续费的最大购买量 (假设 commission 是比例，如 0.0003)
             commission_ratio = self.broker.getcommissioninfo(data).p.commission

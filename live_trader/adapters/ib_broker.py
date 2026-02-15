@@ -121,6 +121,28 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 明确获取净清算价值
         return self._fetch_smart_value(['NetLiquidation'])
 
+    def get_pending_orders(self) -> list:
+        """盈透：获取在途订单"""
+        if not hasattr(self, 'ib') or not self.ib or not self.ib.isConnected():
+            return []
+
+        res = []
+        try:
+            # reqAllOpenOrders() 向服务器强制请求，确保获取最新的所有挂单
+            open_orders = self.ib.reqAllOpenOrders()
+            for o in open_orders:
+                rem = o.orderStatus.remaining
+                if rem > 0:
+                    res.append({
+                        # 注意：盈透获取的 symbol 可能是 'AAPL'，策略里是 'AAPL.SMART'，等下会在策略层做智能前缀匹配
+                        'symbol': o.contract.symbol,
+                        'direction': 'BUY' if o.order.action == 'BUY' else 'SELL',
+                        'size': rem
+                    })
+        except Exception as e:
+            print(f"[IBBroker] 获取在途订单失败: {e}")
+        return res
+
     @staticmethod
     def is_live_mode(context) -> bool:
         # IB Adapter 只要被调用基本都是为了实盘 (paper or live)

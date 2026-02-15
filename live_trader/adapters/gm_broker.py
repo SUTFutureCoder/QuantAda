@@ -122,6 +122,26 @@ class GmBrokerAdapter(BaseLiveBroker):
         # get_cash() 返回的是 AccountCash 对象，.nav 即为总资产
         return get_cash().nav
 
+    def get_pending_orders(self) -> list:
+        """掘金：获取在途订单"""
+        if not self.is_live:
+            return []  # 回测模式下引擎自带瞬间成交，无视在途
+
+        res = []
+        try:
+            from gm.api import get_unfinished_orders, OrderSide_Buy
+            orders = get_unfinished_orders()
+            for o in orders:
+                res.append({
+                    'symbol': o.symbol,
+                    'direction': 'BUY' if o.side == OrderSide_Buy else 'SELL',
+                    # 未成交数量 = 委托总数 - 已成交数
+                    'size': o.volume - o.filled_volume
+                })
+        except Exception as e:
+            print(f"[GmBroker] 获取在途订单失败: {e}")
+        return res
+
     # 实盘引擎调用此方法设置当前时间时，我们将其转换为无时区的北京时间
     # 这样 engine.py 中对比 df.index (无时区) 和 current_dt (无时区) 就不会报错了
     def set_datetime(self, dt):

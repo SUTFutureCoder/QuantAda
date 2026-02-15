@@ -5,7 +5,7 @@ import config
 from data_providers.base_provider import BaseDataProvider
 
 
-class TiingoProvider(BaseDataProvider):
+class TiingoDataProvider(BaseDataProvider):
     """
     Tiingo 数据源 (付费/高质量)
     """
@@ -29,7 +29,7 @@ class TiingoProvider(BaseDataProvider):
             return sym
         if '.' not in sym:
             return sym
-        return sym
+        return sym.split(".")[0]
 
     def get_data(self, symbol, start_date=None, end_date=None, timeframe='Days', compression=1):
         if not self.client:

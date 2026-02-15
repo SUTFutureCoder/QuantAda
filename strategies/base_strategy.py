@@ -117,6 +117,27 @@ class BaseStrategy(ABC):
         current_positions = {}
         managed_market_value = 0.0
 
+        # 1. 抓取券商真实在途订单 (降维成大写的字典，方便极速查表)
+        pending_map = {}
+        if hasattr(self.broker, 'get_pending_orders'):
+            try:
+                for po in self.broker.get_pending_orders():
+                    sym = str(po['symbol']).upper()
+                    if sym not in pending_map:
+                        pending_map[sym] = {'BUY': 0.0, 'SELL': 0.0}
+                    pending_map[sym][po['direction']] += po['size']
+            except Exception as e:
+                self.log(f"获取在途订单异常: {e}")
+
+        # 辅助查表函数 (支持 IBKR 截断后缀模糊匹配，如 'QQQ.ISLAND' 匹配 'QQQ')
+        def get_pending(data_name, direction):
+            exact = data_name.upper()
+            base = exact.split('.')[0]
+            if exact in pending_map: return pending_map[exact][direction]
+            if base in pending_map: return pending_map[base][direction]
+            return 0.0
+
+        # 2. 盘点所有数据源
         for d in self.broker.datas:
             base_name = d._name.split('.')[0].upper()
             full_name = d._name.upper()
@@ -125,8 +146,15 @@ class BaseStrategy(ABC):
             if base_name in self.active_ignored_symbols or full_name in self.active_ignored_symbols:
                 continue
 
+            # 获取券商已结算仓位
             pos = self.broker.getposition(d)
-            if pos.size > 0:
+            settled_size = pos.size
+
+            # 【防爆仓核心】计算预期仓位 (Expected Size)
+            expected_size = settled_size + get_pending(d._name, 'BUY') - get_pending(d._name, 'SELL')
+
+            # 只要预期仓位 > 0，就纳入市值计算 (交给 Rebalancer 识别)
+            if expected_size > 0:
                 if hasattr(self.broker, 'get_current_price'):
                     price = self.broker.get_current_price(d)
                 elif len(d) > 0:
@@ -134,11 +162,15 @@ class BaseStrategy(ABC):
                 else:
                     price = pos.price
 
-                market_value = pos.size * price
+                market_value = expected_size * price
+
+                # “欺骗” Rebalancer：告诉它当前持仓是 Expected，防止它因未结算而重复发单
                 current_positions[d] = market_value
                 managed_market_value += market_value
 
-        # 策略真实购买力 = 账户剩余现金 + 本策略正在管控的仓位市值
+        # 3. 资金盘点
+        # 底层 Broker 的 get_cash 已由券商自动扣除买单挂单所冻结的现金。
+        # 冻结扣除的现金 + 预期新增的持仓市值 = 总权益 (NAV) 完美的数学守恒。
         available_cash = self.broker.get_cash()
         allocatable_capital = available_cash + managed_market_value
 

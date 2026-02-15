@@ -39,6 +39,11 @@ class PortfolioRebalancer:
             if data not in target_symbols:
                 plan['sell_clear'].append(data)
             else:
+                # 目标价值为 0 的防御
+                if target_value <= 0:
+                    plan['sell_clear'].append(data)
+                    continue
+
                 diff = target_value - current_val
                 # 只有当持仓偏离度超过阈值，才纳入调整计划
                 if abs(diff / target_value) > rebalance_threshold:
