@@ -357,12 +357,29 @@ QuantAda/
 ![optuna-dashboard](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/optuna-dashboard.png?raw=true)  
 
 
-## 接入更多券商
+## 🚀 AI-Native: 基于契约的“零代码”全球券商接入 (Prompt-Driven Adapter Generation)
 
-请使用 [PROMPT_TEMPLATE.md](https://github.com/SUTFutureCoder/QuantAda/blob/main/PROMPT_TEMPLATE.md) 让AI快速生成并接入更多券商。
+在传统的量化交易开发中，接入一个新的券商 API 往往是最枯燥且最容易踩坑的“脏活”——你需要应对各种奇葩的底层字段、脆弱的异步回调以及混乱的状态机。
 
-如您需要自行接入，``live_trader/adapters/base_broker.py`` 已规定了实盘接入需要实现的抽象方法和协议，
+**QuantAda 采用了一种面向 AI 时代的全新扩展范式：我们不手写 Adapter，我们只定义绝对严苛的架构契约，剩下的脏活全部外包给大语言模型（LLM）。**
 
+基于 QuantAda 独特的**无状态自底向上对账机制（Stateless Bottom-Up Reconciliation）**与极度纯粹的底层抽象，我们为开源社区提供了一份“架构师级别的 AI 指令法典” —— `PROMPT_TEMPLATE.md`。
+
+### 🛠️ 如何让 AI 为你写出极其健壮的适配器？
+
+只需喝杯咖啡的时间，你就可以将 QuantAda 接入全球任何一家提供 Python SDK 的券商（如嘉信理财、长桥、盈立等）：
+
+1. **获取法典**：打开项目根目录下的 `PROMPT_TEMPLATE.md`。
+2. **喂给算力**：将这份 Prompt 与目标券商的官方 API 文档（或 Github 上的 SDK 示例）打包，发送给 Claude 3.5 Sonnet 或 GPT-4o。
+3. **开箱即用**：AI 会严格遵循 QuantAda 的接口签名，吐出一份名为 `[broker]_broker.py` 的代码。将其直接丢进 `live_trader/adapters/` 目录下，并在 `config.py` 中配置，即可瞬间完成实盘点火！
+
+### 🛡️ 为什么 AI 生成的代码在 QuantAda 中绝对安全？
+
+大模型写代码容易产生“幻觉”并把状态写脏，但在 QuantAda 的 `PROMPT_TEMPLATE.md` 的强约束下，AI 必须遵守以下架构红线，这些红线甚至比普通人类开发者更严谨：
+
+* **绝对无状态 (Absolute Statelessness)**：Prompt 强制禁止 AI 在适配器中维护任何本地现金或持仓变量。所有状态必须实时向物理柜台发起反向查询，从根本上杜绝内存账本污染。
+* **严格实体消歧义**：强约束 AI 在处理订单回调时，必须采用基础代码的精准匹配（如 `AAPL` == `AAPL`），严禁使用隐式的模糊包含（如 `'C' in 'CSCO'`），彻底封死错单炸弹。
+* **异常兜底协议**：强制要求 AI 处理盘口数据断流与 `ZeroDivisionError`，确保引擎的事件循环坚不可摧。
 
 ## 免责声明
 
