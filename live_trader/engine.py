@@ -101,6 +101,28 @@ class LiveTrader:
 
         # 合并配置：平台配置为默认，用户配置有更高优先级
         self.config = {**platform_config, **self.user_config}
+
+        # 从掘金 context 中动态提取 run() 方法传入的 token 并注入到 data_provider
+        if hasattr(context, 'token') and context.token:
+            # 掘金 SDK 内部的 context.token 默认带有 'bearer ' 前缀，需要清洗掉，否则 set_token 会报错
+            raw_token = context.token
+            if isinstance(raw_token, str) and raw_token.lower().startswith('bearer '):
+                raw_token = raw_token[7:].strip()
+
+            self.config['token'] = raw_token
+
+            # 覆盖 DataProvider 的外部模式状态，使其获得正确的 Token
+            if getattr(self.data_provider, 'is_external_mode', False) or getattr(self.data_provider, 'token',
+                                                                                 None) == 'EXTERNAL_MODE':
+                self.data_provider.token = raw_token
+                self.data_provider.is_external_mode = False
+                try:
+                    from gm.api import set_token
+                    set_token(raw_token)
+                    print(f"[Engine] Token correctly loaded and cleaned from context: {raw_token[:6]}***")
+                except ImportError:
+                    pass
+
         print("[Engine] Effective configuration:", self.config)
 
         # 3. 使用最终配置实例化所有组件

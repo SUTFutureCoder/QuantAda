@@ -107,6 +107,10 @@ class BaseLiveBroker(ABC):
         供策略层调用 (self.broker.log)。
         在实盘模式下，如果没有传入时间，log.info 会自动使用当前系统时间。
         """
+        # 如果没有传入时间，优先使用当前 Broker 所在的仿真时间
+        if dt is None:
+            dt = getattr(self, '_datetime', None)
+
         log.info(txt, dt=dt)
 
     # =========================================================
@@ -333,7 +337,7 @@ class BaseLiveBroker(ABC):
         if shares > 0:
             # 根据是否为重试改变日志标签
             tag = "实盘降级重试" if retries > 0 else "实盘信号"
-            log.signal('BUY', data._name, shares, price, tag=tag)
+            log.signal('BUY', data._name, shares, price, tag=tag, dt=self._datetime)
 
             with self._ledger_lock:
                 proxy = self._submit_order(data, shares, 'BUY', price)
@@ -369,7 +373,7 @@ class BaseLiveBroker(ABC):
                 shares = int(shares)
 
         if shares > 0:
-            log.signal('SELL', data._name, shares, price, tag="实盘信号")
+            log.signal('SELL', data._name, shares, price, tag="实盘信号", dt=self._datetime)
             with self._ledger_lock:
                 proxy = self._submit_order(data, shares, 'SELL', price)
                 if proxy:
