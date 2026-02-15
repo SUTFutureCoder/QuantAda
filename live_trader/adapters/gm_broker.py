@@ -247,6 +247,10 @@ class GmBrokerAdapter(BaseLiveBroker):
             buffer_rate = self.safety_multiplier
             estimated_cost = volume * freeze_price * buffer_rate
 
+            if freeze_price <= 0:
+                print(f"[GmBroker] ⚠️ 无法获取 {data._name} 的有效价格 (price={price})，拒绝计算并跳过发单。")
+                return None
+
             if estimated_cost > available_cash:
                 old_volume = volume
                 # 倒推最大股数

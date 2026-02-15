@@ -346,6 +346,8 @@ class LiveTrader:
     # 风控检查辅助方法
     def _check_risk_controls(self) -> bool:
         current_dt = self.broker.datetime.datetime()
+        if hasattr(current_dt, 'tzinfo') and current_dt.tzinfo is not None:
+            current_dt = current_dt.replace(tzinfo=None)
         triggered_action = False
 
         # 1. 初始化风控订单跟踪字典 (如果尚未存在)

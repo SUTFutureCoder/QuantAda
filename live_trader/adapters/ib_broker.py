@@ -106,13 +106,57 @@ class IBBrokerAdapter(BaseLiveBroker):
 
     def getcash(self):
         """兼容 Backtrader 标准接口: 获取可用资金 (Buying Power)"""
-        # 明确获取可用资金 (优先 TotalCashValue，其次 AvailableFunds)，而非总资产
-        # 如果是现金账户，必须用 TotalCashValue；如果是保证金账户，AvailableFunds 包含融资额度
-        return self._fetch_smart_value(['TotalCashValue', 'AvailableFunds'])
+        return self.get_cash()
 
     def get_cash(self):
-        """ 覆盖 BaseLiveBroker 的 get_cash，确保策略层调用的也是正确的购买力"""
-        return self.getcash()
+        """
+        覆盖 BaseLiveBroker 的 get_cash，确保策略层调用的是真实的可用购买力。
+        由于盈透的 TotalCashValue 在挂单阶段不会扣减，
+        此处必须手动减去在途买单(Pending BUY)的预期消耗，防止产生无限杠杆幻觉。
+        """
+        # 1. 获取物理账面现金
+        # 明确获取可用资金 (优先 TotalCashValue，其次 AvailableFunds)，而非总资产
+        # 如果是现金账户，必须用 TotalCashValue；如果是保证金账户，AvailableFunds 包含融资额度
+        raw_cash = self._fetch_smart_value(['TotalCashValue', 'AvailableFunds'])
+
+        # 2. 盘点所有在途买单，计算尚未物理扣款的“虚拟冻结资金”
+        virtual_frozen_cash = 0.0
+        try:
+            pending_orders = self.get_pending_orders()
+            for po in pending_orders:
+                if po['direction'] == 'BUY':
+                    symbol = po['symbol']
+                    size = po['size']
+
+                    price = 0.0
+                    # 方案 A：优先从框架维护的数据流 (datas) 中精准提取最新价
+                    for d in self.datas:
+                        # 兼容 'AAPL.SMART' 和 'AAPL' 的命名匹配
+                        if symbol == d._name or symbol == d._name.split('.')[0]:
+                            price = self.get_current_price(d)
+                            break
+
+                    # 方案 B：如果 datas 未命中，从 IB 实时行情快照 _tickers 兜底获取
+                    if price == 0.0 and symbol in self._tickers:
+                        ticker = self._tickers[symbol]
+                        p = ticker.marketPrice()
+                        # 规避 NaN 或 0 等无效报价，启用盘前/周末休市兜底
+                        if not (p and p > 0):
+                            p = ticker.close if (ticker.close and ticker.close > 0) else ticker.last
+                        if p and p > 0:
+                            price = p
+
+                    # 如果成功获取价格，累加冻结金额
+                    # 附加 1.5% 的乘数作为防爆仓安全垫（覆盖滑点与 IBKR 佣金）
+                    if price > 0:
+                        virtual_frozen_cash += size * price * 1.015
+
+        except Exception as e:
+            print(f"[IBBroker] 计算买单虚拟冻结资金时发生异常: {e}")
+
+        # 3. 真实购买力 = 账面资金 - 虚拟冻结资金 (防止透支显示)
+        real_available_cash = raw_cash - virtual_frozen_cash
+        return max(0.0, real_available_cash)
 
     def getvalue(self):
         """
@@ -369,11 +413,13 @@ class IBBrokerAdapter(BaseLiveBroker):
             # snapshot=False 建立流式订阅
             ticker = self.ib.reqMktData(contract, '', False, False)
             self._tickers[symbol] = ticker
-            # 如果在 Loop 里，这句 sleep 可能会报错，所以加个 try
-            try:
-                self.ib.sleep(0.5)
-            except:
-                pass
+
+            import time
+            start_time = time.time()
+            while time.time() - start_time < 1.0:
+                self.ib.sleep(0.01)  # 允许较短的协作式让出
+                if ticker.marketPrice() == ticker.marketPrice() and ticker.marketPrice() > 0:
+                    break
 
         # 2. 获取价格 (优先 marketPrice)
         price = ticker.marketPrice()
@@ -443,8 +489,11 @@ class IBBrokerAdapter(BaseLiveBroker):
         matched_data = None
         # 简单的符号匹配逻辑 (可能需要根据 IBBrokerAdapter.parse_contract 的逆逻辑来匹配)
         for d in self.datas:
-            # 这里的匹配逻辑取决于你 IB 的 symbol 命名习惯
-            if target_symbol in d._name:
+            # 提取策略层命名中的基础代码 (例如将 'AAPL.SMART' 提取为 'AAPL')
+            base_name = d._name.split('.')[0].upper()
+
+            # 使用精确等于 (==) 而非包含 (in)
+            if base_name == target_symbol.upper():
                 matched_data = d
                 break
 
@@ -546,10 +595,9 @@ class IBBrokerAdapter(BaseLiveBroker):
                         print(f"[System] ⏳ Connection failed: {err_msg}")
 
                         # 幽灵占用与超时自愈逻辑
-                        if "already in use" in err_msg or "326" in err_msg or "Timeout" in err_msg:
-                            client_id += 1
-                            print(f"[System] 🔄 发现幽灵占用或握手超时，自动将 clientId 切换为 {client_id} 并重试...")
-                            time.sleep(2)  # 冲突时重试快一点
+                        if "already in use" in err_msg or "326" in err_msg:
+                            print(f"[System] 🔄 发现幽灵占用，坚持使用 client_id={client_id} 每 5 秒尝试抢占 Session...")
+                            time.sleep(5)
                             continue
 
                         # 其他真网络错误保持较长的冷却
