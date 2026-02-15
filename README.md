@@ -357,6 +357,13 @@ QuantAda/
 ![optuna-dashboard](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/optuna-dashboard.png?raw=true)  
 
 
+## 接入更多券商
+
+请使用 [PROMPT_TEMPLATE.md](https://github.com/SUTFutureCoder/QuantAda/blob/main/PROMPT_TEMPLATE.md) 让AI快速生成并接入更多券商。
+
+如您需要自行接入，``live_trader/adapters/base_broker.py`` 已规定了实盘接入需要实现的抽象方法和协议，
+
+
 ## 免责声明
 
 **使用本框架进行任何真实交易操作前，请务必仔细阅读、理解并同意以下所有条款。**
