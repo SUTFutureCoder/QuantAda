@@ -16,6 +16,33 @@
 
 本项目旨在对抗市面上普遍存在的“过拟合”与“造神”风气，通过严谨的工程架构与数学逻辑，让量化交易回归敬畏市场、技术为本的初心。
 
+## 🚀 AI-Native: 拥抱大模型的“零代码”量化开发范式
+
+在传统的量化交易开发中，无论是接入一个新的奇葩券商 API，还是将复杂的金融逻辑转化为不带 BUG 的实盘代码，往往伴随着极高的“脏活”比例和极易踩坑的状态机陷阱。
+
+**QuantAda 采用了一种面向 AI 时代的全新扩展范式：我们不手写容易出错的面条代码，而是通过定义绝对严苛的架构契约，将系统扩展的研发工作全部“外包”给大语言模型（LLM）。**
+
+基于 QuantAda 独特的 **无状态自底向上对账机制（Stateless Bottom-Up Reconciliation）** 与极度纯粹的底层抽象，我们为开源社区准备了两份“架构师级别的 AI 指令法典”。你只需将这些 Prompt 配合需求喂给 Claude、Codex 或 GPT 等 AI 编程助手，即可瞬间获得生产级别的健壮代码。
+
+### 🛠️ 法典一：零代码全球券商接入 (Prompt-Driven Adapter Generation)
+想要将 QuantAda 接入全球任何一家提供 Python SDK 的券商（如嘉信理财、长桥、盈立等），只需喝杯咖啡的时间：
+1. **获取法典**：打开项目根目录下的 `BROKER_PROMPT.md`。
+2. **喂给算力**：将该 Prompt 与目标券商的官方 API 文档（或 SDK 示例）打包，发送给 AI。
+3. **开箱即用**：AI 会严格遵循 QuantAda 的接口签名，吐出一份标准化的 `[broker]_broker.py`。将其丢进 `live_trader/adapters/` 并在 `config.py` 配置，即可瞬间完成实盘点火！
+
+**🛡️ 安全护城河**：在 Prompt 的强约束下，AI 必须遵守**绝对无状态**（严禁本地记账）、**严格实体消歧义**（拒绝模糊匹配）和**异常兜底协议**，从根本上彻底封死大模型容易产生的“幻觉炸弹”与状态错乱。
+
+### 🧠 法典二：双范式工程级策略生成 (Prompt-Driven Strategy Generation)
+让 AI 帮你写策略不再是停留在 Jupyter 里的玩具，而是可以直接免审对接实盘的工程级交付：
+1. **获取法典**：使用根目录下的 `STRATEGY_PROMPT.md`。
+2. **定义逻辑**：告诉 AI 你的交易灵感（如“基于布林带和 RSI 的多因子轮动”），并附上该 Prompt。
+3. **双范式分流**：Prompt 强制约束 AI 在以下两种最佳实践范式中二选一，杜绝冗长脆弱的 if-else 逻辑：
+   - **范式 A（独立标的信号驱动）**：适用于 CTA 趋势跟随。AI 仅需生成目标仓位，调用引擎的 `order_target_percent`，系统自动计算安全垫与差额。
+   - **范式 B（智能自动调仓）**：适用于多标的横截面轮动。AI 仅需计算出目标权重字典，直接移交底层的 `PortfolioRebalancer` 统一处理“先卖后买”和资金分配。
+
+**⚡ 算力极客体验**：在 CLI 环境下（如 Cursor / GitHub Copilot），AI 会自动读取 `run.py` 的结构化语法树（AST）和本 README 的命令行用例。你甚至无需离开 IDE，就能让 AI 顺畅完成从“策略编写 -> Pandas 向量化回测 -> Optuna 空间寻优 -> 挂载实盘”的全生命周期闭环开发。
+
+
 ## 核心特性
 
 - **全场景运行模式 (Flexible Execution Modes)**
@@ -356,30 +383,6 @@ QuantAda/
 ### 实时Optuna优化进度看板
 ![optuna-dashboard](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/optuna-dashboard.png?raw=true)  
 
-
-## 🚀 AI-Native: 基于契约的“零代码”全球券商接入 (Prompt-Driven Adapter Generation)
-
-在传统的量化交易开发中，接入一个新的券商 API 往往是最枯燥且最容易踩坑的“脏活”——你需要应对各种奇葩的底层字段、脆弱的异步回调以及混乱的状态机。
-
-**QuantAda 采用了一种面向 AI 时代的全新扩展范式：我们不手写 Adapter，我们只定义绝对严苛的架构契约，剩下的脏活全部外包给大语言模型（LLM）。**
-
-基于 QuantAda 独特的**无状态自底向上对账机制（Stateless Bottom-Up Reconciliation）**与极度纯粹的底层抽象，我们为开源社区提供了一份“架构师级别的 AI 指令法典” —— `PROMPT_TEMPLATE.md`。
-
-### 🛠️ 如何让 AI 为你写出极其健壮的适配器？
-
-只需喝杯咖啡的时间，你就可以将 QuantAda 接入全球任何一家提供 Python SDK 的券商（如嘉信理财、长桥、盈立等）：
-
-1. **获取法典**：打开项目根目录下的 `PROMPT_TEMPLATE.md`。
-2. **喂给算力**：将这份 Prompt 与目标券商的官方 API 文档（或 Github 上的 SDK 示例）打包，发送给 Claude 、Codex 或 GLM等。
-3. **开箱即用**：AI 会严格遵循 QuantAda 的接口签名，吐出一份名为 `[broker]_broker.py` 的代码。将其直接丢进 `live_trader/adapters/` 目录下，并在 `config.py` 中配置，即可瞬间完成实盘点火！
-
-### 🛡️ 为什么 AI 生成的代码在 QuantAda 中绝对安全？
-
-大模型写代码容易产生“幻觉”并把状态写脏，但在 QuantAda 的 `PROMPT_TEMPLATE.md` 的强约束下，AI 必须遵守以下架构红线，这些红线甚至比普通人类开发者更严谨：
-
-* **绝对无状态 (Absolute Statelessness)**：Prompt 强制禁止 AI 在适配器中维护任何本地现金或持仓变量。所有状态必须实时向物理柜台发起反向查询，从根本上杜绝内存账本污染。
-* **严格实体消歧义**：强约束 AI 在处理订单回调时，必须采用基础代码的精准匹配（如 `AAPL` == `AAPL`），严禁使用隐式的模糊包含（如 `'C' in 'CSCO'`），彻底封死错单炸弹。
-* **异常兜底协议**：强制要求 AI 处理盘口数据断流与 `ZeroDivisionError`，确保引擎的事件循环坚不可摧。
 
 ## 免责声明
 
