@@ -360,6 +360,10 @@ QuantAda/
 
 ## 样例截图
 
+### AI辅助Vibe Coding快速实现策略开发
+![vibe-coding](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/vibe_coding.png?raw=true)
+![vibe-coding](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/vibe_coding_2.png?raw=true)
+
 ### 终端执行回测
 ![backtest_mode_in_terminal](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/backtest_mode_in_terminal.png?raw=true)
 
