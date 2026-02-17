@@ -91,7 +91,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
         return self.broker.getcash()
 
     def getvalue(self):
-        """代理调用真实 Broker 的 getvalue"""
+        """代理调用真实 Broker 的 getvalue，并启用全局缓存拦截"""
+        if hasattr(self, 'current_portfolio_value'):
+            return self.current_portfolio_value
         return self.broker.getvalue()
 
     def get_current_price(self, data):
@@ -112,6 +114,10 @@ class BacktraderStrategyWrapper(bt.Strategy):
         self.expected_freed_cash = 0.0
         # 每过一个K线，重置虚拟消费账本
         self.virtual_spent_cash = 0.0
+
+        # 仅在回测中，缓存当前 Bar 的账户总价值
+        # 避免在调仓循环中重复对所有持仓资产进行市值核算的 O(N) 操作
+        self.current_portfolio_value = self.broker.getvalue()
 
         if self.actual_start_date is None:
             self.actual_start_date = self.datas[0].datetime.datetime(0)
@@ -184,7 +190,7 @@ class BacktraderStrategyWrapper(bt.Strategy):
 
         # 2. 获取账户总价值 (现金 + 持仓市值)
         # self.broker.getvalue() 返回的是当前回测时刻的总资产
-        portfolio_value = self.broker.getvalue()
+        portfolio_value = getattr(self, 'current_portfolio_value', self.broker.getvalue())
 
         # 3. 计算目标市值和目标股数
         target_value = portfolio_value * target

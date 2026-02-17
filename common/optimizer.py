@@ -534,57 +534,85 @@ class OptimizationJob:
             bt_instance.run()
 
             # =========================================================
-            # Mix Score 计算核心
+            # 最终生产级 Mix Score (红队审计通过：防御性+梯度诱导)
             # =========================================================
             if self.args.metric == 'mix_score':
-                # 直接从 strategy 实例中获取分析器，不依赖 get_custom_metric
-                # 这样可以获取交易次数等丰富信息
+                # 0. 稳定性首检：如果回测逻辑都没跑通，直接判定
+                if not getattr(bt_instance, 'results', None) or len(bt_instance.results) == 0:
+                    return -100.0
+
                 strat = bt_instance.results[0]
 
-                # 1. 获取核心数据
-                # Calmar
-                calmar = bt_instance.get_custom_metric('calmar')  # 复用现成逻辑
-                if calmar == -999.0 or calmar is None: calmar = 0.0
+                # 1. 基础指标安全提取
+                total_return_pct = (bt_instance.get_custom_metric('return') or 0.0) * 100.0
+                try:
+                    sharpe = float(bt_instance.get_custom_metric('sharpe') or 0.0)
+                    sharpe = 0.0 if (math.isinf(sharpe) or math.isnan(sharpe)) else sharpe
+                except (TypeError, ValueError):
+                    sharpe = 0.0
 
-                # Sharpe
-                sharpe = bt_instance.get_custom_metric('sharpe') or 0.0  # 复用现成逻辑
-                if sharpe is None: sharpe = 0.0
+                # 2. Analyzer 安全提取
+                try:
+                    ta_obj = strat.analyzers.getbyname('tradeanalyzer')
+                    ta = ta_obj.get_analysis() if ta_obj else {}
+                    total_trades = ta.get('total', {}).get('total', 0)
 
-                # Total Return
-                total_return = bt_instance.get_custom_metric('return') or 0.0 # 复用现成逻辑
+                    dd_obj = strat.analyzers.getbyname('drawdown')
+                    mdd = dd_obj.get_analysis().get('max', {}).get('drawdown', 100.0) if dd_obj else 100.0
+                except:
+                    total_trades = 0
+                    mdd = 100.0
 
-                # Trades Count (必须直接读 Analyzer)
-                trade_analyzer = strat.analyzers.getbyname('tradeanalyzer')
-                trade_analysis = trade_analyzer.get_analysis()
-                total_trades = trade_analysis.get('total', {}).get('total', 0)
+                # 3. 绝对日历时间校准
+                try:
+                    # 优先从策略的第一条数据提取时间差
+                    if len(strat.data) > 0:
+                        # Backtrader 中 datetime.datetime(0) 获取当前时间
+                        # -len+1 获取第一条时间
+                        end_dt = strat.data.datetime.datetime(0)
+                        start_dt = strat.data.datetime.datetime(-len(strat.data) + 1)
+                        days_diff = (end_dt - start_dt).days
+                        effective_years = max(days_diff / 365.25, 0.1)
+                    else:
+                        effective_years = 1.0
+                except:
+                    # 容错：从配置中估算
+                    effective_years = 1.0
 
-                # 2. 熔断/惩罚机制 (Sanity Check)
-                # 交易次数过少的惩罚 (Penalty)
-                # 只有这个是硬伤，需要重罚，因为样本太少没有统计意义
+                    # 死亡红线：平均每年至少交易 12 次 (每月 1 次)
+                min_req_trades = int(12 * effective_years)
+
+                # --- 第一道防线：累加式惩罚 (为 TPE 提供逃生梯度) ---
                 penalty = 0.0
-                if total_trades < 10:
-                    penalty = -10.0
+                if total_trades < min_req_trades:
+                    penalty -= (min_req_trades - total_trades)  # 次数越少扣越多
 
-                # 保护逻辑：防止 infinite
-                if math.isinf(calmar): calmar = 0.0
-                if math.isinf(sharpe): sharpe = 0.0
+                if mdd > 25.0:
+                    penalty -= (mdd - 25.0) * 2.0  # 回撤每超 1% 扣 2 分
 
-                # =========================================================
-                # 最终建议公式 (Final Recommended Formula)
-                # =========================================================
-                # 1. Calmar (权重 2.0): 核心锚点。每 1 单位卡玛比贡献 2 分。
-                #    典型值 2.27 -> 4.54 分 (占比约 60%)
-                #
-                # 2. Return (权重 2.0): 收益基础。每 100% 收益贡献 2 分。
-                #    典型值 0.30 -> 0.60 分 (占比约 8%)
-                #
-                # 3. Sharpe (权重 1.5): 稳定性修正。每 1 单位年化夏普贡献 1.5 分。
-                #    典型值 1.30 -> 1.95 分 (占比约 27%)
-                #    * 移除了 /16，因为 sharpe 变量已经是年化值。
-                #    * 权重设为 1.5，强迫优化器重视净值曲线的平滑度，自然排斥高波动的 TopK=1。
-                raw_score = (calmar * 2.0) + (total_return * 2.0) + (sharpe * 1.5)
+                # 判定死刑：一旦触碰红线，分数必低于 -20.0
+                if penalty < 0:
+                    return -20.0 + penalty
 
-                metric_val = raw_score + penalty
+                # --- 第二道防线：反脆弱核心计分 ---
+                # 奖励上限：每年 120 次 (每月 10 次)，超过不再奖励，防刷单
+                max_rewarded = int(120 * effective_years)
+                capped_n = min(max(total_trades, 1), max_rewarded)
+
+                # A. 统计夏普 (log 缩放)
+                stat_sharpe = max(sharpe, 0.0) * math.log10(capped_n)
+
+                # B. 惩罚性卡玛 (MDD 1.5 次方惩罚)
+                safe_mdd = max(mdd, 1.0)
+                if total_return_pct >= 0:
+                    # 赚钱时：非线性收益风险比
+                    p_calmar = total_return_pct / (safe_mdd ** 1.5)
+                else:
+                    # 亏损时：回撤越大，分数越负
+                    p_calmar = total_return_pct * math.sqrt(safe_mdd)
+
+                metric_val = stat_sharpe + p_calmar
+                return metric_val
 
             # =========================================================
             # 传统模式 (单独指定 calmar, sharpe 等)

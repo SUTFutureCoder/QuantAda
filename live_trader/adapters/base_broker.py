@@ -442,10 +442,6 @@ class BaseLiveBroker(ABC):
 
             if proxy.is_completed():
                 self._pending_sells.discard(oid)
-                # 唤醒扳机，卖单成交释放资金后，立刻唤醒被挂起的买单
-                if not self._pending_sells and self._deferred_orders:
-                    print(f"[Broker] 卖单 {oid} 已成交，触发买单队列...")
-                    self.process_deferred_orders()
 
             elif proxy.is_canceled() or proxy.is_rejected():
                 self._pending_sells.discard(oid)

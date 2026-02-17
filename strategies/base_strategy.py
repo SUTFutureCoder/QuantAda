@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from types import SimpleNamespace
 
+import pandas as pd
+
 import config
 
 
@@ -107,6 +109,70 @@ class BaseStrategy(ABC):
         """
         if trade.is_closed():
             self.log(f'OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}')
+
+    def register_indicator(self, data_name: str, indicator_name: str, series: pd.Series):
+        """
+        [框架层 API] 注册策略的 Pandas Series 指标，自动为其生成回测极速缓存。
+        子策略只需在计算出指标后调用此方法即可。
+        """
+        # 懒加载初始化字典，防止破坏子类的 __init__
+        if not hasattr(self, '_indicator_registry'):
+            self._indicator_registry = {}
+            self._fast_dict_registry = {}
+
+        if data_name not in self._indicator_registry:
+            self._indicator_registry[data_name] = {}
+            self._fast_dict_registry[data_name] = {}
+
+        # 标准化时区，确保回测与实盘的时间戳格式绝对一致
+        if hasattr(series.index, 'tz') and series.index.tz is not None:
+            series.index = series.index.tz_localize(None)
+        else:
+            series.index = pd.to_datetime(series.index)
+
+        # 存入原生的 Pandas Series (供实盘 asof 使用)
+        self._indicator_registry[data_name][indicator_name] = series
+
+        # 仅回测模式下，将其转化为 O(1) 的字典缓存
+        if not getattr(self.broker, 'is_live', False):
+            idx = [dt.to_pydatetime() for dt in series.index]
+            self._fast_dict_registry[data_name][indicator_name] = dict(zip(idx, series.values))
+
+    def get_indicator(self, data, indicator_name: str, current_dt):
+        """
+        [框架层 API] 安全、极速地获取指标值。自动路由双轨制。
+        """
+        if not hasattr(self, '_indicator_registry'):
+            return None
+
+        data_name = data._name
+
+        # 防弹级多维度实盘嗅探
+        # 1. 尝试读取 broker 的 is_live 标记
+        # 2. 鸭子类型检测：如果 data 没有 datetime 属性，那它 100% 是实盘的 DataFeedProxy
+        is_live_mode = getattr(self.broker, 'is_live', False) or not hasattr(data, 'datetime')
+
+        # --- 分支 A：实盘模式 (Live) ---
+        if is_live_mode:
+            series = self._indicator_registry.get(data_name, {}).get(indicator_name)
+            if series is not None:
+                # 原汁原味的 asof 保障毫秒级错位容错率
+                return series.asof(current_dt)
+            return None
+
+        # --- 分支 B：回测极速模式 (Backtest) ---
+        else:
+            # 只有在确认为原生的 Backtrader DataFeed 时，才调用其专属的 datetime 属性
+            data_dt = data.datetime.datetime(0)
+            if getattr(data_dt, 'tzinfo', None) is not None:
+                data_dt = data_dt.replace(tzinfo=None)
+
+            fast_dict = self._fast_dict_registry.get(data_name, {}).get(indicator_name)
+            if fast_dict is not None:
+                # O(1) 字典极速提取，100% 命中
+                return fast_dict.get(data_dt)
+
+            return None
 
     def get_strategy_isolated_capital(self):
         """
