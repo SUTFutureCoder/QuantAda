@@ -11,6 +11,7 @@ services:
       - TWS_USERID=${IB_USER_PAPER}
       - TWS_PASSWORD=${IB_PASS_PAPER}
       - TRADING_MODE=paper
+      - READ_ONLY_API=no
       - VNC_SERVER_PASSWORD=${VNC_PASS_PAPER}
     logging:
       driver: "json-file"
@@ -33,6 +34,7 @@ services:
       - TWS_USERID=${IB_USER_LIVE1}
       - TWS_PASSWORD=${IB_PASS_LIVE1}
       - TRADING_MODE=live
+      - READ_ONLY_API=no
       - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE1}
     logging:
       driver: "json-file"
@@ -53,6 +55,7 @@ services:
 #      - TWS_USERID=${IB_USER_LIVE2}
 #      - TWS_PASSWORD=${IB_PASS_LIVE2}
 #      - TRADING_MODE=live
+#      - READ_ONLY_API=no
 #      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE2}
 #    logging:
 #          driver: "json-file"
