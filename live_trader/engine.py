@@ -551,7 +551,12 @@ def on_order_status_callback(context, raw_order):
                 # 再次确认不是撤单导致的 size>0 (虽然撤单通常 size=0，但为了严谨)
                 if not order_proxy.is_canceled() and not order_proxy.is_rejected():
                     print("[Engine] Sell filled. Waiting for cash settlement (1s)...")
-                    time.sleep(1.0)  # 强制等待柜台资金刷新
+
+                    # 强制等待柜台资金刷新
+                    if hasattr(broker, 'ib') and broker.ib:
+                        broker.ib.sleep(1.0)  # 让出控制权，允许事件循环接收资金更新报文
+                    else:
+                        time.sleep(1.0)
 
                     if hasattr(broker, 'sync_balance'):
                         broker.sync_balance()

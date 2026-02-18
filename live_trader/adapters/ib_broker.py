@@ -172,17 +172,17 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         res = []
         try:
-            # reqAllOpenOrders() 向服务器强制请求，确保获取最新的所有挂单
-            open_orders = self.ib.reqAllOpenOrders()
-            for o in open_orders:
-                rem = o.orderStatus.remaining
-                if rem > 0:
-                    res.append({
-                        # 注意：盈透获取的 symbol 可能是 'AAPL'，策略里是 'AAPL.SMART'，等下会在策略层做智能前缀匹配
-                        'symbol': o.contract.symbol,
-                        'direction': 'BUY' if o.order.action == 'BUY' else 'SELL',
-                        'size': rem
-                    })
+            open_trades = self.ib.openTrades()
+            for t in open_trades:
+                if t.orderStatus:
+                    rem = t.orderStatus.remaining
+                    if rem > 0:
+                        res.append({
+                            # 从 Trade 对象中提取 contract 和 order 信息
+                            'symbol': t.contract.symbol,
+                            'direction': 'BUY' if t.order.action == 'BUY' else 'SELL',
+                            'size': rem
+                        })
         except Exception as e:
             print(f"[IBBroker] 获取在途订单失败: {e}")
         return res
