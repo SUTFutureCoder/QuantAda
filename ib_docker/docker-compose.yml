@@ -19,7 +19,7 @@ services:
         max-file: "3"
     networks:
       ib_net:
-	    # 为了安全，请使用 autossh 或 临时 ssh -N -L 5900:172.20.0.10:5900 root@IP 建立隧道，下同但注意本机端口唯一
+        # 为了安全，请使用 autossh 或 临时 ssh -N -L 5900:172.20.0.10:5900 root@IP 建立隧道，下同但注意本机端口唯一
         ipv4_address: 172.20.0.10  
 
 
@@ -44,24 +44,24 @@ services:
         ipv4_address: 172.20.0.11
 
   # === 实例 3：实盘 2 (Live 2) - 预留 ===
-  ib-live2:
-    image: ghcr.io/gnzsnz/ib-gateway:stable
-    container_name: ib_live2
-    restart: always
-    stop_grace_period: 1m
-    environment:
-      - TWS_USERID=${IB_USER_LIVE2}
-      - TWS_PASSWORD=${IB_PASS_LIVE2}
-      - TRADING_MODE=live
-      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE2}
-    logging:
-          driver: "json-file"
-          options:
-            max-size: "10m"
-            max-file: "3"
-    networks:
-      ib_net:
-        ipv4_address: 172.20.0.12
+#  ib-live2:
+#    image: ghcr.io/gnzsnz/ib-gateway:stable
+#    container_name: ib_live2
+#    restart: always
+#    stop_grace_period: 1m
+#    environment:
+#      - TWS_USERID=${IB_USER_LIVE2}
+#      - TWS_PASSWORD=${IB_PASS_LIVE2}
+#      - TRADING_MODE=live
+#      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE2}
+#    logging:
+#          driver: "json-file"
+#          options:
+#            max-size: "10m"
+#            max-file: "3"
+#    networks:
+#      ib_net:
+#        ipv4_address: 172.20.0.12
 
 networks:
   ib_net:
