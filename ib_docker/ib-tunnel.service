@@ -1,4 +1,16 @@
+# 请放置于：
 # /etc/systemd/system/ib-tunnel.service
+#
+# 执行前，先执行如下操作：
+# 1. 生成公钥 ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+# 2. 分发公钥 ssh-copy-id -i ~/.ssh/id_ed25519.pub root@目标IP
+# 3. 测试免密 ssh root@目标IP
+#
+# 启动服务：
+# systemctl start ib-tunnel
+#
+# 开机自启动：
+# systemctl enable ib-tunnel
 [Unit]
 Description=Autossh Tunnel for IBKR
 # 确保在网络连接建立后再启动
