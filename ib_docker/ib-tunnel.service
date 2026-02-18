@@ -1,0 +1,35 @@
+# /etc/systemd/system/ib-tunnel.service
+[Unit]
+Description=Autossh Tunnel for IBKR
+# 确保在网络连接建立后再启动
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# autossh 需要知道用哪个用户运行（确保该用户的 SSH Key 已授权）
+User=root
+
+# 关键环境变量：
+# AUTOSSH_GATETIME=0 表示如果第一次连接就失败，不要退出，而是继续尝试
+Environment="AUTOSSH_GATETIME=0"
+
+# 启动命令，请删除不需要的端口映射并填写IP地址：
+# 注意：在 systemd 中不需要使用 -f (后台运行)，systemd 本身就会管理进程
+# -M 20001: 监控端口
+# -N: 不执行远程命令
+# -L: 端口映射
+ExecStart=/usr/bin/autossh -M 20001 -N \
+    -L 4001:127.0.0.1:4001 \
+    -L 4002:127.0.0.1:4002 \
+    -L 5001:127.0.0.1:5001 \
+    -L 5901:127.0.0.1:5901 \
+    -L 5902:127.0.0.1:5902 \
+    -L 5903:127.0.0.1:5903 \
+    root@IP
+
+# 自动重启策略
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

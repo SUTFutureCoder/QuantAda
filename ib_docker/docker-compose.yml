@@ -1,17 +1,60 @@
 services:
-  ib-gateway:
+  # 实例 1：模拟盘
+  ib-paper:
     image: ghcr.io/gnzsnz/ib-gateway:stable
-    container_name: ib_gateway
+    container_name: ib_paper
     restart: always
-    # 读取同级目录下的 .env 文件
+    stop_grace_period: 1m
     environment:
-      - TWS_USERID=${IB_USER}
-      - TWS_PASSWORD=${IB_PASS}
-      - TRADING_MODE=${IB_MODE:-paper}   # paper=模拟盘, live=实盘
-      - VNC_SERVER_PASSWORD=${VNC_PASS:-123456} # VNC 密码
-      - TWOFA_TIMEOUT_ACTION=exit
-    # 必须暴露端口，否则宿主机无法连接
+      - TWS_USERID=${IB_USER_PAPER}
+      - TWS_PASSWORD=${IB_PASS_PAPER}
+      - TRADING_MODE=paper
+      - VNC_SERVER_PASSWORD=${VNC_PASS_PAPER}
     ports:
-      - "4002:4002"  # 模拟盘 SSL 端口
-      - "4001:4001"  # 实盘 SSL 端口
-      - "5900:5900"  # VNC 远程桌面
+      - "127.0.0.1:4002:4002"
+      - "127.0.0.1:5902:5900" # 为了安全，请使用 autossh 或 临时 ssh -L 5902:localhost:5902 root@IP 建立隧道
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 实例 2：实盘 1
+  ib-live1:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib_live1
+    restart: always
+    stop_grace_period: 1m
+    environment:
+      - TWS_USERID=${IB_USER_LIVE1}
+      - TWS_PASSWORD=${IB_PASS_LIVE1}
+      - TRADING_MODE=live
+      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE1}
+    ports:
+      - "127.0.0.1:4001:4001"
+      - "127.0.0.1:5901:5900"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+#  # 3. 实盘实例 2 (Live Trading 2)
+#  ib-gateway-live2:
+#    image: ghcr.io/gnzsnz/ib-gateway:stable
+#    container_name: ib_live2
+#    restart: always
+#    stop_grace_period: 1m
+#    environment:
+#      - TWS_USERID=${IB_USER_LIVE2}
+#      - TWS_PASSWORD=${IB_PASS_LIVE2}
+#      - TRADING_MODE=live
+#      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE2}
+#    ports:
+#      - "127.0.0.1:5001:4001"
+#      - "127.0.0.1:5903:5900"
+#    logging:
+#          driver: "json-file"
+#          options:
+#            max-size: "10m"
+#            max-file: "3"

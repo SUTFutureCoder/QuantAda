@@ -391,8 +391,20 @@ class BaseLiveBroker(ABC):
             # 1. 买单异步降级逻辑 (Buy Order Downgrade)
             # ==========================================
             if proxy.is_buy():
-                if proxy.is_completed() or proxy.is_canceled():
+                if proxy.is_completed():
                     self._active_buys.pop(oid, None)
+
+                elif proxy.is_canceled():
+                    # 撤单防御：精准回退被冻结的虚拟预扣资金（不触发降级重试）
+                    with self._ledger_lock:
+                        buy_info = self._active_buys.pop(oid, None)
+                        if buy_info:
+                            refund_amount = buy_info['shares'] * buy_info['price'] * self.safety_multiplier
+                            self._virtual_spent_cash = max(
+                                0.0,
+                                getattr(self, '_virtual_spent_cash', 0.0) - refund_amount
+                            )
+                            print(f"[Broker] ⚠️ 买单 {oid} 被撤销。已回退虚拟扣款: {refund_amount:.2f}")
 
                 elif proxy.is_rejected():
                     with self._ledger_lock:
@@ -619,6 +631,12 @@ class BaseLiveBroker(ABC):
         print("[Broker] Force reset state requested by Engine...")
         self._deferred_orders.clear()
         self._pending_sells.clear()
+
+        # 补丁：彻底清空买单追踪器和虚拟账本占资，防止幽灵占资残留
+        if hasattr(self, '_active_buys'):
+            self._active_buys.clear()
+        self._virtual_spent_cash = 0.0
+
         try:
             self.sync_balance()
             print(f"  >>> Balance re-synced: {self.get_cash():.2f}")
