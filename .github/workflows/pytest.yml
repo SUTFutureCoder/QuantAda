@@ -23,6 +23,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         # 仅安装测试所需的最少依赖，解耦对掘金/IBKR C++ SDK 的强依赖
+        pip install -r requirements.txt
         pip install pytest pandas mock ib_insync gm
 
     - name: Run Pytest Suite
