@@ -31,13 +31,19 @@ Environment="AUTOSSH_GATETIME=0"
 # -N: 不执行远程命令
 # -L: 端口映射
 ExecStart=/usr/bin/autossh -M 20001 -N \
-    -L 4001:127.0.0.1:4001 \
-    -L 4002:127.0.0.1:4002 \
-    -L 5001:127.0.0.1:5001 \
-    -L 5901:127.0.0.1:5901 \
-    -L 5902:127.0.0.1:5902 \
-    -L 5903:127.0.0.1:5903 \
-    root@IP
+    -o "StrictHostKeyChecking=no" \
+    -o "UserKnownHostsFile=/dev/null" \
+    -o "BatchMode=yes" \
+    -o "ExitOnForwardFailure=yes" \
+    -o "ServerAliveInterval=60" \
+    -o "ServerAliveCountMax=3" \
+    -L 4001:172.20.0.11:4001 \
+    -L 5901:172.20.0.11:5900 \
+    -L 4002:172.20.0.10:4002 \
+    -L 5902:172.20.0.10:5900 \
+    -L 5001:172.20.0.12:4001 \
+    -L 5903:172.20.0.12:5900 \
+    root@券商平台运行IP
 
 # 自动重启策略
 Restart=always

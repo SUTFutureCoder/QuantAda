@@ -1,5 +1,7 @@
+version: '3.8'
+
 services:
-  # 实例 1：模拟盘
+  # === 实例 1：模拟盘 (Paper) ===
   ib-paper:
     image: ghcr.io/gnzsnz/ib-gateway:stable
     container_name: ib_paper
@@ -10,16 +12,18 @@ services:
       - TWS_PASSWORD=${IB_PASS_PAPER}
       - TRADING_MODE=paper
       - VNC_SERVER_PASSWORD=${VNC_PASS_PAPER}
-    ports:
-      - "127.0.0.1:4002:4002"
-      - "127.0.0.1:5902:5900" # 为了安全，请使用 autossh 或 临时 ssh -L 5902:localhost:5902 root@IP 建立隧道
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      ib_net:
+	    # 为了安全，请使用 autossh 或 临时 ssh -N -L 5900:172.20.0.10:5900 root@IP 建立隧道，下同但注意本机端口唯一
+        ipv4_address: 172.20.0.10  
 
-  # 实例 2：实盘 1
+
+  # === 实例 2：实盘 1 (Live 1) ===
   ib-live1:
     image: ghcr.io/gnzsnz/ib-gateway:stable
     container_name: ib_live1
@@ -30,31 +34,38 @@ services:
       - TWS_PASSWORD=${IB_PASS_LIVE1}
       - TRADING_MODE=live
       - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE1}
-    ports:
-      - "127.0.0.1:4001:4001"
-      - "127.0.0.1:5901:5900"
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      ib_net:
+        ipv4_address: 172.20.0.11
 
-#  # 3. 实盘实例 2 (Live Trading 2)
-#  ib-gateway-live2:
-#    image: ghcr.io/gnzsnz/ib-gateway:stable
-#    container_name: ib_live2
-#    restart: always
-#    stop_grace_period: 1m
-#    environment:
-#      - TWS_USERID=${IB_USER_LIVE2}
-#      - TWS_PASSWORD=${IB_PASS_LIVE2}
-#      - TRADING_MODE=live
-#      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE2}
-#    ports:
-#      - "127.0.0.1:5001:4001"
-#      - "127.0.0.1:5903:5900"
-#    logging:
-#          driver: "json-file"
-#          options:
-#            max-size: "10m"
-#            max-file: "3"
+  # === 实例 3：实盘 2 (Live 2) - 预留 ===
+  ib-live2:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib_live2
+    restart: always
+    stop_grace_period: 1m
+    environment:
+      - TWS_USERID=${IB_USER_LIVE2}
+      - TWS_PASSWORD=${IB_PASS_LIVE2}
+      - TRADING_MODE=live
+      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE2}
+    logging:
+          driver: "json-file"
+          options:
+            max-size: "10m"
+            max-file: "3"
+    networks:
+      ib_net:
+        ipv4_address: 172.20.0.12
+
+networks:
+  ib_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
