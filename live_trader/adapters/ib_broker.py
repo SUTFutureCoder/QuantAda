@@ -571,7 +571,12 @@ class IBBrokerAdapter(BaseLiveBroker):
             target_symbols = symbols
 
         # 注册回调
-        def on_trade_update(trade):
+        async def on_trade_update(trade):
+            # 在这里拦截卖单，安全地异步等待 1 秒
+            # 这会让出控制权给 Event Loop，使其有时间处理 IB 推送过来的 AccountValue 更新
+            if trade.order.action == 'SELL' and trade.orderStatus.status == 'Filled':
+                await asyncio.sleep(1.0)
+
             on_order_status_callback(ctx, trade)
 
         ib.orderStatusEvent += on_trade_update

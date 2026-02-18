@@ -552,12 +552,6 @@ def on_order_status_callback(context, raw_order):
                 if not order_proxy.is_canceled() and not order_proxy.is_rejected():
                     print("[Engine] Sell filled. Waiting for cash settlement (1s)...")
 
-                    # 强制等待柜台资金刷新
-                    if hasattr(broker, 'ib') and broker.ib:
-                        broker.ib.sleep(1.0)  # 让出控制权，允许事件循环接收资金更新报文
-                    else:
-                        time.sleep(1.0)
-
                     if hasattr(broker, 'sync_balance'):
                         broker.sync_balance()
                         print(f"[Debug] Cash after sync: {broker.get_cash():.2f}")
