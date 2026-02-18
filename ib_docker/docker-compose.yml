@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # === 实例 1：模拟盘 (Paper) ===
   ib-paper:
-    image: ghcr.io/gnzsnz/ib-gateway:stable
+    build: .
     container_name: ib_paper
     restart: always
     stop_grace_period: 1m
@@ -20,12 +20,12 @@ services:
     networks:
       ib_net:
         # 为了安全，请使用 autossh 或 临时 ssh -N -L 5900:172.20.0.10:5900 root@IP 建立隧道，下同但注意本机端口唯一
-        ipv4_address: 172.20.0.10  
+        ipv4_address: 172.20.0.10
 
 
   # === 实例 2：实盘 1 (Live 1) ===
   ib-live1:
-    image: ghcr.io/gnzsnz/ib-gateway:stable
+    build: .
     container_name: ib_live1
     restart: always
     stop_grace_period: 1m
@@ -45,7 +45,7 @@ services:
 
   # === 实例 3：实盘 2 (Live 2) - 预留 ===
 #  ib-live2:
-#    image: ghcr.io/gnzsnz/ib-gateway:stable
+#    build: .
 #    container_name: ib_live2
 #    restart: always
 #    stop_grace_period: 1m
