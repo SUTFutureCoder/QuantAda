@@ -11,5 +11,5 @@ socat TCP-LISTEN:4004,fork,bind=0.0.0.0 TCP:127.0.0.1:4002 &
 echo "✅ Forwarding 0.0.0.0:4004 -> 127.0.0.1:4002 (Paper)"
 
 echo "🚀 [Socat Wrapper] Starting IB Gateway..."
-# 执行原镜像的启动命令 (通常是 /run.sh)
-exec /run.sh
+# 执行原镜像的启动命令
+exec /home/ibgateway/scripts/run.sh
