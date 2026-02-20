@@ -1,4 +1,6 @@
 import config
+from alarms.manager import AlarmManager
+
 
 class PortfolioRebalancer:
     """
@@ -59,41 +61,61 @@ class PortfolioRebalancer:
                     plan['increase'].append((data, target_value))
 
         if config.PRINT_PLAN:
-            PortfolioRebalancer._log_plan(plan, current_positions, target_symbols, target_value, rebalance_threshold)
+            # 终端打印
+            plan_md_str = PortfolioRebalancer._log_plan(plan, current_positions, target_symbols, target_value, rebalance_threshold)
+            # 推送消息
+            AlarmManager().push_text(plan_md_str)
 
         return plan
 
     @staticmethod
-    def _log_plan(plan, current_positions, target_symbols, target_value, rebalance_threshold):
-        """格式化输出调仓摘要，受 config.LOG 控制"""
-        if not getattr(config, 'LOG', True):
-            return
+    def _log_plan(plan, current_positions, target_symbols, target_value, rebalance_threshold) -> str:
+        """构建 Markdown 格式的调仓摘要，受 config.LOG 控制打印，并返回该字符串"""
 
-        # 辅助工具：提取名称并格式化数值
+        # 辅助工具：提取名称并格式化数值，转为易读的字符串拼接
         _n = lambda x: x._name if hasattr(x, '_name') else str(x)
-        _fmt_list = lambda items: [_n(i) for i in items]
-        _fmt_pair = lambda items: [f"{_n(i[0])}→{i[1]:,.0f}" for i in items]
+        _fmt_list = lambda items: ", ".join([_n(i) for i in items]) if items else "无"
+        _fmt_pair = lambda items: ", ".join([f"{_n(i[0])} → {i[1]:,.0f}" for i in items])
+        _curr_pos = ", ".join(
+            [f"{_n(k)}: {v:,.0f}" for k, v in current_positions.items()]) if current_positions else "空仓"
 
-        print(f"\n{'=' * 20} 调仓计划生成 {'=' * 20}")
-        print(f"目标市值/股: {target_value:,.2f} | 偏离阈值: {rebalance_threshold:.1%}")
-        print(f"当前持仓: {[f'{_n(k)}:{v:,.0f}' for k, v in current_positions.items()]}")
-        print(f"目标标的: {_fmt_list(target_symbols)}")
-        print(f"执行清单: ")
+        # 拼接 Markdown 字符串数组
+        md_lines = [
+            "### 🔄 调仓计划生成",
+            f"- **目标市值/股**: `{target_value:,.2f}`",
+            f"- **偏离阈值**: `{rebalance_threshold:.1%}`",
+            f"- **当前持仓**: `{_curr_pos}`",
+            f"- **目标标的**: `{_fmt_list(target_symbols)}`",
+            "",
+            "#### 📝 执行清单"
+        ]
 
+        has_action = False
         if plan['sell_clear']:
-            print(f"  - [清仓]: {_fmt_list(plan['sell_clear'])}")
+            md_lines.append(f"- 🔴 **[清仓]**: {_fmt_list(plan['sell_clear'])}")
+            has_action = True
 
         if plan['reduce']:
-            print(f"  - [减仓]: {_fmt_pair(plan['reduce'])}")
+            md_lines.append(f"- 🟡 **[减仓]**: {_fmt_pair(plan['reduce'])}")
+            has_action = True
 
         if plan['increase']:
-            print(f"  - [加仓]: {_fmt_pair(plan['increase'])}")
+            md_lines.append(f"- 🟢 **[加仓]**: {_fmt_pair(plan['increase'])}")
+            has_action = True
 
-        if not any([plan['sell_clear'], plan['reduce'], plan['increase']]):
-            print("  - 无需调整 (未触及偏离阈值)")
+        if not has_action:
+            md_lines.append("- ✨ **无需调整** (未触及偏离阈值)")
 
-        print(f"{'=' * 54}\n")
+        # 将数组合并为一个完整的 Markdown 字符串
+        md_str = "\n".join(md_lines)
 
+        # 受 config.LOG 控制是否在终端打印
+        if getattr(config, 'LOG', True):
+            print(f"\n{'=' * 20} 调仓计划生成 {'=' * 20}")
+            print(md_str)
+            print(f"{'=' * 54}\n")
+
+        return md_str
 
 class OrderExecutor:
     """
