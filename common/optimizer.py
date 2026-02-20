@@ -67,7 +67,9 @@ try:
 except ImportError:
     HAS_DASHBOARD = False
 
-_METRIC_FUNC_CACHE = None
+# 以 metric_arg 为键缓存函数指针，避免多指标串用同一个函数。
+# key 格式: "{default_pkg}:{metric_arg}"
+_METRIC_FUNC_CACHE = {}
 
 
 def get_metric_function(metric_arg, default_pkg="metrics"):
@@ -83,8 +85,12 @@ def get_metric_function(metric_arg, default_pkg="metrics"):
        -> 降级加载 default_pkg (默认 metrics) 下的 turbo_assault.py
     """
     global _METRIC_FUNC_CACHE
-    if _METRIC_FUNC_CACHE is not None:
-        return _METRIC_FUNC_CACHE
+
+    metric_arg = (metric_arg or "").strip()
+    cache_key = f"{default_pkg}:{metric_arg}"
+
+    if cache_key in _METRIC_FUNC_CACHE:
+        return _METRIC_FUNC_CACHE[cache_key]
 
     try:
         # 1. 路径解析解析 (路由分离)
@@ -103,13 +109,14 @@ def get_metric_function(metric_arg, default_pkg="metrics"):
 
         # 3. 提取执行函数 (支持同名函数或 evaluate 语法糖)
         if hasattr(module, func_name):
-            _METRIC_FUNC_CACHE = getattr(module, func_name)
+            metric_func = getattr(module, func_name)
         elif hasattr(module, "evaluate"):
-            _METRIC_FUNC_CACHE = getattr(module, "evaluate")
+            metric_func = getattr(module, "evaluate")
         else:
             raise AttributeError(f"模块 '{module_path}' 已加载，但找不到名为 '{func_name}' 或 'evaluate' 的打分函数。")
 
-        return _METRIC_FUNC_CACHE
+        _METRIC_FUNC_CACHE[cache_key] = metric_func
+        return metric_func
 
     except ModuleNotFoundError as e:
         raise ValueError(f"[致命错误] 指标寻址失败，请放入metrics包中或pkg.fun格式调用私有指标。传入参数: '{metric_arg}'。Python底层报错: {e}")
@@ -708,6 +715,93 @@ class OptimizationJob:
 
         return sliced
 
+    def _infer_recent_3y_window(self):
+        """
+        使用与 CLI 缺省 start_date 一致的逻辑，推断最近三年区间。
+        """
+        end_str = self.args.end_date or datetime.datetime.now().strftime('%Y%m%d')
+        end_dt = pd.to_datetime(str(end_str))
+        start_dt = end_dt - pd.DateOffset(years=3)
+        return start_dt.strftime('%Y%m%d'), end_dt.strftime('%Y%m%d')
+
+    def _fetch_datas_for_window(self, start_date: str, end_date: str):
+        """
+        按指定窗口重新抓取数据，确保最终验证窗口独立于训练/测试切分范围。
+        """
+        datas = {}
+        for symbol in self.target_symbols:
+            df = self.data_manager.get_data(
+                symbol,
+                start_date=start_date,
+                end_date=end_date,
+                specified_sources=self.args.data_source,
+                timeframe=self.args.timeframe,
+                compression=self.args.compression,
+                refresh=self.args.refresh
+            )
+            if df is not None and not df.empty:
+                datas[symbol] = df
+            else:
+                print(f"[Optimizer] Warning: No recent 3Y data for {symbol}, skipping.")
+        return datas
+
+    def _run_recent_3y_backtest(self, final_params):
+        """
+        优化结束后自动执行最近三年回测，并返回核心指标用于最终汇总。
+        """
+        recent_start, recent_end = self._infer_recent_3y_window()
+
+        print("-" * 60)
+        print(f"Running Auto Backtest on Recent 3 Years: {recent_start} to {recent_end}")
+        print("-" * 60)
+
+        recent_datas = self._fetch_datas_for_window(recent_start, recent_end)
+        if not recent_datas:
+            print("[Optimizer] Warning: Recent 3Y backtest skipped (no valid data).")
+            return None
+
+        try:
+            bt_recent = Backtester(
+                datas=recent_datas,
+                strategy_class=self.strategy_class,
+                params=final_params,
+                start_date=recent_start,
+                end_date=recent_end,
+                cash=self.args.cash,
+                commission=self.args.commission,
+                slippage=self.args.slippage,
+                risk_control_classes=self.risk_control_classes,
+                risk_control_params=self.risk_params,
+                timeframe=self.args.timeframe,
+                compression=self.args.compression,
+                enable_plot=False,
+                verbose=False,
+            )
+            bt_recent.run()
+            bt_recent.display_results()
+
+            perf = bt_recent.get_performance_metrics()
+            if not perf:
+                print("[Optimizer] Warning: Recent 3Y backtest finished but metrics are unavailable.")
+                return None
+        except Exception as e:
+            print(f"[Optimizer] Warning: Recent 3Y backtest failed: {e}")
+            return None
+
+        return {
+            "start_date": recent_start,
+            "end_date": recent_end,
+            "total_return": perf.get("total_return"),
+            "annual_return": perf.get("annual_return"),
+            "sharpe_ratio": perf.get("sharpe_ratio"),
+            "max_drawdown": perf.get("max_drawdown"),
+            "calmar_ratio": perf.get("calmar_ratio"),
+            "total_trades": perf.get("total_trades"),
+            "win_rate": perf.get("win_rate"),
+            "profit_factor": perf.get("profit_factor"),
+            "final_portfolio": perf.get("final_portfolio"),
+        }
+
     def run(self):
         # 1. 配置存储 (支持多核)
         storage = None
@@ -871,11 +965,39 @@ class OptimizationJob:
         else:
             print("\n(No Test Set Configured)")
 
+        recent_3y_metrics = self._run_recent_3y_backtest(final_params)
+
+        def _fmt_pct(v):
+            if v is None:
+                return "N/A"
+            return f"{v:.2%}"
+
+        def _fmt_float(v):
+            if v is None:
+                return "N/A"
+            return f"{v:.2f}"
+
+        def _fmt_rate(v):
+            if v is None:
+                return "N/A"
+            # 兼容 [0,1] 或 [0,100] 两种胜率表示
+            rate = float(v) * 100.0 if 0 <= float(v) <= 1 else float(v)
+            return f"{rate:.2f}%"
+
         print("\n" + "=" * 60)
         print(" SUMMARY OF BEST CONFIGURATION")
         print("=" * 60)
         print(f" Strategy: {self.args.strategy}")
         print(f" Params:   {final_params}")
+        if recent_3y_metrics:
+            print(f" Recent3Y: {recent_3y_metrics.get('start_date')} -> {recent_3y_metrics.get('end_date')}")
+            print(f" Annual:   {_fmt_pct(recent_3y_metrics.get('annual_return'))}")
+            print(f" Drawdown: {_fmt_pct(recent_3y_metrics.get('max_drawdown'))}")
+            print(f" Calmar:   {_fmt_float(recent_3y_metrics.get('calmar_ratio'))}")
+            print(f" Sharpe:   {_fmt_float(recent_3y_metrics.get('sharpe_ratio'))}")
+            print(f" Trades:   {recent_3y_metrics.get('total_trades', 'N/A')}")
+            print(f" WinRate:  {_fmt_rate(recent_3y_metrics.get('win_rate'))}")
+            print(f" PF:       {_fmt_float(recent_3y_metrics.get('profit_factor'))}")
         print("=" * 60 + "\n")
 
         return {
@@ -883,5 +1005,6 @@ class OptimizationJob:
             "best_params": best_params,
             "trials_completed": len(study.trials),
             "log_file": log_file,
+            "recent_backtest": recent_3y_metrics,
         }
 

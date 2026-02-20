@@ -662,64 +662,77 @@ class Backtester:
 
         return 0.0
 
-    def display_results(self):
+    def _to_naive_datetime(self, dt_obj):
+        if dt_obj is None:
+            return None
+        if getattr(dt_obj, "tzinfo", None):
+            return dt_obj.replace(tzinfo=None)
+        return dt_obj
+
+    def get_performance_metrics(self):
         """
-        计算并展示详细的回测性能指标和图表。
+        提取与终端回测报告一致的核心性能指标，供 Optimizer/外部流程复用。
         """
         if not self.results:
-            print("Please run the backtest first.")
-            return
+            return None
 
-        # 从回测结果中提取第一个策略（我们只有一个）
         strat = self.results[0]
-
-        # 提取分析器数据
-        pyfolio_analyzer = strat.analyzers.getbyname('pyfolio')
-        returns, positions, transactions, gross_leverage = pyfolio_analyzer.get_pf_items()
-
-        returns_analyzer = strat.analyzers.getbyname('returns')
         drawdown_analyzer = strat.analyzers.getbyname('drawdown')
         sharpe_analyzer = strat.analyzers.getbyname('sharpe')
         trade_analyzer = strat.analyzers.getbyname('tradeanalyzer')
 
-        # --- 1. 计算核心指标 ---
-        # 1. 从策略实例中获取准确的开始日期
-        # 如果策略没有运行（没有交易和收益），则start_date可能不存在
+        # 优先使用策略真实启动时间，避免 warm-up 污染统计区间
+        start_date = None
         if hasattr(strat, 'actual_start_date') and strat.actual_start_date is not None:
-            start_date = strat.actual_start_date
+            start_date = self._to_naive_datetime(strat.actual_start_date)
+
+        start_candidates = []
+        end_candidates = []
+        for data in getattr(self.cerebro, 'datas', []):
+            if len(data) <= 0:
+                continue
+            try:
+                start_candidates.append(self._to_naive_datetime(data.datetime.datetime(-len(data) + 1)))
+                end_candidates.append(self._to_naive_datetime(data.datetime.datetime(0)))
+            except Exception:
+                continue
+
+        if start_date is None:
+            if start_candidates:
+                start_date = min(start_candidates)
+            elif self.start_date:
+                start_date = pd.to_datetime(self.start_date).to_pydatetime()
+
+        if end_candidates:
+            end_date = max(end_candidates)
+        elif self.end_date:
+            end_date = pd.to_datetime(self.end_date).to_pydatetime()
         else:
-            # 回退方案：在没有实际开始日期的情况下使用returns的起始
-            if returns.empty:
-                print("Backtest generated no returns. Cannot calculate performance.")
-                return
-            start_date = returns.index[0].to_pydatetime().replace(tzinfo=None)
+            end_date = datetime.datetime.now()
 
-        end_date = returns.index[-1].to_pydatetime().replace(tzinfo=None)
+        if start_date is None or end_date is None:
+            return None
 
-        # 2. 使用这个准确的日期来计算年化收益率
-        total_return = (self.cerebro.broker.getvalue() / self.cash) - 1
-        time_period_years = (end_date - start_date).days / 365.25
+        final_value = self.cerebro.broker.getvalue()
+        total_return = (final_value / self.cash) - 1
+        time_period_years = max((end_date - start_date).days / 365.25, 0.0)
+        annual_return = ((1 + total_return) ** (1 / time_period_years) - 1) if time_period_years > 0 else 0.0
 
-        if time_period_years > 0:
-            annual_return = ((1 + total_return) ** (1 / time_period_years)) - 1
-        else:
-            annual_return = 0.0
-
-        # 夏普比率 (注意: 内置的SharpeRatio分析器也可能受时间跨度影响，但通常偏差不大)
         sharpe_ratio = sharpe_analyzer.get_analysis().get('sharperatio', 0.0)
-        if sharpe_ratio is None: sharpe_ratio = 0.0
+        if sharpe_ratio is None or (isinstance(sharpe_ratio, float) and math.isnan(sharpe_ratio)):
+            sharpe_ratio = 0.0
 
-        # 最大回撤
-        max_drawdown = drawdown_analyzer.get_analysis().max.drawdown / 100  # 转换为小数
+        dd_analysis = drawdown_analyzer.get_analysis()
+        try:
+            max_drawdown = dd_analysis.max.drawdown / 100.0
+        except Exception:
+            max_drawdown = dd_analysis.get('max', {}).get('drawdown', 0.0) / 100.0
 
-        # 卡玛比率 (年化收益 / 最大回撤)
-        calmar_ratio = (annual_return * 100) / (abs(max_drawdown) * 100) if max_drawdown != 0 else 0.0
+        calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0.0
 
-        # 交易统计
         trade_analysis = trade_analyzer.get_analysis()
         total_trades = trade_analysis.get('total', {}).get('total', 0)
 
-        # 安全地获取盈利交易的统计数据
         if 'won' in trade_analysis and trade_analysis.won.total > 0:
             win_trades = trade_analysis.won.total
             total_win_pnl = trade_analysis.won.pnl.total
@@ -729,22 +742,42 @@ class Backtester:
             total_win_pnl = 0.0
             avg_win_pnl = 0.0
 
-        # 安全地获取亏损交易的统计数据
         if 'lost' in trade_analysis and trade_analysis.lost.total > 0:
-            loss_trades = trade_analysis.lost.total
             total_loss_pnl = trade_analysis.lost.pnl.total
             avg_loss_pnl = trade_analysis.lost.pnl.average
         else:
-            loss_trades = 0
             total_loss_pnl = 0.0
             avg_loss_pnl = 0.0
 
-        # 在确保数据安全后进行计算
         win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0.0
         profit_factor = total_win_pnl / abs(total_loss_pnl) if total_loss_pnl != 0 else float('inf')
         pnl_ratio = avg_win_pnl / abs(avg_loss_pnl) if avg_loss_pnl != 0 else float('inf')
 
-        # --- 2. 打印性能报告 ---
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "initial_portfolio": self.cash,
+            "final_portfolio": final_value,
+            "total_return": total_return,
+            "annual_return": annual_return,
+            "sharpe_ratio": sharpe_ratio,
+            "max_drawdown": max_drawdown,
+            "calmar_ratio": calmar_ratio,
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "pnl_ratio": pnl_ratio,
+        }
+
+    def display_results(self):
+        """
+        计算并展示详细的回测性能指标和图表。
+        """
+        metrics = self.get_performance_metrics()
+        if not metrics:
+            print("Backtest generated no valid performance metrics.")
+            return
+
         def safe_fmt(val, fmt=".2f"):
             if val is None or (isinstance(val, float) and math.isnan(val)):
                 return "N/A"
@@ -753,18 +786,18 @@ class Backtester:
         print("\n" + "=" * 50)
         print("            Backtest Performance Metrics")
         print("=" * 50)
-        print(f" Time Frame:           {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-        print(f" Initial Portfolio:    {self.cash:,.2f}")
-        print(f" Final Portfolio:      {self.cerebro.broker.getvalue():,.2f}")
+        print(f" Time Frame:           {metrics['start_date'].strftime('%Y-%m-%d')} to {metrics['end_date'].strftime('%Y-%m-%d')}")
+        print(f" Initial Portfolio:    {metrics['initial_portfolio']:,.2f}")
+        print(f" Final Portfolio:      {metrics['final_portfolio']:,.2f}")
         print("-" * 50)
-        print(f" Total Return:         {safe_fmt(total_return, '.2%')}")
-        print(f" Annualized Return:    {safe_fmt(annual_return, '.2%')}")
-        print(f" Sharpe Ratio:         {safe_fmt(sharpe_ratio, '.2f')}")
-        print(f" Max Drawdown:         {safe_fmt(max_drawdown, '.2%')}")
-        print(f" Calmar Ratio:         {safe_fmt(calmar_ratio, '.2f')}")
+        print(f" Total Return:         {safe_fmt(metrics['total_return'], '.2%')}")
+        print(f" Annualized Return:    {safe_fmt(metrics['annual_return'], '.2%')}")
+        print(f" Sharpe Ratio:         {safe_fmt(metrics['sharpe_ratio'], '.2f')}")
+        print(f" Max Drawdown:         {safe_fmt(metrics['max_drawdown'], '.2%')}")
+        print(f" Calmar Ratio:         {safe_fmt(metrics['calmar_ratio'], '.2f')}")
         print("-" * 50)
-        print(f" Total Trades:         {total_trades}")
-        print(f" Win Rate:             {safe_fmt(win_rate, '.2f')}%")
-        print(f" Profit Factor:        {safe_fmt(profit_factor, '.2f')}")
-        print(f" Avg. Win / Avg. Loss: {safe_fmt(pnl_ratio, '.2f')}")
+        print(f" Total Trades:         {metrics['total_trades']}")
+        print(f" Win Rate:             {safe_fmt(metrics['win_rate'], '.2f')}%")
+        print(f" Profit Factor:        {safe_fmt(metrics['profit_factor'], '.2f')}")
+        print(f" Avg. Win / Avg. Loss: {safe_fmt(metrics['pnl_ratio'], '.2f')}")
         print("=" * 50 + "\n")

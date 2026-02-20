@@ -254,9 +254,12 @@ if __name__ == '__main__':
         print(f"\n>>> Mode: PARAMETER OPTIMIZATION (Target: {args.metric}) <<<")
 
         # 1. 解析传入的 metric (支持单个或逗号分隔的多个)
-        metrics_list = [m.strip() for m in args.metric.split(',')]
+        # 自动过滤空字符串，避免出现如 "sharpe,,calmar," 的脏输入
+        metrics_list = [m.strip() for m in args.metric.split(',') if m.strip()]
+        if not metrics_list:
+            print("Error: --metric contains no valid metric after filtering empty entries.")
+            sys.exit(1)
 
-        # --- 变更点 2: 显式关闭日志 (从 optimizer.py 移至此处) ---
         config.LOG = False
         logging.getLogger("optuna").setLevel(logging.INFO)
 
@@ -307,21 +310,56 @@ if __name__ == '__main__':
                 continue
 
         if final_reports:
-            print(">>> 多指标训练结果汇总(MULTI-METRIC BANDIT SUMMARY) <<<")
+            print(">>> 多臂赌博机训练结果汇总(MULTI-METRIC BANDIT SUMMARY) <<<")
 
-            header = f"| {'指标 (Metric)':<18} | {'最高得分 (Score)':<15} | {'耗时 (h)':<8} | {'关联日志 (Log)'}"
-            print("-" * 90)
+            def fmt_pct(v):
+                return f"{v:.2%}" if isinstance(v, (int, float)) else "N/A"
+
+            def fmt_num(v):
+                return f"{v:.2f}" if isinstance(v, (int, float)) else "N/A"
+
+            def fmt_rate(v):
+                if not isinstance(v, (int, float)):
+                    return "N/A"
+                # 兼容 [0,1] 或 [0,100] 两种胜率表示
+                rate = v * 100.0 if 0 <= v <= 1 else v
+                return f"{rate:.2f}%"
+
+            def fmt_int(v):
+                if isinstance(v, (int, float)):
+                    return str(int(v))
+                return "N/A"
+
+            header = (
+                f"| {'指标 (Metric)':<18} | {'最高得分':<10} | {'年化收益':<10} | {'回撤':<10} | "
+                f"{'Calmar':<8} | {'Sharpe':<8} | {'交易数':<8} | {'胜率':<10} | {'PF':<8} | "
+                f"{'耗时(h)':<8} | {'最优参数 (Params)':<22} | {'关联日志 (Log)'}"
+            )
+            print("-" * 205)
             print(header)
-            print("-" * 90)
+            print("-" * 205)
 
             for r in final_reports:
+                recent = r.get('recent_backtest') or {}
                 m_str = str(r.get('metric_name', 'Unknown'))[:18]
-                s_str = str(r.get('best_score', 'N/A'))[:15]
+                s_str = str(r.get('best_score', 'N/A'))[:10]
+                ret_str = fmt_pct(recent.get('annual_return'))
+                dd_str = fmt_pct(recent.get('max_drawdown'))
+                calmar_str = fmt_num(recent.get('calmar_ratio'))
+                sharpe_str = fmt_num(recent.get('sharpe_ratio'))
+                trades_str = fmt_int(recent.get('total_trades'))
+                winrate_str = fmt_rate(recent.get('win_rate'))
+                pf_str = fmt_num(recent.get('profit_factor'))
                 t_str = f"{r.get('elapsed_hours', 0):.1f}"
+                b_str = str(r.get('best_params', 'N/A'))
                 db_str = str(r.get('log_file', 'N/A'))
-                print(f"| {m_str:<18} | {s_str:<15} | {t_str:<8} | {db_str}")
+                print(
+                    f"| {m_str:<18} | {s_str:<10} | {ret_str:<10} | {dd_str:<10} | "
+                    f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
+                    f"{t_str:<8} | {b_str:<22} | {db_str}"
+                )
 
-            print("-" * 90 + "\n")
+            print("-" * 205 + "\n")
 
             print("请在 Dashboard 中回放并排查孤点: ")
             for r in final_reports:
