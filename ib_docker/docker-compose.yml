@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # === 实例 1：模拟盘 (Paper) ===
   ib-paper:
-    build: .
+    image: ghcr.io/gnzsnz/ib-gateway:stable
     container_name: ib_paper
     restart: always
     stop_grace_period: 1m
@@ -26,7 +26,7 @@ services:
 
   # === 实例 2：实盘 1 (Live 1) ===
   ib-live1:
-    build: .
+    image: ghcr.io/gnzsnz/ib-gateway:stable
     container_name: ib_live1
     restart: always
     stop_grace_period: 1m
@@ -47,7 +47,7 @@ services:
 
   # === 实例 3：实盘 2 (Live 2) - 预留 ===
 #  ib-live2:
-#    build: .
+#    image: ghcr.io/gnzsnz/ib-gateway:stable
 #    container_name: ib_live2
 #    restart: always
 #    stop_grace_period: 1m
