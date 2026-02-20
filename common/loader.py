@@ -47,7 +47,17 @@ def get_class_from_name(name_string: str, search_paths: list):
             # 假设用户提供了模块和类的全名
             module_path, class_name = name_string.rsplit('.', 1)
             module = importlib.import_module(module_path)
-            return getattr(module, class_name)
+
+            # 获取目标对象
+            obj = getattr(module, class_name)
+
+            # 防御 Python 子模块缓存陷阱
+            # 如果拿到的是个 module 而不是 class，强制抛错进入 Case 2 重新解析
+            import inspect
+            if inspect.ismodule(obj):
+                raise ValueError(f"Attribute '{class_name}' resolves to a module, expecting a class.")
+
+            return obj
         except (ImportError, AttributeError, ValueError) as e_class:
             # 导入失败，尝试 Case 2
             # Case 2: 'my_package.my_module_file' (snake_case)

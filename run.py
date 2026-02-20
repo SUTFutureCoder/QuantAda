@@ -153,9 +153,8 @@ if __name__ == '__main__':
     parser.add_argument('--opt_params', type=str, default=None, help="[优化模式] 优化参数空间定义 JSON")
     parser.add_argument('--n_trials', type=int, default=None, help="[优化模式] 尝试次数 (默认: 自动推断)")
     parser.add_argument('--n_jobs', type=int, default=-1, help="[优化模式] 并行核心数 (-1 表示使用所有核心)")
-    parser.add_argument('--metric', type=str, default='calmar',
-                        choices=['sharpe', 'return', 'final_value', 'calmar', 'mix_score'],  # 添加 mix_score
-                        help="[优化模式] 优化目标")
+    parser.add_argument('--metric', type=str, default='mix_score_origin',
+                        help="[优化模式] 优化目标 (支持逗号分隔的多私有指标串行执行)")
     parser.add_argument('--study_name', type=str, default=None, help="[优化模式] 训练名称")
     parser.add_argument('--train_roll_period', type=str, default=None,
                         help="[优化模式] 训练集滚动周期 (从测试集开始时间往前推)。例如：1y, 3y")
@@ -249,13 +248,13 @@ if __name__ == '__main__':
     # 优化模式
     # ==========================
     if args.opt_params:
+        import copy
+        import time
+
         print(f"\n>>> Mode: PARAMETER OPTIMIZATION (Target: {args.metric}) <<<")
 
-        if not args.study_name:
-            # 提取策略名，并将 '.' 替换为 '_' 以适配文件名规范
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            args.study_name = f"study_{pascal_to_snake(args.strategy)}_{timestamp}"
-            print(f"[System] Auto-generated study name: {args.study_name}")
+        # 1. 解析传入的 metric (支持单个或逗号分隔的多个)
+        metrics_list = [m.strip() for m in args.metric.split(',')]
 
         # --- 变更点 2: 显式关闭日志 (从 optimizer.py 移至此处) ---
         config.LOG = False
@@ -267,13 +266,70 @@ if __name__ == '__main__':
             print(f"Error parsing opt_params JSON: {e}")
             sys.exit(1)
 
-        job = optimizer.OptimizationJob(
-            args=args,
-            fixed_params=s_params,
-            opt_params_def=opt_p_def,
-            risk_params=r_params
-        )
-        job.run()
+        final_reports = []
+        total_metrics = len(metrics_list)
+
+        for idx, current_metric in enumerate(metrics_list, 1):
+            print(f"\n\n{'=' * 65}")
+            print(f"🚀 [指标 {idx}/{total_metrics} 正在训练]: {current_metric}")
+            print(f"{'=' * 65}")
+
+            # 深拷贝 args，确保物理隔离
+            current_args = copy.deepcopy(args)
+            current_args.metric = current_metric
+
+            start_time = time.time()
+
+            try:
+                job = optimizer.OptimizationJob(
+                    args=current_args,
+                    fixed_params=s_params,
+                    opt_params_def=opt_p_def,
+                    risk_params=r_params
+                )
+
+                # 执行优化并接收返回的字典战报
+                result_dict = job.run()
+                elapsed_hours = (time.time() - start_time) / 3600.0
+
+                if result_dict and isinstance(result_dict, dict):
+                    result_dict['metric_name'] = current_args.metric
+                    result_dict['elapsed_hours'] = elapsed_hours
+                    result_dict['study_db'] = current_args.study_name
+                    final_reports.append(result_dict)
+
+            except Exception as e:
+                print(f"\n[致命错误] 指标 '{current_metric}' 训练崩溃: {e}")
+                import traceback
+
+                traceback.print_exc()
+                print(">>> 引擎防宕机保护触发，强行切入下一个指标...")
+                continue
+
+        if final_reports:
+            print(">>> 多指标训练结果汇总(MULTI-METRIC BANDIT SUMMARY) <<<")
+
+            header = f"| {'指标 (Metric)':<18} | {'最高得分 (Score)':<15} | {'耗时 (h)':<8} | {'关联日志 (Log)'}"
+            print("-" * 90)
+            print(header)
+            print("-" * 90)
+
+            for r in final_reports:
+                m_str = str(r.get('metric_name', 'Unknown'))[:18]
+                s_str = str(r.get('best_score', 'N/A'))[:15]
+                t_str = f"{r.get('elapsed_hours', 0):.1f}"
+                db_str = str(r.get('log_file', 'N/A'))
+                print(f"| {m_str:<18} | {s_str:<15} | {t_str:<8} | {db_str}")
+
+            print("-" * 90 + "\n")
+
+            print("请在 Dashboard 中回放并排查孤点: ")
+            for r in final_reports:
+                if r.get('log_file'):
+                    print(f"optuna-dashboard {r.get('log_file')}")
+        else:
+            print("\n[警告] 所有指标均未返回结果")
+
         sys.exit(0)
 
     # ==========================

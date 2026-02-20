@@ -27,6 +27,7 @@ QuantAda 启发式并行贝叶斯优化器
 
 import copy
 import datetime
+import importlib
 import math
 import os
 import socket
@@ -65,6 +66,53 @@ try:
     HAS_DASHBOARD = True
 except ImportError:
     HAS_DASHBOARD = False
+
+_METRIC_FUNC_CACHE = None
+
+
+def get_metric_function(metric_arg, default_pkg="metrics"):
+    """
+    获取指标方法路由：支持绝对路径反射与缺省降级。
+
+    支持格式：
+    1. 绝对路径模式: --metric a_share.turbo_assault
+       -> 加载根目录 a_share 包下的 turbo_assault 模块中的 turbo_assault / evaluate 函数
+    2. 深度路径模式: --metric my_private.scores.v1.assault
+       -> 加载 my_private/scores/v1 包下的 assault 模块
+    3. 极简缺省模式: --metric turbo_assault (没有点号)
+       -> 降级加载 default_pkg (默认 metrics) 下的 turbo_assault.py
+    """
+    global _METRIC_FUNC_CACHE
+    if _METRIC_FUNC_CACHE is not None:
+        return _METRIC_FUNC_CACHE
+
+    try:
+        # 1. 路径解析解析 (路由分离)
+        if '.' in metric_arg:
+            # 存在点号，说明用户传入了具体的包路径。从最右侧切分一次。
+            # 例如 "a_share.turbo_assault" -> module_path="a_share", func_name="turbo_assault"
+            # 例如 "my.private.pkg.score_func" -> module_path="my.private.pkg", func_name="score_func"
+            module_path, func_name = metric_arg.rsplit('.', 1)
+        else:
+            # 没有点号，触发极简模式，回退到默认的 metrics 包
+            module_path = f"{default_pkg}.{metric_arg}"
+            func_name = metric_arg
+
+        # 2. O(1) 绝对寻址导入
+        module = importlib.import_module(module_path)
+
+        # 3. 提取执行函数 (支持同名函数或 evaluate 语法糖)
+        if hasattr(module, func_name):
+            _METRIC_FUNC_CACHE = getattr(module, func_name)
+        elif hasattr(module, "evaluate"):
+            _METRIC_FUNC_CACHE = getattr(module, "evaluate")
+        else:
+            raise AttributeError(f"模块 '{module_path}' 已加载，但找不到名为 '{func_name}' 或 'evaluate' 的打分函数。")
+
+        return _METRIC_FUNC_CACHE
+
+    except ModuleNotFoundError as e:
+        raise ValueError(f"[致命错误] 指标寻址失败，请放入metrics包中或pkg.fun格式调用私有指标。传入参数: '{metric_arg}'。Python底层报错: {e}")
 
 def is_port_in_use(port):
     """检查本地端口是否被占用"""
@@ -280,10 +328,9 @@ class OptimizationJob:
     def _auto_refine_study_name(self):
         """
         基于时间维度的自动化命名逻辑
-        格式：[训练周期]_[测试周期]_[起止日期]_[时间戳]
+        格式：[训练周期]_[测试周期]_[指标]_[起止日期]_[时间戳]
         """
-        # 仅在默认命名 (以 study_ 开头) 或未命名时覆盖
-        if self.args.study_name and not self.args.study_name.startswith("study_"):
+        if self.args.study_name:
             return
 
         # 1. 提取周期标签 (Period Tags)
@@ -309,7 +356,7 @@ class OptimizationJob:
         timestamp = datetime.datetime.now().strftime("%H%M%S")
 
         # 移除可能导致路径问题的特殊字符
-        new_name = f"{tr_p}_{te_p}_{start_str}_{end_str}_{timestamp}"
+        new_name = f"{tr_p}_{te_p}_{self.args.metric}_{start_str}_{end_str}_{timestamp}"
 
         print(f"[Optimizer] Auto-refining study_name (Date-Based): {new_name}")
         self.args.study_name = new_name
@@ -491,13 +538,10 @@ class OptimizationJob:
 
                     # 情况 A: 之前已经有人跑完了 -> 直接抄作业 (Cache Hit)
                     if t.state == optuna.trial.TrialState.COMPLETE:
-                        # print(f"  [Cache] Trial {trial.number} hit cache from {t.number}")
                         return t.value
 
                     # 情况 B: 此时此刻有人正在跑 -> 我是多余的，自我了断 (Prune)
                     elif t.state == optuna.trial.TrialState.RUNNING:
-                        # print(f"  [Prune] Trial {trial.number} is a duplicate of running {t.number}")
-                        # 抛出 Pruned 异常，Optuna 会标记此 Trial 为 PRUNED 并跳过
                         raise optuna.TrialPruned("Duplicate of a running trial")
 
         except optuna.TrialPruned:
@@ -533,98 +577,88 @@ class OptimizationJob:
 
             bt_instance.run()
 
-            # =========================================================
-            # 最终生产级 Mix Score (红队审计通过：防御性+梯度诱导)
-            # =========================================================
-            if self.args.metric == 'mix_score':
-                # 0. 稳定性首检：如果回测逻辑都没跑通，直接判定
-                if not getattr(bt_instance, 'results', None) or len(bt_instance.results) == 0:
-                    return -100.0
+            # 检查回测是否成功生成结果，防止烂参数导致引擎空转
+            if not getattr(bt_instance, 'results', None) or len(bt_instance.results) == 0:
+                return -100.0
 
-                strat = bt_instance.results[0]
+            strat = bt_instance.results[0]
 
-                # 1. 基础指标安全提取
+            try:
+                # 收益率 (百分比)
                 total_return_pct = (bt_instance.get_custom_metric('return') or 0.0) * 100.0
-                try:
-                    sharpe = float(bt_instance.get_custom_metric('sharpe') or 0.0)
-                    sharpe = 0.0 if (math.isinf(sharpe) or math.isnan(sharpe)) else sharpe
-                except (TypeError, ValueError):
-                    sharpe = 0.0
 
-                # 2. Analyzer 安全提取
-                try:
-                    ta_obj = strat.analyzers.getbyname('tradeanalyzer')
-                    ta = ta_obj.get_analysis() if ta_obj else {}
-                    total_trades = ta.get('total', {}).get('total', 0)
+                # 夏普比率
+                sharpe = float(bt_instance.get_custom_metric('sharpe') or 0.0)
+                sharpe = 0.0 if (math.isinf(sharpe) or math.isnan(sharpe)) else sharpe
 
-                    dd_obj = strat.analyzers.getbyname('drawdown')
-                    mdd = dd_obj.get_analysis().get('max', {}).get('drawdown', 100.0) if dd_obj else 100.0
-                except:
-                    total_trades = 0
-                    mdd = 100.0
+                # 卡玛比率
+                calmar = bt_instance.get_custom_metric('calmar') or 0.0
+                calmar = 0.0 if (math.isinf(calmar) or math.isnan(calmar)) else calmar
 
-                # 3. 绝对日历时间校准
-                try:
-                    # 优先从策略的第一条数据提取时间差
-                    if len(strat.data) > 0:
-                        # Backtrader 中 datetime.datetime(0) 获取当前时间
-                        # -len+1 获取第一条时间
-                        end_dt = strat.data.datetime.datetime(0)
-                        start_dt = strat.data.datetime.datetime(-len(strat.data) + 1)
-                        days_diff = (end_dt - start_dt).days
-                        effective_years = max(days_diff / 365.25, 0.1)
-                    else:
-                        effective_years = 1.0
-                except:
-                    # 容错：从配置中估算
-                    effective_years = 1.0
+                # 交易统计分析
+                ta = strat.analyzers.getbyname('tradeanalyzer').get_analysis()
+                total_trades = ta.get('total', {}).get('total', 0)
+                win_rate = ta.get('won', {}).get('total', 0) / max(total_trades, 1)
 
-                    # 死亡红线：平均每年至少交易 12 次 (每月 1 次)
-                min_req_trades = int(12 * effective_years)
+                # 盈亏因子计算
+                won_total = ta.get('won', {}).get('pnl', {}).get('total', 0)
+                lost_total = abs(ta.get('lost', {}).get('pnl', {}).get('total', 0))
+                profit_factor = won_total / lost_total if lost_total > 0 else won_total
 
-                # --- 第一道防线：累加式惩罚 (为 TPE 提供逃生梯度) ---
-                penalty = 0.0
-                if total_trades < min_req_trades:
-                    penalty -= (min_req_trades - total_trades)  # 次数越少扣越多
+                # 最大回撤
+                mdd = strat.analyzers.getbyname('drawdown').get_analysis().get('max', {}).get('drawdown', 100.0)
+                safe_mdd = max(mdd, 1.0)  # 防除零溢出
 
-                if mdd > 25.0:
-                    penalty -= (mdd - 25.0) * 2.0  # 回撤每超 1% 扣 2 分
-
-                # 判定死刑：一旦触碰红线，分数必低于 -20.0
-                if penalty < 0:
-                    return -20.0 + penalty
-
-                # --- 第二道防线：反脆弱核心计分 ---
-                # 奖励上限：每年 120 次 (每月 10 次)，超过不再奖励，防刷单
-                max_rewarded = int(120 * effective_years)
-                capped_n = min(max(total_trades, 1), max_rewarded)
-
-                # A. 统计夏普 (log 缩放)
-                stat_sharpe = max(sharpe, 0.0) * math.log10(capped_n)
-
-                # B. 惩罚性卡玛 (MDD 1.5 次方惩罚)
-                safe_mdd = max(mdd, 1.0)
-                if total_return_pct >= 0:
-                    # 赚钱时：非线性收益风险比
-                    p_calmar = total_return_pct / (safe_mdd ** 1.5)
+                # 运行时间折算 (用于计算年化要求)
+                if len(strat.data) > 0:
+                    days = (strat.data.datetime.datetime(0) - strat.data.datetime.datetime(-len(strat.data) + 1)).days
+                    years = max(days / 365.25, 0.1)
                 else:
-                    # 亏损时：回撤越大，分数越负
-                    p_calmar = total_return_pct * math.sqrt(safe_mdd)
+                    years = 1.0
 
-                metric_val = stat_sharpe + p_calmar
-                return metric_val
+            except Exception as e:
+                # Analyzer 解析失败，通常意味着参数导致了无法交易，直接判死刑
+                return -100.0
 
-            # =========================================================
-            # 传统模式 (单独指定 calmar, sharpe 等)
-            # =========================================================
-            else:
+            # 封装标准化指标字典，空投给私有打分插件
+            stats = {
+                'total_return_pct': total_return_pct,
+                'sharpe': sharpe,
+                'calmar': calmar,
+                'total_trades': total_trades,
+                'win_rate': win_rate,
+                'profit_factor': profit_factor,
+                'mdd': mdd,
+                'safe_mdd': safe_mdd,
+                'years': years
+            }
+
+            if self.args.metric in ['sharpe', 'calmar', 'return']:
                 metric_val = bt_instance.get_custom_metric(self.args.metric)
-                # 回退逻辑
                 if metric_val == -999.0 and self.args.metric == 'sharpe':
                     ret = bt_instance.get_custom_metric('return')
                     metric_val = ret * 0.1 if ret > 0 else ret
+                return metric_val
 
-            return metric_val
+            # 触发插件化的复合打分 (全域动态路由)
+            else:
+                try:
+                    import math  # 确保内部可以使用 math
+                    # 获取缓存的内存函数指针 (调用文件顶部的路由雷达)
+                    metric_func = get_metric_function(self.args.metric)
+
+                    # 执行外部私有打分逻辑
+                    final_score = metric_func(stats, strat=strat, args=self.args)
+
+                    # 容错降级：如果用户写的打分插件有 bug 返回了 NaN/Inf，直接给惩罚分保护引擎
+                    if final_score is None or math.isnan(final_score) or math.isinf(final_score):
+                        return -100.0
+
+                    return float(final_score)
+
+                except Exception as e:
+                    # 捕获外部插件抛出的异常，防止某一次试错导致整个 Optuna Study 崩溃退出
+                    return -100.0
 
         except Exception as e:
             import traceback
@@ -844,15 +878,10 @@ class OptimizationJob:
         print(f" Params:   {final_params}")
         print("=" * 60 + "\n")
 
-        # --- 可视化 ---
-        try:
-            fig1 = vis.plot_optimization_history(study)
-            fig1.show()
-            fig2 = vis.plot_slice(study)
-            fig2.show()
-            if len(self.opt_params_def) > 1:
-                fig3 = vis.plot_param_importances(study)
-                fig3.show()
-        except Exception as e:
-            print(f"Visualization skipped: {e}")
+        return {
+            "best_score": best_val_display,
+            "best_params": best_params,
+            "trials_completed": len(study.trials),
+            "log_file": log_file,
+        }
 

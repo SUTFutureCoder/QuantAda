@@ -71,6 +71,7 @@
 - **启发式并行优化器 (Bayesian Optimizer)**
   - **极速并行**：基于 TPE 算法与 Constant-Liar 策略，充分利用多核 CPU 进行并行参数搜索。
   - **智能评估**：根据参数空间熵值动态推导最佳尝试次数，拒绝盲目穷举。
+  - **多臂赌博机**：``--metric`` 支持传入多个指标，合并展示、对比多指标结果。
 
 
 - **科学评价体系 (Mix Score)**
@@ -254,8 +255,8 @@ python ./run.py sample_momentum_strategy --selection sample_manual_selector --op
 ```bash
 # 3. 自动步数
 # 不传入 --n_trials: 算法根据参数空间复杂度自动推算尝试次数
-# --metric mix_score 启用混合评分目标（综合 Calmar、Sharpe 和 收益率）
-python ./run.py sample_momentum_strategy --selection sample_manual_selector --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60}}" --metric mix_score
+# --metric 支持传入逗号分隔多指标、支持指定自定义包.指标，例如：calmar,mix_score_origin、custom_pkg.metric_file，启用混合评分目标（综合 Calmar、Sharpe 和 收益率）
+python ./run.py sample_momentum_strategy --selection sample_manual_selector --opt_params "{'momentum_period': {'type': 'int', 'low': 10, 'high': 60}}" --metric calmar,mix_score_origin
 ```
 
 运行结束后，浏览器将自动弹出交互式的**参数优化历史**、**参数切片 (寻找参数平原)** 等图表，助您一眼看穿策略的稳定性。
