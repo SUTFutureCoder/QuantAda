@@ -5,6 +5,7 @@ import backtrader as bt
 import pandas as pd
 
 import config
+from common.formatters import format_with_spec
 from common import log
 
 
@@ -778,11 +779,6 @@ class Backtester:
             print("Backtest generated no valid performance metrics.")
             return
 
-        def safe_fmt(val, fmt=".2f"):
-            if val is None or (isinstance(val, float) and math.isnan(val)):
-                return "N/A"
-            return f"{val:{fmt}}"
-
         print("\n" + "=" * 50)
         print("            Backtest Performance Metrics")
         print("=" * 50)
@@ -790,14 +786,14 @@ class Backtester:
         print(f" Initial Portfolio:    {metrics['initial_portfolio']:,.2f}")
         print(f" Final Portfolio:      {metrics['final_portfolio']:,.2f}")
         print("-" * 50)
-        print(f" Total Return:         {safe_fmt(metrics['total_return'], '.2%')}")
-        print(f" Annualized Return:    {safe_fmt(metrics['annual_return'], '.2%')}")
-        print(f" Sharpe Ratio:         {safe_fmt(metrics['sharpe_ratio'], '.2f')}")
-        print(f" Max Drawdown:         {safe_fmt(metrics['max_drawdown'], '.2%')}")
-        print(f" Calmar Ratio:         {safe_fmt(metrics['calmar_ratio'], '.2f')}")
+        print(f" Total Return:         {format_with_spec(metrics['total_return'], '.2%')}")
+        print(f" Annualized Return:    {format_with_spec(metrics['annual_return'], '.2%')}")
+        print(f" Sharpe Ratio:         {format_with_spec(metrics['sharpe_ratio'], '.2f')}")
+        print(f" Max Drawdown:         {format_with_spec(metrics['max_drawdown'], '.2%')}")
+        print(f" Calmar Ratio:         {format_with_spec(metrics['calmar_ratio'], '.2f')}")
         print("-" * 50)
         print(f" Total Trades:         {metrics['total_trades']}")
-        print(f" Win Rate:             {safe_fmt(metrics['win_rate'], '.2f')}%")
-        print(f" Profit Factor:        {safe_fmt(metrics['profit_factor'], '.2f')}")
-        print(f" Avg. Win / Avg. Loss: {safe_fmt(metrics['pnl_ratio'], '.2f')}")
+        print(f" Win Rate:             {format_with_spec(metrics['win_rate'], '.2f')}%")
+        print(f" Profit Factor:        {format_with_spec(metrics['profit_factor'], '.2f')}")
+        print(f" Avg. Win / Avg. Loss: {format_with_spec(metrics['pnl_ratio'], '.2f')}")
         print("=" * 50 + "\n")

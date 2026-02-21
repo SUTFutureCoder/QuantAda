@@ -10,6 +10,7 @@ import pandas as pd
 import config
 from backtest.backtester import Backtester
 from common import optimizer
+from common.formatters import format_float, format_recent_backtest_metrics
 from common.loader import get_class_from_name, pascal_to_snake
 from data_providers.manager import DataManager
 from recorders.db_recorder import DBRecorder
@@ -271,6 +272,49 @@ if __name__ == '__main__':
 
         final_reports = []
         total_metrics = len(metrics_list)
+        explicit_params_passed = any(
+            (arg == '--params') or arg.startswith('--params=')
+            for arg in sys.argv[1:]
+        )
+        baseline_report = None
+        baseline_elapsed_hours = None
+        shared_context = None
+        bootstrap_job = None
+
+        # 先构建一次共享上下文，确保基准与多指标训练处于同一数据宇宙（同一选股与同一数据切分）
+        try:
+            bootstrap_args = copy.deepcopy(args)
+            bootstrap_args.metric = metrics_list[0]
+            bootstrap_job = optimizer.OptimizationJob(
+                args=bootstrap_args,
+                fixed_params=s_params,
+                opt_params_def=opt_p_def,
+                risk_params=r_params
+            )
+            shared_context = bootstrap_job.export_shared_context()
+        except Exception as e:
+            print(f"[警告] 共享上下文构建失败，将降级为逐metric独立初始化: {e}")
+
+        if explicit_params_passed:
+            print("\n--- Running Baseline Backtest from --params (Recent 3Y) ---")
+            baseline_start = time.time()
+            try:
+                if bootstrap_job is not None:
+                    baseline_report = bootstrap_job._run_recent_3y_backtest(copy.deepcopy(s_params))
+                else:
+                    baseline_args = copy.deepcopy(args)
+                    baseline_args.metric = metrics_list[0]
+                    baseline_job = optimizer.OptimizationJob(
+                        args=baseline_args,
+                        fixed_params=s_params,
+                        opt_params_def=opt_p_def,
+                        risk_params=r_params
+                    )
+                    baseline_report = baseline_job._run_recent_3y_backtest(copy.deepcopy(s_params))
+            except Exception as e:
+                print(f"[警告] 当前基准回测失败: {e}")
+            finally:
+                baseline_elapsed_hours = (time.time() - baseline_start) / 3600.0
 
         for idx, current_metric in enumerate(metrics_list, 1):
             print(f"\n\n{'=' * 65}")
@@ -284,12 +328,16 @@ if __name__ == '__main__':
             start_time = time.time()
 
             try:
-                job = optimizer.OptimizationJob(
-                    args=current_args,
-                    fixed_params=s_params,
-                    opt_params_def=opt_p_def,
-                    risk_params=r_params
-                )
+                job_kwargs = {
+                    "args": current_args,
+                    "fixed_params": s_params,
+                    "opt_params_def": opt_p_def,
+                    "risk_params": r_params,
+                }
+                if shared_context is not None:
+                    job_kwargs["shared_context"] = shared_context
+
+                job = optimizer.OptimizationJob(**job_kwargs)
 
                 # 执行优化并接收返回的字典战报
                 result_dict = job.run()
@@ -309,62 +357,74 @@ if __name__ == '__main__':
                 print(">>> 引擎防宕机保护触发，强行切入下一个指标...")
                 continue
 
-        if final_reports:
-            print(">>> 多臂赌博机训练结果汇总(MULTI-METRIC BANDIT SUMMARY) <<<")
-
-            def fmt_pct(v):
-                return f"{v:.2%}" if isinstance(v, (int, float)) else "N/A"
-
-            def fmt_num(v):
-                return f"{v:.2f}" if isinstance(v, (int, float)) else "N/A"
-
-            def fmt_rate(v):
-                if not isinstance(v, (int, float)):
-                    return "N/A"
-                # 兼容 [0,1] 或 [0,100] 两种胜率表示
-                rate = v * 100.0 if 0 <= v <= 1 else v
-                return f"{rate:.2f}%"
-
-            def fmt_int(v):
-                if isinstance(v, (int, float)):
-                    return str(int(v))
-                return "N/A"
+        if final_reports or explicit_params_passed:
+            print("=== 请忽略上文日志输出，请将下文提供给AI辅助分析 ===")
+            print(">>> 多臂赌博机训练结果汇总(MULTI-METRIC BANDIT SUMMARY)  <<<")
 
             header = (
-                f"| {'指标 (Metric)':<18} | {'最高得分':<10} | {'年化收益':<10} | {'回撤':<10} | "
+                f"| {'指标 (Metric)':<30} | {'年化收益':<10} | {'回撤':<10} | "
                 f"{'Calmar':<8} | {'Sharpe':<8} | {'交易数':<8} | {'胜率':<10} | {'PF':<8} | "
                 f"{'耗时(h)':<8} | {'最优参数 (Params)':<22} | {'关联日志 (Log)'}"
             )
-            print("-" * 205)
+            table_width = len(header)
+            print("-" * table_width)
             print(header)
-            print("-" * 205)
+            print("-" * table_width)
+
+            if explicit_params_passed:
+                baseline_recent = baseline_report or {}
+                baseline_fmt = format_recent_backtest_metrics(baseline_recent)
+                m_str = "当前基准"
+                ret_str = baseline_fmt['annual_return']
+                dd_str = baseline_fmt['max_drawdown']
+                calmar_str = baseline_fmt['calmar_ratio']
+                sharpe_str = baseline_fmt['sharpe_ratio']
+                trades_str = baseline_fmt['total_trades']
+                winrate_str = baseline_fmt['win_rate']
+                pf_str = baseline_fmt['profit_factor']
+                t_str = format_float(baseline_elapsed_hours, digits=1)
+                b_str = str(s_params)
+                db_str = "N/A"
+                print(
+                    f"| {m_str:<30} | {ret_str:<10} | {dd_str:<10} | "
+                    f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
+                    f"{t_str:<8} | {b_str:<22} | {db_str}"
+                )
+                if final_reports:
+                    print("-" * table_width)
 
             for r in final_reports:
                 recent = r.get('recent_backtest') or {}
-                m_str = str(r.get('metric_name', 'Unknown'))[:18]
-                s_str = str(r.get('best_score', 'N/A'))[:10]
-                ret_str = fmt_pct(recent.get('annual_return'))
-                dd_str = fmt_pct(recent.get('max_drawdown'))
-                calmar_str = fmt_num(recent.get('calmar_ratio'))
-                sharpe_str = fmt_num(recent.get('sharpe_ratio'))
-                trades_str = fmt_int(recent.get('total_trades'))
-                winrate_str = fmt_rate(recent.get('win_rate'))
-                pf_str = fmt_num(recent.get('profit_factor'))
-                t_str = f"{r.get('elapsed_hours', 0):.1f}"
+                recent_fmt = format_recent_backtest_metrics(recent)
+                metric_name = str(r.get('metric_name', 'Unknown'))
+                score_str = str(r.get('best_score', 'N/A'))
+                metric_with_score = f"{metric_name} ({score_str})" if score_str != "N/A" else metric_name
+                m_str = metric_with_score[:30]
+                ret_str = recent_fmt['annual_return']
+                dd_str = recent_fmt['max_drawdown']
+                calmar_str = recent_fmt['calmar_ratio']
+                sharpe_str = recent_fmt['sharpe_ratio']
+                trades_str = recent_fmt['total_trades']
+                winrate_str = recent_fmt['win_rate']
+                pf_str = recent_fmt['profit_factor']
+                t_str = format_float(r.get('elapsed_hours', 0), digits=1)
                 b_str = str(r.get('best_params', 'N/A'))
                 db_str = str(r.get('log_file', 'N/A'))
                 print(
-                    f"| {m_str:<18} | {s_str:<10} | {ret_str:<10} | {dd_str:<10} | "
+                    f"| {m_str:<30} | {ret_str:<10} | {dd_str:<10} | "
                     f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
                     f"{t_str:<8} | {b_str:<22} | {db_str}"
                 )
 
-            print("-" * 205 + "\n")
+            print("-" * table_width + "\n")
 
-            print("请在 Dashboard 中回放并排查孤点: ")
-            for r in final_reports:
-                if r.get('log_file'):
-                    print(f"optuna-dashboard {r.get('log_file')}")
+            if final_reports:
+                print("请在 Dashboard 中回放并排查孤点: ")
+                for r in final_reports:
+                    if r.get('log_file'):
+                        print(f"optuna-dashboard {r.get('log_file')}")
+            else:
+                print("[警告] 当前仅有基准回测结果，训练指标未返回结果。")
         else:
             print("\n[警告] 所有指标均未返回结果")
 

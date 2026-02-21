@@ -43,6 +43,7 @@ from optuna.samplers import TPESampler
 
 import config
 from backtest.backtester import Backtester
+from common.formatters import format_float, format_recent_backtest_metrics
 from common.loader import get_class_from_name, parse_period_string
 from data_providers.manager import DataManager
 
@@ -127,11 +128,30 @@ def is_port_in_use(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 class OptimizationJob:
-    def __init__(self, args, fixed_params, opt_params_def, risk_params):
+    def __init__(self, args, fixed_params, opt_params_def, risk_params, shared_context=None):
         self.args = args
         self.fixed_params = fixed_params
         self.opt_params_def = opt_params_def
         self.risk_params = risk_params
+
+        # 共享上下文模式：复用选股、数据抓取与切分结果，确保多指标/基准对比在同一数据宇宙下进行
+        if shared_context is not None:
+            self.strategy_class = shared_context["strategy_class"]
+            self.risk_control_classes = shared_context["risk_control_classes"]
+            self.data_manager = shared_context["data_manager"]
+            self.target_symbols = shared_context["target_symbols"]
+            self.raw_datas = shared_context["raw_datas"]
+            self.train_datas = shared_context["train_datas"]
+            self.test_datas = shared_context["test_datas"]
+            self.train_range = shared_context["train_range"]
+            self.test_range = shared_context["test_range"]
+            self._window_data_cache = shared_context.get("window_data_cache", {})
+
+            # 在复用数据上下文的前提下，仅重建本次 metric 对应的 study_name
+            self._auto_refine_study_name()
+            self.has_debugged_data = False
+            return
+
         self.strategy_class = get_class_from_name(args.strategy, ['strategies'])
         self.risk_control_classes = []
         if args.risk:
@@ -171,11 +191,29 @@ class OptimizationJob:
 
         self.raw_datas = self._fetch_all_data()
         self.train_datas, self.test_datas, self.train_range, self.test_range = self._split_data()
+        self._window_data_cache = {}
 
         # 根据实际日期和市场类型自动精细化 study_name
         self._auto_refine_study_name()
 
         self.has_debugged_data = False
+
+    def export_shared_context(self):
+        """
+        导出可复用的优化上下文，供多指标串行任务复用，避免重复选股/拉数导致结果不可比。
+        """
+        return {
+            "strategy_class": self.strategy_class,
+            "risk_control_classes": self.risk_control_classes,
+            "data_manager": self.data_manager,
+            "target_symbols": self.target_symbols,
+            "raw_datas": self.raw_datas,
+            "train_datas": self.train_datas,
+            "test_datas": self.test_datas,
+            "train_range": self.train_range,
+            "test_range": self.test_range,
+            "window_data_cache": self._window_data_cache,
+        }
 
     def _fetch_all_data(self):
         print("\n--- Fetching Data for Optimization ---")
@@ -218,12 +256,22 @@ class OptimizationJob:
                 print(f"  Test Roll:  {getattr(self.args, 'test_roll_period', 'None (Refit Mode)')}")
                 print(f"  => Fetching data from {req_start} to {req_end}")
 
+        # 3. 统一抓取窗口：训练需求 vs Recent3Y 需求取更早起点，确保后续多指标/基准完全可比
+        req_fetch_start = req_start
+        recent_start, _ = self._infer_recent_3y_window()
+        if recent_start:
+            if not req_fetch_start or pd.to_datetime(recent_start) < pd.to_datetime(req_fetch_start):
+                req_fetch_start = recent_start
+                print(f"[Auto-Fetch] Extended fetch window for Recent3Y consistency:")
+                print(f"  Recent3Y Start: {recent_start}")
+                print(f"  => Fetching data from {req_fetch_start} to {req_end}")
+
         datas = {}
         for symbol in self.target_symbols:
             # 优先使用缓存
             df = self.data_manager.get_data(
                 symbol,
-                start_date=req_start,
+                start_date=req_fetch_start,
                 end_date=req_end,
                 specified_sources=self.args.data_source,
                 timeframe=self.args.timeframe,
@@ -726,10 +774,43 @@ class OptimizationJob:
 
     def _fetch_datas_for_window(self, start_date: str, end_date: str):
         """
-        按指定窗口重新抓取数据，确保最终验证窗口独立于训练/测试切分范围。
+        按指定窗口获取数据：
+        1) 优先复用内存中的 raw_datas 切片（零网络请求）
+        2) 对覆盖不足的标的才向 provider 补拉
+        3) 结果做窗口级缓存，供多指标/基准复用
         """
+        cache_key = f"{start_date}:{end_date}"
+        if cache_key in self._window_data_cache:
+            print(f"[Optimizer] Reusing cached window data: {start_date} to {end_date}")
+            return self._window_data_cache[cache_key]
+
         datas = {}
+        s = pd.to_datetime(start_date) if start_date else pd.Timestamp.min
+        e = pd.to_datetime(end_date) if end_date else pd.Timestamp.max
+
         for symbol in self.target_symbols:
+            used_preloaded = False
+            raw_df = self.raw_datas.get(symbol)
+            if raw_df is not None and not raw_df.empty:
+                prepared_df = self.prepare_data_index(raw_df)
+                try:
+                    has_window = (
+                        len(prepared_df) > 0
+                        and prepared_df.index.min() <= s
+                        and prepared_df.index.max() >= e
+                    )
+                    if has_window:
+                        mask = (prepared_df.index >= s) & (prepared_df.index <= e)
+                        sliced_df = prepared_df.loc[mask]
+                        if not sliced_df.empty:
+                            datas[symbol] = sliced_df
+                            used_preloaded = True
+                except Exception:
+                    pass
+
+            if used_preloaded:
+                continue
+
             df = self.data_manager.get_data(
                 symbol,
                 start_date=start_date,
@@ -743,6 +824,8 @@ class OptimizationJob:
                 datas[symbol] = df
             else:
                 print(f"[Optimizer] Warning: No recent 3Y data for {symbol}, skipping.")
+
+        self._window_data_cache[cache_key] = datas
         return datas
 
     def _run_recent_3y_backtest(self, final_params):
@@ -938,7 +1021,7 @@ class OptimizationJob:
         for k, v in best_params.items():
             print(f"  {k}: {v}")
 
-        best_val_display = f"{best_value:.4f}" if best_value is not None else "N/A"
+        best_val_display = format_float(best_value, digits=4)
         print(f"Best Training Score ({self.args.metric}): {best_val_display}")
 
         if self.test_datas:
@@ -954,6 +1037,7 @@ class OptimizationJob:
                 end_date=self.test_range[1],
                 cash=self.args.cash,
                 commission=self.args.commission,
+                slippage=self.args.slippage,
                 risk_control_classes=self.risk_control_classes,
                 risk_control_params=self.risk_params,
                 timeframe=self.args.timeframe,
@@ -967,37 +1051,21 @@ class OptimizationJob:
 
         recent_3y_metrics = self._run_recent_3y_backtest(final_params)
 
-        def _fmt_pct(v):
-            if v is None:
-                return "N/A"
-            return f"{v:.2%}"
-
-        def _fmt_float(v):
-            if v is None:
-                return "N/A"
-            return f"{v:.2f}"
-
-        def _fmt_rate(v):
-            if v is None:
-                return "N/A"
-            # 兼容 [0,1] 或 [0,100] 两种胜率表示
-            rate = float(v) * 100.0 if 0 <= float(v) <= 1 else float(v)
-            return f"{rate:.2f}%"
-
         print("\n" + "=" * 60)
         print(" SUMMARY OF BEST CONFIGURATION")
         print("=" * 60)
         print(f" Strategy: {self.args.strategy}")
         print(f" Params:   {final_params}")
         if recent_3y_metrics:
+            recent_fmt = format_recent_backtest_metrics(recent_3y_metrics)
             print(f" Recent3Y: {recent_3y_metrics.get('start_date')} -> {recent_3y_metrics.get('end_date')}")
-            print(f" Annual:   {_fmt_pct(recent_3y_metrics.get('annual_return'))}")
-            print(f" Drawdown: {_fmt_pct(recent_3y_metrics.get('max_drawdown'))}")
-            print(f" Calmar:   {_fmt_float(recent_3y_metrics.get('calmar_ratio'))}")
-            print(f" Sharpe:   {_fmt_float(recent_3y_metrics.get('sharpe_ratio'))}")
-            print(f" Trades:   {recent_3y_metrics.get('total_trades', 'N/A')}")
-            print(f" WinRate:  {_fmt_rate(recent_3y_metrics.get('win_rate'))}")
-            print(f" PF:       {_fmt_float(recent_3y_metrics.get('profit_factor'))}")
+            print(f" Annual:   {recent_fmt['annual_return']}")
+            print(f" Drawdown: {recent_fmt['max_drawdown']}")
+            print(f" Calmar:   {recent_fmt['calmar_ratio']}")
+            print(f" Sharpe:   {recent_fmt['sharpe_ratio']}")
+            print(f" Trades:   {recent_fmt['total_trades']}")
+            print(f" WinRate:  {recent_fmt['win_rate']}")
+            print(f" PF:       {recent_fmt['profit_factor']}")
         print("=" * 60 + "\n")
 
         return {
