@@ -2,6 +2,7 @@ import argparse
 import ast
 import datetime
 import logging
+import os
 import sys
 
 import pandas
@@ -272,6 +273,7 @@ if __name__ == '__main__':
 
         final_reports = []
         total_metrics = len(metrics_list)
+        is_multi_metric = total_metrics > 1
         explicit_params_passed = any(
             (arg == '--params') or arg.startswith('--params=')
             for arg in sys.argv[1:]
@@ -280,11 +282,22 @@ if __name__ == '__main__':
         baseline_elapsed_hours = None
         shared_context = None
         bootstrap_job = None
+        dashboard_launcher_job = None
+        shared_dashboard_log_file = None
+
+        if is_multi_metric:
+            log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
+            os.makedirs(log_dir, exist_ok=True)
+            run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            shared_dashboard_log_file = os.path.join(log_dir, f"optuna_multi_metric_{run_stamp}.log")
 
         # 先构建一次共享上下文，确保基准与多指标训练处于同一数据宇宙（同一选股与同一数据切分）
         try:
             bootstrap_args = copy.deepcopy(args)
             bootstrap_args.metric = metrics_list[0]
+            bootstrap_args.auto_launch_dashboard = not is_multi_metric
+            if shared_dashboard_log_file:
+                bootstrap_args.shared_journal_log_file = shared_dashboard_log_file
             bootstrap_job = optimizer.OptimizationJob(
                 args=bootstrap_args,
                 fixed_params=s_params,
@@ -292,6 +305,7 @@ if __name__ == '__main__':
                 risk_params=r_params
             )
             shared_context = bootstrap_job.export_shared_context()
+            dashboard_launcher_job = bootstrap_job
         except Exception as e:
             print(f"[警告] 共享上下文构建失败，将降级为逐metric独立初始化: {e}")
 
@@ -304,6 +318,9 @@ if __name__ == '__main__':
                 else:
                     baseline_args = copy.deepcopy(args)
                     baseline_args.metric = metrics_list[0]
+                    baseline_args.auto_launch_dashboard = not is_multi_metric
+                    if shared_dashboard_log_file:
+                        baseline_args.shared_journal_log_file = shared_dashboard_log_file
                     baseline_job = optimizer.OptimizationJob(
                         args=baseline_args,
                         fixed_params=s_params,
@@ -324,6 +341,9 @@ if __name__ == '__main__':
             # 深拷贝 args，确保物理隔离
             current_args = copy.deepcopy(args)
             current_args.metric = current_metric
+            current_args.auto_launch_dashboard = not is_multi_metric
+            if shared_dashboard_log_file:
+                current_args.shared_journal_log_file = shared_dashboard_log_file
 
             start_time = time.time()
 
@@ -338,6 +358,8 @@ if __name__ == '__main__':
                     job_kwargs["shared_context"] = shared_context
 
                 job = optimizer.OptimizationJob(**job_kwargs)
+                if dashboard_launcher_job is None:
+                    dashboard_launcher_job = job
 
                 # 执行优化并接收返回的字典战报
                 result_dict = job.run()
@@ -420,9 +442,32 @@ if __name__ == '__main__':
 
             if final_reports:
                 print("请在 Dashboard 中回放并排查孤点: ")
+                dashboard_logs = []
                 for r in final_reports:
-                    if r.get('log_file'):
-                        print(f"optuna-dashboard {r.get('log_file')}")
+                    log_file = r.get('log_file')
+                    if log_file and log_file not in dashboard_logs:
+                        dashboard_logs.append(log_file)
+                for log_file in dashboard_logs:
+                    print(f"optuna-dashboard {log_file}")
+
+                # 多 metric 场景只在末尾弹一次 Dashboard（共享 Journal 可聚合全部 metric）
+                if is_multi_metric and dashboard_launcher_job and dashboard_logs:
+                    final_log = shared_dashboard_log_file or dashboard_logs[0]
+                    if os.path.exists(final_log):
+                        base_port = getattr(config, 'OPTUNA_DASHBOARD_PORT', 8090)
+                        target_port = base_port
+                        for _ in range(100):
+                            if not optimizer.is_port_in_use(target_port):
+                                break
+                            target_port += 1
+                        else:
+                            print(f"[Warning] Could not find an available port starting from {base_port}.")
+                            target_port = base_port
+                        print(f"[Info] Multi-metric training completed. Launching aggregated dashboard: {final_log}")
+                        print("[Info] Dashboard will run in foreground. Analyze results, then press Ctrl-C to exit.")
+                        dashboard_launcher_job._launch_dashboard(final_log, port=target_port, background=False)
+                    else:
+                        print(f"[Warning] Aggregated dashboard log file not found: {final_log}")
             else:
                 print("[警告] 当前仅有基准回测结果，训练指标未返回结果。")
         else:

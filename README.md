@@ -388,6 +388,9 @@ QuantAda/
 ### 实时Optuna优化进度看板
 ![optuna-dashboard](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/optuna-dashboard.png?raw=true)  
 
+### 轻量级人机系统监督多臂赌博机
+![optimizer-bandit-summary](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/optimizer-bandit-summary.png?raw=true)  
+
 
 ## 免责声明
 

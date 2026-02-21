@@ -416,9 +416,11 @@ class OptimizationJob:
         print(f"[Optimizer] Auto-refining study_name (Date-Based): {new_name}")
         self.args.study_name = new_name
 
-    def _launch_dashboard(self, log_file, port=8080):
+    def _launch_dashboard(self, log_file, port=8080, background=True):
         """
-        [线程版] 直接在代码中运行 Optuna Dashboard
+        直接在代码中运行 Optuna Dashboard。
+        - background=True: 后台线程模式（默认）
+        - background=False: 前台阻塞模式（按 Ctrl-C 退出）
         """
         if not HAS_DASHBOARD:
             print("[Warning] 'optuna-dashboard' not installed. Skipping.")
@@ -437,11 +439,12 @@ class OptimizationJob:
         # 同时也覆盖 wsgiref 的日志方法 (双重保险)
         wsgiref.simple_server.WSGIRequestHandler.log_message = silent_log_message
 
+        mode_str = "Thread Mode" if background else "Foreground Mode"
         print("\n" + "=" * 60)
-        print(">>> STARTING DASHBOARD (Thread Mode) <<<")
+        print(f">>> STARTING DASHBOARD ({mode_str}) <<<")
         print("=" * 60)
 
-        def start_server():
+        def build_storage_and_run():
             # 静默日志
             loggers_to_silence = [
                 "optuna",
@@ -456,35 +459,59 @@ class OptimizationJob:
 
             # 1. 在线程内部初始化存储对象
             # 这样可以确保它读取的是最新的文件
+            storage = JournalStorage(JournalFileBackendCls(log_file))
+
+            # 2. 启动服务 (这是一个阻塞操作，会一直运行)
+            run_server(storage, host="127.0.0.1", port=port)
+
+        def open_browser_later(url):
             try:
-                storage = JournalStorage(JournalFileBackendCls(log_file))
-
-                # 2. 启动服务 (这是一个阻塞操作，会一直运行)
-                run_server(storage, host="127.0.0.1", port=port)
-            except OSError as e:
-                if "Address already in use" in str(e) or (hasattr(e, 'winerror') and e.winerror == 10048):
-                    print(f"\n[Error] Port {port} was seized by another process just now! Dashboard failed.")
-                else:
-                    print(f"\n[Error] Dashboard thread failed: {e}")
-            except Exception as e:
-                print(f"\n[Error] Dashboard crashed: {e}")
-
-        # 3. 创建并启动守护线程
-        t = threading.Thread(target=start_server, daemon=True)
-        t.start()
+                time.sleep(1.0)
+                webbrowser.open(url)
+            except Exception:
+                pass
 
         dashboard_url = f"http://127.0.0.1:{port}"
         print(f"[Success] Dashboard is running at: {dashboard_url}")
 
-        # 4. 尝试打开浏览器
-        try:
-            time.sleep(1.5)
-            webbrowser.open(dashboard_url)
-        except:
-            pass
+        if background:
+            def start_server():
+                try:
+                    build_storage_and_run()
+                except OSError as e:
+                    if "Address already in use" in str(e) or (hasattr(e, 'winerror') and e.winerror == 10048):
+                        print(f"\n[Error] Port {port} was seized by another process just now! Dashboard failed.")
+                    else:
+                        print(f"\n[Error] Dashboard thread failed: {e}")
+                except Exception as e:
+                    print(f"\n[Error] Dashboard crashed: {e}")
 
-        print("[INFO] Dashboard running in background thread.")
+            # 3. 创建并启动守护线程
+            t = threading.Thread(target=start_server, daemon=True)
+            t.start()
+
+            # 4. 尝试打开浏览器
+            open_browser_later(dashboard_url)
+
+            print("[INFO] Dashboard running in background thread.")
+            print("=" * 60 + "\n")
+            return
+
+        # 前台模式：主线程阻塞，允许用户人工排查后 Ctrl-C 退出
+        print("[INFO] Dashboard running in foreground. Press Ctrl-C to stop.")
         print("=" * 60 + "\n")
+        threading.Thread(target=open_browser_later, args=(dashboard_url,), daemon=True).start()
+        try:
+            build_storage_and_run()
+        except KeyboardInterrupt:
+            print("\n[INFO] Dashboard stopped by user (Ctrl-C).")
+        except OSError as e:
+            if "Address already in use" in str(e) or (hasattr(e, 'winerror') and e.winerror == 10048):
+                print(f"\n[Error] Port {port} was seized by another process just now! Dashboard failed.")
+            else:
+                print(f"\n[Error] Dashboard failed: {e}")
+        except Exception as e:
+            print(f"\n[Error] Dashboard crashed: {e}")
 
     def _estimate_n_trials(self):
         """
@@ -889,21 +916,34 @@ class OptimizationJob:
         # 1. 配置存储 (支持多核)
         storage = None
         n_jobs = getattr(self.args, 'n_jobs', 1)
+        auto_launch_dashboard = bool(getattr(self.args, 'auto_launch_dashboard', True))
+        shared_journal_log_file = getattr(self.args, 'shared_journal_log_file', None)
+        use_journal_storage = (n_jobs != 1) or bool(shared_journal_log_file)
 
         log_file = None
 
-        if n_jobs != 1:
+        if use_journal_storage:
             if HAS_JOURNAL:
                 log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
                 os.makedirs(log_dir, exist_ok=True)
 
-                # 为每个 study 创建独立的日志文件，彻底消除跨任务的锁争抢
-                log_file = os.path.join(log_dir, f"optuna_{self.args.study_name}.log")
+                # 支持多指标共享同一个 Journal 文件，以便最终只弹出一个聚合 Dashboard
+                if shared_journal_log_file:
+                    shared_dir = os.path.dirname(shared_journal_log_file)
+                    if shared_dir:
+                        os.makedirs(shared_dir, exist_ok=True)
+                    log_file = shared_journal_log_file
+                else:
+                    # 为每个 study 创建独立的日志文件，彻底消除跨任务的锁争抢
+                    log_file = os.path.join(log_dir, f"optuna_{self.args.study_name}.log")
 
                 try:
                     # 尝试创建文件存储
                     storage = JournalStorage(JournalFileBackendCls(log_file))
-                    print(f"\n[Optimizer] Multi-core mode enabled (n_jobs={n_jobs}).")
+                    if n_jobs != 1:
+                        print(f"\n[Optimizer] Multi-core mode enabled (n_jobs={n_jobs}).")
+                    else:
+                        print(f"\n[Optimizer] JournalStorage enabled for dashboard/log persistence (n_jobs=1).")
                     print(f"[Optimizer] Using JournalStorage: {log_file}")
                 except OSError as e:
                     # 专门捕获 Windows 权限错误 (WinError 1314)
@@ -922,9 +962,12 @@ class OptimizationJob:
                     else:
                         raise e
             else:
-                print("\n[Warning] optuna.storages.JournalStorage not found.")
-                print("[Warning] Fallback to single-core to avoid SQLite dependency.")
-                n_jobs = 1
+                if n_jobs != 1:
+                    print("\n[Warning] optuna.storages.JournalStorage not found.")
+                    print("[Warning] Fallback to single-core to avoid SQLite dependency.")
+                    n_jobs = 1
+                elif shared_journal_log_file:
+                    print("\n[Warning] JournalStorage unavailable. Dashboard persistence disabled for this run.")
 
         # 使用 TPESampler(constant_liar=True)
         # 这会防止多个 Worker 同时采样到同一个点（并发踩踏）
@@ -980,7 +1023,7 @@ class OptimizationJob:
             n_trials = self._estimate_n_trials()
             print(f"[Optimizer] Auto-inferred n_trials: {n_trials} (based on param complexity)")
 
-        if log_file and os.path.exists(log_file):
+        if auto_launch_dashboard and log_file and os.path.exists(log_file):
             # 端口检测与递增逻辑
             base_port = getattr(config, 'OPTUNA_DASHBOARD_PORT', 8090)
             target_port = base_port
