@@ -29,12 +29,14 @@ import copy
 import datetime
 import importlib
 import math
+import multiprocessing as mp
 import os
 import socket
 import sys
 import threading
 import time
 import webbrowser
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import optuna
 import optuna.visualization as vis
@@ -71,6 +73,7 @@ except ImportError:
 # 以 metric_arg 为键缓存函数指针，避免多指标串用同一个函数。
 # key 格式: "{default_pkg}:{metric_arg}"
 _METRIC_FUNC_CACHE = {}
+_FORK_SHARED_WORKER_PAYLOAD = None
 
 
 def get_metric_function(metric_arg, default_pkg="metrics"):
@@ -133,6 +136,7 @@ class OptimizationJob:
         self.fixed_params = fixed_params
         self.opt_params_def = opt_params_def
         self.risk_params = risk_params
+        self._reset_trial_dedupe_cache()
 
         # 共享上下文模式：复用选股、数据抓取与切分结果，确保多指标/基准对比在同一数据宇宙下进行
         if shared_context is not None:
@@ -214,6 +218,146 @@ class OptimizationJob:
             "test_range": self.test_range,
             "window_data_cache": self._window_data_cache,
         }
+
+    def _reset_trial_dedupe_cache(self):
+        """
+        进程内结果缓存：参数哈希 -> 评分。
+        仅用于避免同一 worker 重复评估相同参数。
+        """
+        self._completed_trial_cache = {}
+
+    @staticmethod
+    def _resolve_worker_count(requested_jobs):
+        if requested_jobs == -1:
+            return max(1, os.cpu_count() or 1)
+        return max(1, int(requested_jobs))
+
+    def _build_worker_payload(self):
+        """
+        构造多进程 worker 所需的最小上下文，避免传输不必要对象。
+        """
+        return {
+            "args": self.args,
+            "fixed_params": self.fixed_params,
+            "opt_params_def": self.opt_params_def,
+            "risk_params": self.risk_params,
+            "train_datas": self.train_datas,
+            "train_range": self.train_range,
+        }
+
+    @classmethod
+    def from_worker_payload(cls, payload):
+        """
+        在子进程内恢复可执行 objective 的最小 Job 实例。
+        """
+        obj = cls.__new__(cls)
+        obj.args = payload["args"]
+        obj.fixed_params = payload["fixed_params"]
+        obj.opt_params_def = payload["opt_params_def"]
+        obj.risk_params = payload["risk_params"]
+        obj.train_datas = payload["train_datas"]
+        obj.train_range = payload["train_range"]
+
+        obj.strategy_class = get_class_from_name(obj.args.strategy, ['strategies'])
+        obj.risk_control_classes = []
+        if obj.args.risk:
+            for r_name in obj.args.risk.split(','):
+                r_name = r_name.strip()
+                if r_name:
+                    rc_cls = get_class_from_name(r_name, ['risk_controls', 'strategies'])
+                    obj.risk_control_classes.append(rc_cls)
+
+        obj.has_debugged_data = False
+        obj._reset_trial_dedupe_cache()
+        return obj
+
+    @staticmethod
+    def _normalize_param_value(value):
+        if isinstance(value, float):
+            # 限制浮点抖动，保证哈希稳定
+            return round(value, 12)
+        if isinstance(value, list):
+            return tuple(OptimizationJob._normalize_param_value(v) for v in value)
+        if isinstance(value, dict):
+            return tuple(sorted((k, OptimizationJob._normalize_param_value(v)) for k, v in value.items()))
+        return value
+
+    def _params_to_key(self, params_dict):
+        return tuple(sorted((k, self._normalize_param_value(v)) for k, v in params_dict.items()))
+
+    def _get_cached_trial_value(self, params_key):
+        return self._completed_trial_cache.get(params_key)
+
+    def _cache_completed_trial(self, params_key, score):
+        try:
+            score_val = float(score)
+        except Exception:
+            return
+
+        if math.isnan(score_val) or math.isinf(score_val):
+            return
+
+        self._completed_trial_cache[params_key] = score_val
+
+    def _run_multiprocess_optimization(self, n_jobs, n_trials, log_file, prefer_fork_cow=False):
+        if not log_file:
+            raise RuntimeError("Multi-process mode requires a shared JournalStorage log file.")
+        if int(n_trials) <= 0:
+            return
+
+        worker_count = self._resolve_worker_count(n_jobs)
+        worker_count = min(worker_count, max(1, int(n_trials)))
+
+        base = n_trials // worker_count
+        rem = n_trials % worker_count
+        worker_trials = [base + (1 if i < rem else 0) for i in range(worker_count)]
+        worker_trials = [x for x in worker_trials if x > 0]
+        if not worker_trials:
+            return
+
+        start_method = "spawn"
+        if prefer_fork_cow and sys.platform.startswith("linux"):
+            try:
+                mp.get_context("fork")
+                start_method = "fork"
+            except ValueError:
+                start_method = "spawn"
+
+        print(f"[Optimizer] Multi-process mode: launching {len(worker_trials)} workers ({start_method}).")
+
+        worker_payload = self._build_worker_payload()
+        payload_arg = worker_payload
+        seed_base = int(time.time() * 1_000_000) % (2 ** 31 - 1)
+        futures = []
+        ctx = mp.get_context(start_method)
+
+        global _FORK_SHARED_WORKER_PAYLOAD
+        if start_method == "fork":
+            # fork 模式下，子进程会继承父进程内存页（Copy-on-Write），
+            # 避免将大体量 train_datas 再序列化传输给每个 worker。
+            _FORK_SHARED_WORKER_PAYLOAD = worker_payload
+            payload_arg = None
+
+        try:
+            with ProcessPoolExecutor(max_workers=len(worker_trials), mp_context=ctx) as executor:
+                for worker_idx, local_trials in enumerate(worker_trials, start=1):
+                    futures.append(
+                        executor.submit(
+                            _optimize_worker_entry,
+                            payload_arg,
+                            self.args.study_name,
+                            log_file,
+                            local_trials,
+                            worker_idx,
+                            seed_base + worker_idx,
+                        )
+                    )
+
+                for fut in as_completed(futures):
+                    fut.result()
+        finally:
+            if start_method == "fork":
+                _FORK_SHARED_WORKER_PAYLOAD = None
 
     def _fetch_all_data(self):
         print("\n--- Fetching Data for Optimization ---")
@@ -382,12 +526,9 @@ class OptimizationJob:
 
     def _auto_refine_study_name(self):
         """
-        基于时间维度的自动化命名逻辑
+        基于时间维度的自动化命名逻辑（始终自动生成）
         格式：[训练周期]_[测试周期]_[指标]_[起止日期]_[时间戳]
         """
-        if self.args.study_name:
-            return
-
         # 1. 提取周期标签 (Period Tags)
         # 训练周期名 (如: 3Y, 1Y)
         tr_p = self.args.train_roll_period.upper() if self.args.train_roll_period else "ALL"
@@ -408,10 +549,11 @@ class OptimizationJob:
         # 3. 构造语义化名称
         # 格式示例：3Y_3M_20220212_20260212_153022
         # 含义：3年训练，3个月测试，覆盖 2022-2026，下午3点50分执行
-        timestamp = datetime.datetime.now().strftime("%H%M%S")
+        timestamp = datetime.datetime.now().strftime("%H%M%S_%f")
+        run_pid = os.getpid()
 
         # 移除可能导致路径问题的特殊字符
-        new_name = f"{tr_p}_{te_p}_{self.args.metric}_{start_str}_{end_str}_{timestamp}"
+        new_name = f"{tr_p}_{te_p}_{self.args.metric}_{start_str}_{end_str}_{timestamp}_{run_pid}"
 
         print(f"[Optimizer] Auto-refining study_name (Date-Based): {new_name}")
         self.args.study_name = new_name
@@ -567,70 +709,8 @@ class OptimizationJob:
 
         return final_estimated
 
-    def objective(self, trial):
-        current_params = copy.deepcopy(self.fixed_params)
-        # 获取当前试验的参数
-        trial_params_dict = {}
-
-        for param_name, config in self.opt_params_def.items():
-            p_type = config.get('type')
-            if p_type == 'int':
-                # 自动计算符合步进的最大 high 值
-                step = config.get('step', 1)
-                high = config['high']
-                low = config['low']
-                # 修正逻辑: high = low + n * step
-                corrected_high = low + int((high - low) // step) * step
-
-                val = trial.suggest_int(param_name, low, corrected_high, step=step)
-
-            elif p_type == 'float':
-                step = config.get('step', None)
-                low = config['low']
-                high = config['high']
-
-                if step is not None:
-                    # 浮点数修正，增加微小偏移防止精度丢失
-                    import math
-                    steps = math.floor((high - low) / step + 1e-10)
-                    corrected_high = low + steps * step
-                    # 如果修正值和原始值非常接近（浮点误差），就用原始的，否则用修正的
-                    if abs(corrected_high - high) > 1e-10:
-                        high = corrected_high
-
-                val = trial.suggest_float(param_name, low, high, step=step)
-            elif p_type == 'categorical':
-                val = trial.suggest_categorical(param_name, config['choices'])
-            else:
-                val = config.get('value')
-            current_params[param_name] = val
-            trial_params_dict[param_name] = val
-
-        try:
-            # 1. 获取所有之前的 Trial (包括 Running, Complete, Pruned)
-            existing_trials = trial.study.get_trials(deepcopy=False)
-
-            for t in existing_trials:
-                # 跳过自己
-                if t.number == trial.number:
-                    continue
-
-                # 如果参数完全一致
-                if t.params == trial_params_dict:
-
-                    # 情况 A: 之前已经有人跑完了 -> 直接抄作业 (Cache Hit)
-                    if t.state == optuna.trial.TrialState.COMPLETE:
-                        return t.value
-
-                    # 情况 B: 此时此刻有人正在跑 -> 我是多余的，自我了断 (Prune)
-                    elif t.state == optuna.trial.TrialState.RUNNING:
-                        raise optuna.TrialPruned("Duplicate of a running trial")
-
-        except optuna.TrialPruned:
-            raise  # 必须把 Pruned 异常往外抛，Optuna 才能捕获
-        except Exception as e:
-            pass  # 其他查询错误忽略，兜底跑回测
-
+    def _evaluate_trial_params(self, current_params):
+        import math
         if not self.train_datas:
             return -9999.0
 
@@ -747,6 +827,46 @@ class OptimizationJob:
             print(f"Trial failed: {e}")
             traceback.print_exc()
             return -9999.0
+
+    def objective(self, trial):
+        current_params = copy.deepcopy(self.fixed_params)
+        trial_params_dict = {}
+
+        for param_name, config in self.opt_params_def.items():
+            p_type = config.get('type')
+            if p_type == 'int':
+                step = config.get('step', 1)
+                high = config['high']
+                low = config['low']
+                corrected_high = low + int((high - low) // step) * step
+                val = trial.suggest_int(param_name, low, corrected_high, step=step)
+            elif p_type == 'float':
+                step = config.get('step', None)
+                low = config['low']
+                high = config['high']
+                if step is not None:
+                    steps = math.floor((high - low) / step + 1e-10)
+                    corrected_high = low + steps * step
+                    if abs(corrected_high - high) > 1e-10:
+                        high = corrected_high
+                val = trial.suggest_float(param_name, low, high, step=step)
+            elif p_type == 'categorical':
+                val = trial.suggest_categorical(param_name, config['choices'])
+            else:
+                val = config.get('value')
+
+            current_params[param_name] = val
+            trial_params_dict[param_name] = val
+
+        params_key = self._params_to_key(trial_params_dict)
+
+        cached_value = self._get_cached_trial_value(params_key)
+        if cached_value is not None:
+            return cached_value
+
+        score = self._evaluate_trial_params(current_params)
+        self._cache_completed_trial(params_key, score)
+        return score
 
     def prepare_data_index(self, df: pd.DataFrame) -> pd.DataFrame:
         """确保 DataFrame 的索引是 DatetimeIndex"""
@@ -941,7 +1061,8 @@ class OptimizationJob:
                     # 尝试创建文件存储
                     storage = JournalStorage(JournalFileBackendCls(log_file))
                     if n_jobs != 1:
-                        print(f"\n[Optimizer] Multi-core mode enabled (n_jobs={n_jobs}).")
+                        resolved = self._resolve_worker_count(n_jobs)
+                        print(f"\n[Optimizer] Multi-core mode enabled (n_jobs={n_jobs} -> workers={resolved}).")
                     else:
                         print(f"\n[Optimizer] JournalStorage enabled for dashboard/log persistence (n_jobs=1).")
                     print(f"[Optimizer] Using JournalStorage: {log_file}")
@@ -1023,6 +1144,9 @@ class OptimizationJob:
             n_trials = self._estimate_n_trials()
             print(f"[Optimizer] Auto-inferred n_trials: {n_trials} (based on param complexity)")
 
+        resolved_workers = self._resolve_worker_count(n_jobs)
+        effective_parallel_jobs = min(resolved_workers, max(1, int(n_trials)))
+
         if auto_launch_dashboard and log_file and os.path.exists(log_file):
             # 端口检测与递增逻辑
             base_port = getattr(config, 'OPTUNA_DASHBOARD_PORT', 8090)
@@ -1038,11 +1162,19 @@ class OptimizationJob:
 
             self._launch_dashboard(log_file, port=target_port)
 
-        print(f"\n--- Starting Optimization ({n_trials} trials, {n_jobs} parallel jobs) ---")
+        print(f"\n--- Starting Optimization ({n_trials} trials, {effective_parallel_jobs} parallel jobs) ---")
 
         # 3. 执行优化
         try:
-            study.optimize(self.objective, n_trials=n_trials, n_jobs=n_jobs)
+            if effective_parallel_jobs > 1:
+                self._run_multiprocess_optimization(
+                    n_jobs=n_jobs,
+                    n_trials=n_trials,
+                    log_file=log_file,
+                    prefer_fork_cow=(not auto_launch_dashboard),
+                )
+            else:
+                study.optimize(self.objective, n_trials=n_trials, n_jobs=1)
         except KeyboardInterrupt:
             print("\n[Optimizer] Optimization stopped by user.")
 
@@ -1118,4 +1250,33 @@ class OptimizationJob:
             "log_file": log_file,
             "recent_backtest": recent_3y_metrics,
         }
+
+
+def _optimize_worker_entry(worker_payload, study_name, log_file, n_trials, worker_idx, sampler_seed):
+    """
+    多进程子进程入口：每个 worker 连接同一个 Study，执行固定 trial 配额。
+    """
+    if not HAS_JOURNAL:
+        raise RuntimeError("JournalStorage is required for multi-process optimization.")
+
+    if worker_payload is None:
+        # fork + COW 模式：从模块全局中读取父进程继承的 payload
+        worker_payload = _FORK_SHARED_WORKER_PAYLOAD
+    if worker_payload is None:
+        raise RuntimeError("Worker payload is missing.")
+
+    storage = JournalStorage(JournalFileBackendCls(log_file))
+    sampler = TPESampler(constant_liar=True, seed=sampler_seed)
+
+    study = optuna.create_study(
+        direction='maximize',
+        study_name=study_name,
+        storage=storage,
+        load_if_exists=True,
+        sampler=sampler,
+    )
+
+    job = OptimizationJob.from_worker_payload(worker_payload)
+    study.optimize(job.objective, n_trials=n_trials, n_jobs=1)
+    return {"worker_idx": worker_idx, "n_trials": n_trials}
 

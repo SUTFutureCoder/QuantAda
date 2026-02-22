@@ -157,7 +157,6 @@ if __name__ == '__main__':
     parser.add_argument('--n_jobs', type=int, default=-1, help="[优化模式] 并行核心数 (-1 表示使用所有核心)")
     parser.add_argument('--metric', type=str, default='mix_score_origin',
                         help="[优化模式] 优化目标 (支持逗号分隔的多私有指标串行执行)")
-    parser.add_argument('--study_name', type=str, default=None, help="[优化模式] 训练名称")
     parser.add_argument('--train_roll_period', type=str, default=None,
                         help="[优化模式] 训练集滚动周期 (从测试集开始时间往前推)。例如：1y, 3y")
     parser.add_argument('--test_roll_period', type=str, default=None,
@@ -368,7 +367,7 @@ if __name__ == '__main__':
                 if result_dict and isinstance(result_dict, dict):
                     result_dict['metric_name'] = current_args.metric
                     result_dict['elapsed_hours'] = elapsed_hours
-                    result_dict['study_db'] = current_args.study_name
+                    result_dict['study_db'] = getattr(current_args, 'study_name', 'N/A')
                     final_reports.append(result_dict)
 
             except Exception as e:
