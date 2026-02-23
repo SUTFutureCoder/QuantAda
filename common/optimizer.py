@@ -31,13 +31,16 @@ import importlib
 import math
 import multiprocessing as mp
 import os
+import re
 import socket
 import sys
 import threading
 import time
 import webbrowser
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import shared_memory
 
+import numpy as np
 import optuna
 import optuna.visualization as vis
 import pandas as pd
@@ -131,6 +134,10 @@ def is_port_in_use(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 class OptimizationJob:
+    CN_EXCHANGE_PREFIXES = {"SHSE", "SZSE", "SH", "SZ"}
+    HK_EXCHANGE_PREFIXES = {"SEHK", "HK"}
+    US_EXCHANGE_PREFIXES = {"NASDAQ", "NYSE", "AMEX", "ARCA", "BATS", "ISLAND", "SMART", "PINK", "US"}
+
     def __init__(self, args, fixed_params, opt_params_def, risk_params, shared_context=None):
         self.args = args
         self.fixed_params = fixed_params
@@ -227,10 +234,37 @@ class OptimizationJob:
         self._completed_trial_cache = {}
 
     @staticmethod
-    def _resolve_worker_count(requested_jobs):
+    def _get_total_cpu_cores():
+        return max(1, os.cpu_count() or 1)
+
+    @classmethod
+    def _resolve_worker_count(cls, requested_jobs):
+        """
+        将 n_jobs 解析为实际 worker 数。
+        规则：
+        - n_jobs > 0: 指定 worker 数（上限为机器总核数）
+        - n_jobs = -1: 自动保留系统冗余，workers = C - max(2, ceil(0.15 * C))
+        - n_jobs < -1: joblib 风格，workers = C - (abs(n_jobs) - 1)
+        - n_jobs = 0 或非法值: 降级为 1
+        """
+        total_cores = cls._get_total_cpu_cores()
+        try:
+            requested_jobs = int(requested_jobs)
+        except (TypeError, ValueError):
+            requested_jobs = 1
+
         if requested_jobs == -1:
-            return max(1, os.cpu_count() or 1)
-        return max(1, int(requested_jobs))
+            reserved_cores = max(2, math.ceil(total_cores * 0.15))
+            return max(1, total_cores - reserved_cores)
+
+        if requested_jobs < -1:
+            reserved_cores = abs(requested_jobs) - 1
+            return max(1, total_cores - reserved_cores)
+
+        if requested_jobs == 0:
+            return 1
+
+        return max(1, min(total_cores, requested_jobs))
 
     def _build_worker_payload(self):
         """
@@ -243,7 +277,179 @@ class OptimizationJob:
             "risk_params": self.risk_params,
             "train_datas": self.train_datas,
             "train_range": self.train_range,
+            # spawn 子进程不会继承主进程运行期改写的 config，显式透传日志开关。
+            "log_enabled": bool(getattr(config, "LOG", False)),
         }
+
+    @staticmethod
+    def _create_shared_array(array_like):
+        arr = np.ascontiguousarray(array_like)
+        if arr.dtype == object:
+            raise TypeError("object dtype is not supported in shared memory mode")
+
+        alloc_size = max(1, int(arr.nbytes))
+        shm = shared_memory.SharedMemory(create=True, size=alloc_size)
+        shm_arr = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+        if arr.size > 0:
+            np.copyto(shm_arr, arr)
+
+        meta = {
+            "name": shm.name,
+            "shape": arr.shape,
+        }
+        if arr.dtype.names:
+            # structured dtype 需要保留字段描述，dtype.str 会丢失 field names
+            meta["dtype_descr"] = arr.dtype.descr
+        else:
+            meta["dtype"] = arr.dtype.str
+
+        return meta, shm
+
+    @staticmethod
+    def _attach_shared_array(meta):
+        shm = shared_memory.SharedMemory(name=meta["name"])
+        if "dtype_descr" in meta:
+            dtype = np.dtype(meta["dtype_descr"])
+        else:
+            dtype = np.dtype(meta["dtype"])
+        arr = np.ndarray(tuple(meta["shape"]), dtype=dtype, buffer=shm.buf)
+        arr.setflags(write=False)
+        return arr, shm
+
+    @staticmethod
+    def _cleanup_shared_segments(shm_handles, unlink=False):
+        for shm in shm_handles:
+            try:
+                shm.close()
+            except Exception:
+                pass
+            if unlink:
+                try:
+                    shm.unlink()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _force_shutdown_process_pool(executor, futures):
+        """
+        在 Ctrl-C 等中断场景下，尽快回收 ProcessPoolExecutor 及其子进程。
+        """
+        if executor is None:
+            return
+
+        for fut in futures or []:
+            try:
+                fut.cancel()
+            except Exception:
+                pass
+
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+        # 访问私有字段做兜底清理，避免 spawn 子进程在中断后继续占用 CPU。
+        processes = getattr(executor, "_processes", None)
+        if not processes:
+            return
+
+        for proc in list(processes.values()):
+            try:
+                if proc.is_alive():
+                    proc.terminate()
+            except Exception:
+                pass
+
+        deadline = time.time() + 2.0
+        for proc in list(processes.values()):
+            try:
+                remain = max(0.0, deadline - time.time())
+                proc.join(timeout=remain)
+            except Exception:
+                pass
+
+        for proc in list(processes.values()):
+            try:
+                if proc.is_alive() and hasattr(proc, "kill"):
+                    proc.kill()
+            except Exception:
+                pass
+
+    def _build_spawn_shared_payload(self, worker_payload):
+        """
+        spawn 模式下将 train_datas 放入 shared_memory，避免为每个 worker 重复序列化大对象。
+        """
+        train_datas = worker_payload.get("train_datas") or {}
+        if not train_datas:
+            return worker_payload, []
+
+        shm_handles = []
+        shared_meta = {"symbols": {}}
+
+        try:
+            for symbol, df in train_datas.items():
+                idx_meta, idx_shm = self._create_shared_array(df.index.to_numpy(copy=False))
+                shm_handles.append(idx_shm)
+
+                # 将所有列压成一个 structured array，只占用一个共享内存段
+                columns_meta = []
+                structured_fields = []
+                col_arrays = []
+                for i, col in enumerate(df.columns):
+                    arr = np.ascontiguousarray(df[col].to_numpy(copy=False))
+                    if arr.dtype == object:
+                        raise TypeError("object dtype is not supported in shared memory mode")
+                    field_name = f"f{i}"
+                    structured_fields.append((field_name, arr.dtype))
+                    col_arrays.append((field_name, arr))
+                    columns_meta.append({
+                        "name": col,
+                        "field": field_name,
+                    })
+
+                records = np.empty(len(df), dtype=structured_fields)
+                for field_name, arr in col_arrays:
+                    records[field_name] = arr
+                records_meta, records_shm = self._create_shared_array(records)
+                shm_handles.append(records_shm)
+
+                symbol_meta = {
+                    "index": idx_meta,
+                    "index_name": df.index.name,
+                    "columns": columns_meta,
+                    "records": records_meta,
+                }
+
+                shared_meta["symbols"][symbol] = symbol_meta
+
+            shared_payload = dict(worker_payload)
+            shared_payload["train_datas"] = None
+            shared_payload["train_datas_shared"] = shared_meta
+            return shared_payload, shm_handles
+        except Exception:
+            self._cleanup_shared_segments(shm_handles, unlink=True)
+            return worker_payload, []
+
+    @staticmethod
+    def _restore_train_datas_from_shared(shared_meta):
+        train_datas = {}
+        shm_handles = []
+
+        for symbol, symbol_meta in (shared_meta or {}).get("symbols", {}).items():
+            idx_arr, idx_shm = OptimizationJob._attach_shared_array(symbol_meta["index"])
+            shm_handles.append(idx_shm)
+            index_obj = pd.Index(idx_arr, name=symbol_meta.get("index_name"))
+
+            records_arr, records_shm = OptimizationJob._attach_shared_array(symbol_meta["records"])
+            shm_handles.append(records_shm)
+
+            data_dict = {}
+            for col_spec in symbol_meta.get("columns", []):
+                data_dict[col_spec["name"]] = records_arr[col_spec["field"]]
+
+            train_datas[symbol] = pd.DataFrame(data_dict, index=index_obj, copy=False)
+
+        return train_datas, shm_handles
 
     @classmethod
     def from_worker_payload(cls, payload):
@@ -327,6 +533,7 @@ class OptimizationJob:
 
         worker_payload = self._build_worker_payload()
         payload_arg = worker_payload
+        shared_parent_handles = []
         seed_base = int(time.time() * 1_000_000) % (2 ** 31 - 1)
         futures = []
         ctx = mp.get_context(start_method)
@@ -337,27 +544,43 @@ class OptimizationJob:
             # 避免将大体量 train_datas 再序列化传输给每个 worker。
             _FORK_SHARED_WORKER_PAYLOAD = worker_payload
             payload_arg = None
+        else:
+            payload_arg, shared_parent_handles = self._build_spawn_shared_payload(worker_payload)
+            if shared_parent_handles:
+                print("[Optimizer] Spawn mode: train_datas shared via multiprocessing.shared_memory.")
+            else:
+                print("[Optimizer] Spawn mode: fallback to payload copy (non-sharable dtype detected).")
 
+        executor = None
+        interrupted = False
         try:
-            with ProcessPoolExecutor(max_workers=len(worker_trials), mp_context=ctx) as executor:
-                for worker_idx, local_trials in enumerate(worker_trials, start=1):
-                    futures.append(
-                        executor.submit(
-                            _optimize_worker_entry,
-                            payload_arg,
-                            self.args.study_name,
-                            log_file,
-                            local_trials,
-                            worker_idx,
-                            seed_base + worker_idx,
-                        )
+            executor = ProcessPoolExecutor(max_workers=len(worker_trials), mp_context=ctx)
+            for worker_idx, local_trials in enumerate(worker_trials, start=1):
+                futures.append(
+                    executor.submit(
+                        _optimize_worker_entry,
+                        payload_arg,
+                        self.args.study_name,
+                        log_file,
+                        local_trials,
+                        worker_idx,
+                        seed_base + worker_idx,
                     )
+                )
 
-                for fut in as_completed(futures):
-                    fut.result()
+            for fut in as_completed(futures):
+                fut.result()
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\n[Optimizer] Ctrl-C detected. Forcing worker shutdown...")
+            self._force_shutdown_process_pool(executor, futures)
+            raise
         finally:
+            if executor is not None and not interrupted:
+                executor.shutdown(wait=True, cancel_futures=False)
             if start_method == "fork":
                 _FORK_SHARED_WORKER_PAYLOAD = None
+            self._cleanup_shared_segments(shared_parent_handles, unlink=True)
 
     def _fetch_all_data(self):
         print("\n--- Fetching Data for Optimization ---")
@@ -461,16 +684,19 @@ class OptimizationJob:
                 # 有测试集：Split Point = End - Test Roll
                 test_offset = parse_period_string(test_roll)
                 split_dt = anchor_dt - test_offset
+                # 防止训练集与测试集在 split_dt 当日重叠（slice 是闭区间）
+                train_end_dt = split_dt - pd.DateOffset(days=1)
             else:
                 # 无测试集 (Refit模式)：Split Point = End
                 split_dt = anchor_dt
+                train_end_dt = split_dt
 
             # Train Start = Split Point - Train Roll
             train_offset = parse_period_string(train_roll)
             train_start_dt = split_dt - train_offset
 
             tr_s = train_start_dt.strftime('%Y%m%d')
-            tr_e = split_dt.strftime('%Y%m%d')
+            tr_e = train_end_dt.strftime('%Y%m%d')
             te_s = split_dt.strftime('%Y%m%d')
             te_e = anchor_dt.strftime('%Y%m%d')
 
@@ -488,24 +714,24 @@ class OptimizationJob:
             return train_d, test_d, (tr_s, tr_e), (te_s, te_e)
 
         # 3. 比例切分模式
-        elif self.args.train_ratio:
+        elif self.args.train_ratio is not None:
             ratio = float(self.args.train_ratio)
+            if not (0 < ratio < 1):
+                raise ValueError(f"train_ratio must be between 0 and 1 (exclusive), got: {ratio}")
             print(f"Split Mode: Ratio ({ratio * 100}% Train)")
 
             all_dates = sorted(list(set().union(*[self.prepare_data_index(df).index for df in self.raw_datas.values()])))
             if not all_dates:
                 raise ValueError("Data has no valid dates.")
+            if len(all_dates) < 2:
+                raise ValueError("Need at least 2 timestamps to split train/test.")
 
+            # 采用半开区间切分语义：[0, split_idx) 为训练，[split_idx, n) 为测试
             split_idx = int(len(all_dates) * ratio)
+            split_idx = min(max(split_idx, 1), len(all_dates) - 1)
 
-            # 防止训练集和测试集重叠
-            train_end_date = all_dates[split_idx]
-
-            # 测试集从训练结束的下一条数据开始
-            if split_idx + 1 < len(all_dates):
-                test_start_date = all_dates[split_idx + 1]
-            else:
-                test_start_date = train_end_date  # 极端情况，无测试集
+            train_end_date = all_dates[split_idx - 1]
+            test_start_date = all_dates[split_idx]
 
             start_date_str = all_dates[0].strftime('%Y%m%d')
             split_date_str = train_end_date.strftime('%Y%m%d')
@@ -524,36 +750,155 @@ class OptimizationJob:
             print("Warning: No split method defined. Running optimization on FULL dataset.")
             return self.raw_datas, {}, (self.args.start_date, self.args.end_date), (None, None)
 
+    @staticmethod
+    def _sanitize_name_token(value, default="NA", max_len=48):
+        text = str(value or "").strip()
+        text = text.replace(".", "_").replace("-", "_")
+        text = re.sub(r"[^0-9A-Za-z_]+", "_", text)
+        text = re.sub(r"_+", "_", text).strip("_")
+        if not text:
+            text = default
+        return text[:max_len]
+
+    @classmethod
+    def _normalize_date_tag(cls, value, default="NA"):
+        if value is None:
+            return default
+        text = str(value).strip()
+        digits = re.sub(r"[^0-9]", "", text)
+        if len(digits) >= 8:
+            return digits[:8]
+        return cls._sanitize_name_token(text, default=default, max_len=12)
+
+    @classmethod
+    def infer_market_label(cls, symbols=None, data_source=None, selection=None):
+        prefixes = set()
+        symbol_list = symbols or []
+
+        for sym in symbol_list:
+            raw = str(sym or "").strip().upper()
+            if not raw:
+                continue
+
+            # 常见交易所前缀格式: SHSE.510300 / NASDAQ.AAPL / SEHK.700
+            if "." in raw:
+                prefix = raw.split(".", 1)[0]
+                if prefix:
+                    prefixes.add(prefix)
+                continue
+
+            # 无前缀代码交给 data_source 做二次推断
+            if raw.endswith(".SS"):
+                prefixes.add("SH")
+            elif raw.endswith(".SZ"):
+                prefixes.add("SZ")
+            elif raw.endswith(".HK"):
+                prefixes.add("HK")
+            elif raw.endswith("USDT") or raw.endswith("USD"):
+                prefixes.add("CRYPTO")
+            else:
+                prefixes.add("RAW")
+
+        if prefixes:
+            if prefixes.issubset(cls.CN_EXCHANGE_PREFIXES):
+                return "CN"
+            if prefixes.issubset(cls.HK_EXCHANGE_PREFIXES):
+                return "HK"
+            if "CRYPTO" in prefixes:
+                return "CRYPTO"
+            if prefixes.issubset(cls.US_EXCHANGE_PREFIXES):
+                return "US"
+            if prefixes == {"RAW"}:
+                prefixes = set()
+            elif len(prefixes) == 1:
+                return cls._sanitize_name_token(next(iter(prefixes)), default="MKT", max_len=12)
+            else:
+                return f"MIX{len(prefixes)}"
+
+        source_hint = str(data_source or "").split(",")[0].strip().lower()
+        if source_hint:
+            market_by_source = {
+                "tushare": "CN",
+                "sxsc_tushare": "CN",
+                "akshare": "CN",
+                "gm": "CN",
+                "ibkr": "US",
+                "tiingo": "US",
+                "yf": "GLOBAL",
+                "csv": "LOCAL",
+            }
+            return market_by_source.get(
+                source_hint,
+                cls._sanitize_name_token(source_hint.upper(), default="MKT", max_len=12),
+            )
+
+        if selection:
+            return cls._sanitize_name_token(selection, default="SEL", max_len=16)
+
+        return "MKT"
+
+    @classmethod
+    def build_optuna_name_tag(
+            cls,
+            metric,
+            train_period,
+            test_period,
+            train_range,
+            test_range,
+            data_source=None,
+            symbols=None,
+            selection=None,
+            run_dt=None,
+            run_pid=None,
+    ):
+        train_period_tag = cls._sanitize_name_token(
+            str(train_period or "ALL").upper(),
+            default="ALL",
+            max_len=16,
+        )
+        test_period_raw = str(test_period).upper() if test_period else "REFIT"
+        test_period_tag = cls._sanitize_name_token(test_period_raw, default="REFIT", max_len=16)
+        metric_tag = cls._sanitize_name_token(metric, default="metric", max_len=36)
+        market_tag = cls.infer_market_label(symbols=symbols, data_source=data_source, selection=selection)
+
+        tr_s = cls._normalize_date_tag((train_range or (None, None))[0], default="NA")
+        tr_e = cls._normalize_date_tag((train_range or (None, None))[1], default="NA")
+
+        te_s_raw = (test_range or (None, None))[0]
+        te_e_raw = (test_range or (None, None))[1]
+        if te_s_raw and te_e_raw:
+            te_s = cls._normalize_date_tag(te_s_raw, default="NA")
+            te_e = cls._normalize_date_tag(te_e_raw, default="NA")
+            test_range_tag = f"TE{te_s}-{te_e}"
+        else:
+            test_range_tag = "TE_REFIT"
+
+        run_dt = run_dt or datetime.datetime.now()
+        run_stamp = run_dt.strftime("%Y%m%d-%H%M%S")
+        pid_stamp = str(run_pid if run_pid is not None else os.getpid())
+
+        return (
+            f"{train_period_tag}_{test_period_tag}_{metric_tag}_{market_tag}_"
+            f"TR{tr_s}-{tr_e}_{test_range_tag}_RUN{run_stamp}_{pid_stamp}"
+        )
+
     def _auto_refine_study_name(self):
         """
         基于时间维度的自动化命名逻辑（始终自动生成）
-        格式：[训练周期]_[测试周期]_[指标]_[起止日期]_[时间戳]
+        格式：[训练周期]_[测试周期]_[指标]_[市场]_[训练集范围]_[测试集范围]_[运行时间]
         """
-        # 1. 提取周期标签 (Period Tags)
-        # 训练周期名 (如: 3Y, 1Y)
-        tr_p = self.args.train_roll_period.upper() if self.args.train_roll_period else "ALL"
-
-        # 测试周期名 (如: 3M, 6M) 或标记为 Refit (全量模式)
-        test_val = getattr(self.args, 'test_roll_period', None)
-        if test_val:
-            te_p = test_val.upper()
-        else:
-            te_p = "REFIT"  # 代表没有独立测试集，是用于生成的实盘参数
-
-        # 2. 提取日期边界 (Date Bounds)
-        # 训练开始日期
-        start_str = self.train_range[0]
-        # 整体结束日期 (如果有测试集则取测试集结束日期，否则取训练集结束日期)
-        end_str = self.test_range[1] if self.test_range[1] else self.train_range[1]
-
-        # 3. 构造语义化名称
-        # 格式示例：3Y_3M_20220212_20260212_153022
-        # 含义：3年训练，3个月测试，覆盖 2022-2026，下午3点50分执行
-        timestamp = datetime.datetime.now().strftime("%H%M%S_%f")
-        run_pid = os.getpid()
-
-        # 移除可能导致路径问题的特殊字符
-        new_name = f"{tr_p}_{te_p}_{self.args.metric}_{start_str}_{end_str}_{timestamp}_{run_pid}"
+        new_name = self.build_optuna_name_tag(
+            metric=self.args.metric,
+            train_period=self.args.train_roll_period,
+            test_period=getattr(self.args, "test_roll_period", None),
+            train_range=self.train_range,
+            test_range=self.test_range,
+            data_source=getattr(self.args, "data_source", None),
+            symbols=self.target_symbols,
+            selection=getattr(self.args, "selection", None),
+            run_dt=datetime.datetime.now(),
+            run_pid=os.getpid(),
+        )
 
         print(f"[Optimizer] Auto-refining study_name (Date-Based): {new_name}")
         self.args.study_name = new_name
@@ -657,57 +1002,134 @@ class OptimizationJob:
 
     def _estimate_n_trials(self):
         """
-        [激进版] 启发式算法：根据参数复杂度和算力自动估算 n_trials。
-        逻辑：算力越强，我们越有资本进行地毯式轰炸（更接近 Grid Search 的密度）。
+        启发式算法：熵模型保底 + 16核历史公式放大校准。
+        核心公式：
+            N = max(N_entropy, N_legacy16)
+            N_legacy16 = (100 + S * sqrt(d_all)) * (1 + sqrt(16))
+        其中：
+            - N_entropy: 熵复杂度估计（与机器核数解耦）
+            - N_legacy16: 参考你原先 16 核公式的目标规模
+            - S: 历史复杂度评分（沿用旧版评分口径）
+            - d_all: 总参数维度
         """
-        # 1. 确定实际可用核心数
-        requested_jobs = getattr(self.args, 'n_jobs', 1)
-        if requested_jobs == -1:
-            n_cores = os.cpu_count() or 1
-        else:
-            n_cores = max(1, requested_jobs)
+        entropy_nats = 0.0
+        effective_dims = 0
+        continuous_dims = 0
+        finite_space_size = 1
+        is_finite_space = True
 
-        # 2. 计算基础复杂度 (Base Complexity)
-        complexity_score = 0
-        n_params = len(self.opt_params_def)
+        for _, p_cfg in self.opt_params_def.items():
+            cardinality, is_finite = self._estimate_param_cardinality(p_cfg)
+            cardinality = max(1, int(cardinality))
 
-        for param, config in self.opt_params_def.items():
-            p_type = config.get('type')
-            if p_type == 'int':
-                # (high - low) / step
-                range_len = (config['high'] - config['low']) / config.get('step', 1)
-                complexity_score += math.log(max(range_len, 2)) * 30
-            elif p_type == 'float':
-                # 浮点数权重
-                complexity_score += 60
-            elif p_type == 'categorical':
-                # 离散选项权重
-                complexity_score += len(config['choices']) * 15
+            if cardinality <= 1:
+                continue
+
+            effective_dims += 1
+            entropy_nats += math.log(cardinality)
+
+            if is_finite:
+                finite_space_size *= cardinality
             else:
-                complexity_score += 10
+                continuous_dims += 1
+                is_finite_space = False
 
-        # 维度惩罚：参数越多，相互干扰越大，需要的次数应略微呈非线性增长
-        # 比如 1个参数乘数是1.0，4个参数乘数是2.0，9个参数乘数是3.0
-        dimension_penalty = math.sqrt(n_params)
+        if effective_dims == 0:
+            return 1
 
-        # 基础次数：起步 100 次 + (复杂度 * 维度惩罚)
-        base_estimated = int(100 + (complexity_score * dimension_penalty))
+        # 熵主导 + 交互惩罚 + 连续参数惩罚（KISS：常数内置，不暴露配置）
+        entropy_term = 80.0 * entropy_nats
+        interaction_term = 35.0 * effective_dims * math.log(effective_dims + 1.0)
+        continuous_term = 120.0 * continuous_dims
+        floor_term = 30.0 * effective_dims
 
-        # 3. 算力加成 (Hardware Scaling)
-        # 逻辑：利用多核优势扩大搜索范围。
-        scaling_factor = 1.0 + math.sqrt(n_cores)
+        entropy_estimated = int(round(max(floor_term, entropy_term + interaction_term + continuous_term)))
+        entropy_estimated = max(1, entropy_estimated)
 
-        final_estimated = int(base_estimated * scaling_factor)
+        # 16核历史公式：恢复你之前常用的训练规模量级（约 16k）
+        legacy_complexity_score = 0.0
+        total_dims = max(1, len(self.opt_params_def))
+        for _, p_cfg in self.opt_params_def.items():
+            p_type = p_cfg.get('type')
+            if p_type == 'int':
+                low = int(p_cfg.get('low', 0))
+                high = int(p_cfg.get('high', low))
+                step = int(p_cfg.get('step', 1) or 1)
+                step = max(1, step)
+                range_len = abs(high - low) / step
+                legacy_complexity_score += math.log(max(range_len, 2.0)) * 30.0
+            elif p_type == 'float':
+                # 与旧公式一致：float 统一固定权重
+                legacy_complexity_score += 60.0
+            elif p_type == 'categorical':
+                legacy_complexity_score += len(p_cfg.get('choices', [])) * 15.0
+            else:
+                legacy_complexity_score += 10.0
 
-        # 4. 保底机制
-        # 确保每个核心至少有 30 个任务 (稍微提高保底阈值)
-        min_saturation = n_cores * 30
-        final_estimated = max(final_estimated, min_saturation)
+        legacy_base = 100.0 + legacy_complexity_score * math.sqrt(total_dims)
+        legacy_16_scale = 1.0 + math.sqrt(16.0)  # 固定参考16核历史尺度
+        legacy_16_estimated = int(round(max(1.0, legacy_base * legacy_16_scale)))
 
-        # 5. 设定上限 (防止无限膨胀)
-        # final_estimated = min(final_estimated, 10000)
+        estimated = max(entropy_estimated, legacy_16_estimated)
 
-        return final_estimated
+        # 有限空间下不超过总组合数
+        if is_finite_space:
+            estimated = min(estimated, finite_space_size)
+
+        print(
+            "[Optimizer] n_trials estimator: "
+            f"entropy={entropy_nats:.2f}, dims={effective_dims}, cont_dims={continuous_dims}, "
+            f"entropy_est={entropy_estimated}, legacy16_est={legacy_16_estimated}, "
+            f"finite_space={'yes' if is_finite_space else 'no'} -> {estimated}"
+        )
+        return estimated
+
+    @staticmethod
+    def _estimate_param_cardinality(param_cfg):
+        """
+        返回参数的有效离散基数 K 与是否为有限离散空间。
+        连续 float（无 step）使用虚拟离散基数近似熵，不参与有限空间上限。
+        """
+        p_type = param_cfg.get('type')
+
+        if p_type == 'int':
+            low = int(param_cfg.get('low', 0))
+            high = int(param_cfg.get('high', low))
+            step = int(param_cfg.get('step', 1) or 1)
+            step = max(1, step)
+            if high < low:
+                low, high = high, low
+            count = ((high - low) // step) + 1
+            return max(1, count), True
+
+        if p_type == 'float':
+            low = float(param_cfg.get('low', 0.0))
+            high = float(param_cfg.get('high', low))
+            if high < low:
+                low, high = high, low
+            if abs(high - low) <= 1e-12:
+                return 1, True
+            step = param_cfg.get('step', None)
+            if step is not None:
+                try:
+                    step = float(step)
+                except (TypeError, ValueError):
+                    step = None
+            if step is not None and step > 0:
+                count = int(math.floor((high - low) / step + 1e-12)) + 1
+                return max(1, count), True
+
+            # 连续空间：用区间宽度映射为有限“信息桶”近似熵
+            span = max(0.0, high - low)
+            virtual_bins = int(math.ceil(span * 20.0)) + 1
+            virtual_bins = max(32, min(128, virtual_bins))
+            return virtual_bins, False
+
+        if p_type == 'categorical':
+            choices = param_cfg.get('choices', [])
+            return max(1, len(choices)), True
+
+        return 1, True
 
     def _evaluate_trial_params(self, current_params):
         import math
@@ -1036,9 +1458,10 @@ class OptimizationJob:
         # 1. 配置存储 (支持多核)
         storage = None
         n_jobs = getattr(self.args, 'n_jobs', 1)
+        resolved_requested_workers = self._resolve_worker_count(n_jobs)
         auto_launch_dashboard = bool(getattr(self.args, 'auto_launch_dashboard', True))
         shared_journal_log_file = getattr(self.args, 'shared_journal_log_file', None)
-        use_journal_storage = (n_jobs != 1) or bool(shared_journal_log_file)
+        use_journal_storage = (resolved_requested_workers != 1) or bool(shared_journal_log_file)
 
         log_file = None
 
@@ -1060,9 +1483,11 @@ class OptimizationJob:
                 try:
                     # 尝试创建文件存储
                     storage = JournalStorage(JournalFileBackendCls(log_file))
-                    if n_jobs != 1:
-                        resolved = self._resolve_worker_count(n_jobs)
-                        print(f"\n[Optimizer] Multi-core mode enabled (n_jobs={n_jobs} -> workers={resolved}).")
+                    if resolved_requested_workers != 1:
+                        print(
+                            f"\n[Optimizer] Multi-core mode enabled "
+                            f"(n_jobs={n_jobs} -> workers={resolved_requested_workers})."
+                        )
                     else:
                         print(f"\n[Optimizer] JournalStorage enabled for dashboard/log persistence (n_jobs=1).")
                     print(f"[Optimizer] Using JournalStorage: {log_file}")
@@ -1083,10 +1508,11 @@ class OptimizationJob:
                     else:
                         raise e
             else:
-                if n_jobs != 1:
+                if resolved_requested_workers != 1:
                     print("\n[Warning] optuna.storages.JournalStorage not found.")
                     print("[Warning] Fallback to single-core to avoid SQLite dependency.")
                     n_jobs = 1
+                    resolved_requested_workers = 1
                 elif shared_journal_log_file:
                     print("\n[Warning] JournalStorage unavailable. Dashboard persistence disabled for this run.")
 
@@ -1126,6 +1552,7 @@ class OptimizationJob:
 
                 # 降级：重置为单核 + 内存存储
                 n_jobs = 1
+                resolved_requested_workers = 1
                 storage = None
                 study = optuna.create_study(
                     direction='maximize',
@@ -1142,7 +1569,11 @@ class OptimizationJob:
         n_trials = self.args.n_trials
         if n_trials is None:
             n_trials = self._estimate_n_trials()
-            print(f"[Optimizer] Auto-inferred n_trials: {n_trials} (based on param complexity)")
+            print(f"[Optimizer] Auto-inferred n_trials: {n_trials} (entropy-complexity model)")
+        else:
+            n_trials = int(n_trials)
+            if n_trials <= 0:
+                raise ValueError(f"n_trials must be a positive integer, got: {n_trials}")
 
         resolved_workers = self._resolve_worker_count(n_jobs)
         effective_parallel_jobs = min(resolved_workers, max(1, int(n_trials)))
@@ -1174,7 +1605,12 @@ class OptimizationJob:
                     prefer_fork_cow=(not auto_launch_dashboard),
                 )
             else:
-                study.optimize(self.objective, n_trials=n_trials, n_jobs=1)
+                # 单核/单并行场景回退为单进程线程模式（与历史版本一致）
+                # 这里保留 Optuna 的 n_jobs 参数入口，避免强制写死为 1。
+                thread_jobs = max(1, min(int(n_trials), self._resolve_worker_count(n_jobs)))
+                if thread_jobs != 1:
+                    print(f"[Optimizer] Fallback to single-process threaded mode (n_jobs={thread_jobs}).")
+                study.optimize(self.objective, n_trials=n_trials, n_jobs=thread_jobs)
         except KeyboardInterrupt:
             print("\n[Optimizer] Optimization stopped by user.")
 
@@ -1265,6 +1701,17 @@ def _optimize_worker_entry(worker_payload, study_name, log_file, n_trials, worke
     if worker_payload is None:
         raise RuntimeError("Worker payload is missing.")
 
+    # 在 worker 内同步主进程日志开关；缺省按训练静音处理。
+    config.LOG = bool(worker_payload.get("log_enabled", False))
+
+    worker_shm_handles = []
+    if worker_payload.get("train_datas") is None and worker_payload.get("train_datas_shared"):
+        restored_train_datas, worker_shm_handles = OptimizationJob._restore_train_datas_from_shared(
+            worker_payload["train_datas_shared"]
+        )
+        worker_payload = dict(worker_payload)
+        worker_payload["train_datas"] = restored_train_datas
+
     storage = JournalStorage(JournalFileBackendCls(log_file))
     sampler = TPESampler(constant_liar=True, seed=sampler_seed)
 
@@ -1276,7 +1723,10 @@ def _optimize_worker_entry(worker_payload, study_name, log_file, n_trials, worke
         sampler=sampler,
     )
 
-    job = OptimizationJob.from_worker_payload(worker_payload)
-    study.optimize(job.objective, n_trials=n_trials, n_jobs=1)
-    return {"worker_idx": worker_idx, "n_trials": n_trials}
+    try:
+        job = OptimizationJob.from_worker_payload(worker_payload)
+        study.optimize(job.objective, n_trials=n_trials, n_jobs=1)
+        return {"worker_idx": worker_idx, "n_trials": n_trials}
+    finally:
+        OptimizationJob._cleanup_shared_segments(worker_shm_handles, unlink=False)
 

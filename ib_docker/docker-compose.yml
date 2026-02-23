@@ -12,10 +12,16 @@ services:
       - TWS_PASSWORD=${IB_PASS_PAPER}
       - TRADING_MODE=paper
       - READ_ONLY_API=no
+      - TWS_SETTINGS_PATH=/home/ibgateway/Jts
       - VNC_SERVER_PASSWORD=${VNC_PASS_PAPER}
       - TIME_ZONE=Asia/Hong_Kong
-      - AUTO_RESTART_TIME=08:30
+      - 'AUTO_RESTART_TIME=08:30 AM'
+      - TWOFA_TIMEOUT_ACTION=restart
+      - RELOGIN_AFTER_TWOFA_TIMEOUT=yes
+      - TWOFA_EXIT_INTERVAL=600
       - BYPASS_WARNING=yes
+    volumes:
+      - ib_paper_jts:/home/ibgateway/Jts
     logging:
       driver: "json-file"
       options:
@@ -38,10 +44,16 @@ services:
       - TWS_PASSWORD=${IB_PASS_LIVE1}
       - TRADING_MODE=live
       - READ_ONLY_API=no
+      - TWS_SETTINGS_PATH=/home/ibgateway/Jts
       - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE1}
       - TIME_ZONE=Asia/Hong_Kong
-      - AUTO_RESTART_TIME=08:30
+      - 'AUTO_RESTART_TIME=08:30 AM'
+      - TWOFA_TIMEOUT_ACTION=restart
+      - RELOGIN_AFTER_TWOFA_TIMEOUT=yes
+      - TWOFA_EXIT_INTERVAL=600
       - BYPASS_WARNING=yes
+    volumes:
+      - ib_live1_jts:/home/ibgateway/Jts
     logging:
       driver: "json-file"
       options:
@@ -62,10 +74,16 @@ services:
 #      - TWS_PASSWORD=${IB_PASS_LIVE2}
 #      - TRADING_MODE=live
 #      - READ_ONLY_API=no
+#      - TWS_SETTINGS_PATH=/home/ibgateway/Jts
 #      - VNC_SERVER_PASSWORD=${VNC_PASS_LIVE2}
 #      - TIME_ZONE=Asia/Hong_Kong
-#      - AUTO_RESTART_TIME=08:30
+#      - 'AUTO_RESTART_TIME=08:30 AM'
+#      - TWOFA_TIMEOUT_ACTION=restart
+#      - RELOGIN_AFTER_TWOFA_TIMEOUT=yes
+#      - TWOFA_EXIT_INTERVAL=600
 #      - BYPASS_WARNING=yes
+#    volumes:
+#      - ib_live2_jts:/home/ibgateway/Jts
 #    logging:
 #          driver: "json-file"
 #          options:
@@ -74,6 +92,11 @@ services:
 #    networks:
 #      ib_net:
 #        ipv4_address: 172.20.0.12
+
+volumes:
+  ib_paper_jts:
+  ib_live1_jts:
+  ib_live2_jts:
 
 networks:
   ib_net:

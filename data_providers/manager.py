@@ -20,18 +20,30 @@ class DataManager:
             for p in self.providers
         )
 
-    def auto_discover_and_sort_providers(self, provider_dir="data_providers"):
+    def auto_discover_and_sort_providers(self, provider_dir=None):
         """
         自动扫描、加载并根据PRIORITY属性排序所有数据提供者。
         """
         print("\n--- Auto-discovering Data Providers ---")
         discovered_providers = []
 
-        # ... (文件扫描和动态导入的逻辑保持不变) ...
-        for filename in os.listdir(provider_dir):
+        module_package = __package__ or "data_providers"
+        module_base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        if provider_dir is None:
+            scan_dir = module_base_dir
+        elif os.path.isabs(provider_dir):
+            scan_dir = provider_dir
+        else:
+            # 优先按当前模块目录解析，避免依赖启动时 cwd
+            candidate = os.path.join(module_base_dir, provider_dir)
+            scan_dir = candidate if os.path.isdir(candidate) else os.path.abspath(provider_dir)
+
+        # 文件扫描和动态导入
+        for filename in os.listdir(scan_dir):
             if filename.endswith(".py") and not filename.startswith(("__", "base_", "manager.")):
                 module_name = filename[:-3]
-                module_path = f"{provider_dir.replace('/', '.')}.{module_name}"
+                module_path = f"{module_package}.{module_name}"
                 try:
                     module = importlib.import_module(module_path)
                     for name, obj in inspect.getmembers(module, inspect.isclass):

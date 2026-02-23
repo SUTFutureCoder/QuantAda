@@ -90,8 +90,11 @@ class GmDataProvider(BaseDataProvider):
                 else:
                     df.index = df.index.tz_localize('UTC').tz_convert('Asia/Shanghai')
 
-                # 归一化到 00:00 并移除时区对象，解决 Backtrader 比较报错
-                df.index = df.index.normalize().tz_localize(None)
+                # 仅日线归一化到 00:00；分钟线保留真实时间，避免分钟策略时间维失真。
+                if freq == '1d':
+                    df.index = df.index.normalize().tz_localize(None)
+                else:
+                    df.index = df.index.tz_localize(None)
 
             # 3. 粘合实时数据 (仅限日线)
             if freq == '1d':

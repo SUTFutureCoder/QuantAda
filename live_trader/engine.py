@@ -319,15 +319,45 @@ class LiveTrader:
         compression = self.config.get('compression', 1)
 
         # 重新计算时间窗口 (Warmup ~ Now)
-        end_date = context.now.strftime('%Y-%m-%d')
-        # 保持与 init 一致的预热长度
-        start_date = (context.now - pd.Timedelta(days=config.ANNUAL_FACTOR)).strftime('%Y-%m-%d')
+        now_ts = pd.Timestamp(context.now)
+        end_date = now_ts.strftime('%Y-%m-%d %H:%M:%S') if timeframe == 'Minutes' else now_ts.strftime('%Y-%m-%d')
+
+        def _align_to_index_tz(dt_input, index):
+            dt = pd.Timestamp(dt_input)
+            idx_tz = getattr(index, 'tz', None)
+            if idx_tz is not None:
+                if dt.tzinfo is None:
+                    return dt.tz_localize(idx_tz)
+                return dt.tz_convert(idx_tz)
+            if dt.tzinfo is not None:
+                return dt.tz_convert(None)
+            return dt
+
+        def _build_incremental_start(existing_df: pd.DataFrame) -> str:
+            # 首次/空数据回退到预热窗口
+            if existing_df is None or existing_df.empty:
+                warmup_start = now_ts - pd.Timedelta(days=config.ANNUAL_FACTOR)
+                return warmup_start.strftime('%Y-%m-%d %H:%M:%S') if timeframe == 'Minutes' else warmup_start.strftime('%Y-%m-%d')
+
+            last_bar_ts = pd.Timestamp(existing_df.index[-1])
+            if timeframe == 'Minutes':
+                backoff = pd.Timedelta(minutes=max(1, int(compression)) * 3)
+                start_ts = last_bar_ts - backoff
+                return start_ts.strftime('%Y-%m-%d %H:%M:%S')
+
+            # 日线模式保留少量回看，覆盖供应商延迟修订
+            start_ts = last_bar_ts - pd.Timedelta(days=2)
+            return start_ts.strftime('%Y-%m-%d')
 
         # 遍历 Broker 中已有的 DataFeed
         for data_feed in self.broker.datas:
             symbol = data_feed._name
+            old_df = None
+            if hasattr(data_feed, 'p') and hasattr(data_feed.p, 'dataname'):
+                old_df = data_feed.p.dataname
 
             # 重新拉取数据
+            start_date = _build_incremental_start(old_df)
             new_df = self.data_provider.get_history(symbol, start_date, end_date,
                                                     timeframe=timeframe, compression=compression)
 
@@ -336,8 +366,20 @@ class LiveTrader:
                 # 这样 self.strategy.datas 中的引用会自动指向新数据
                 # 假设 DataFeedProxy 使用 .p.dataname 存储数据 (参考 _fetch_all_history_data)
                 if hasattr(data_feed, 'p') and hasattr(data_feed.p, 'dataname'):
-                    data_feed.p.dataname = new_df
-                    print(f"  Data refreshed for {symbol}: {len(new_df)} bars (Last: {new_df.index[-1]})")
+                    if old_df is not None and not old_df.empty:
+                        merged_df = pd.concat([old_df, new_df])
+                        merged_df = merged_df[~merged_df.index.duplicated(keep='last')]
+                        merged_df = merged_df.sort_index()
+
+                        # 保持固定预热窗口，避免数据无限增长
+                        cutoff_ts = now_ts - pd.Timedelta(days=config.ANNUAL_FACTOR)
+                        cutoff_ts = _align_to_index_tz(cutoff_ts, merged_df.index)
+                        merged_df = merged_df[merged_df.index >= cutoff_ts]
+                        data_feed.p.dataname = merged_df
+                        print(f"  Data refreshed for {symbol}: {len(merged_df)} bars (Last: {merged_df.index[-1]})")
+                    else:
+                        data_feed.p.dataname = new_df.sort_index()
+                        print(f"  Data refreshed for {symbol}: {len(new_df)} bars (Last: {new_df.index[-1]})")
                 else:
                     print(f"  Warning: Cannot update data for {symbol}. Structure mismatch.")
             else:
@@ -416,13 +458,25 @@ class LiveTrader:
             feed_proxy = None
             try:
                 df = data_feed.p.dataname
-                # 优化：实盘模式下，DataFrame 的最后一行通常即为最新数据
-                # 依然做时间过滤以防万一
-                current_bar_data = df.loc[df.index <= current_dt]
-                if current_bar_data.empty:
+                if df is None or df.empty:
                     continue
 
-                bar = current_bar_data.iloc[-1]
+                current_dt_ts = pd.Timestamp(current_dt)
+                idx_tz = getattr(df.index, 'tz', None)
+                if idx_tz is not None:
+                    if current_dt_ts.tzinfo is None:
+                        current_dt_ts = current_dt_ts.tz_localize(idx_tz)
+                    else:
+                        current_dt_ts = current_dt_ts.tz_convert(idx_tz)
+                elif current_dt_ts.tzinfo is not None:
+                    current_dt_ts = current_dt_ts.tz_convert(None)
+
+                # O(logN) 定位 <= 当前时间的最后一根K线，避免每次全表切片
+                pos = df.index.searchsorted(current_dt_ts, side='right') - 1
+                if pos < 0:
+                    continue
+
+                bar = df.iloc[pos]
 
                 class BtFeedProxy:
                     def __init__(self, name, bar_data):

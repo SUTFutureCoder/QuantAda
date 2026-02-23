@@ -430,7 +430,8 @@ class SignalLoggingBroker(bt.brokers.BackBroker):
     """
 
     def buy(self, owner, data, size, price=None, **kwargs):
-        if size > 0:
+        # 训练/优化场景下 owner.verbose=False，直接静音避免刷屏。
+        if size > 0 and getattr(owner, 'verbose', True):
             exec_price = price if price else data.close[0]
             # 获取回测当前时间
             current_dt = self.cerebro.datas[0].datetime.datetime(0)
@@ -440,7 +441,7 @@ class SignalLoggingBroker(bt.brokers.BackBroker):
         return super().buy(owner, data, size, price, **kwargs)
 
     def sell(self, owner, data, size, price=None, **kwargs):
-        if size > 0:
+        if size > 0 and getattr(owner, 'verbose', True):
             exec_price = price if price else data.close[0]
             current_dt = self.cerebro.datas[0].datetime.datetime(0)
 

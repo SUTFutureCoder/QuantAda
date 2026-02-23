@@ -14,6 +14,7 @@
 # V3.2  2023-04-04 新增 CR指标
 # V3.3  2023-11-09 新增 SIN,COS,TAN序列处理的三角函数
 import math
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -90,11 +91,49 @@ def LLV(S, N):  # LLV(C, 5) 最近5天收盘最低价
 
 
 def HHVBARS(S, N):  # 求N周期内S最高值到当前周期数, 返回序列
-    return pd.Series(S).rolling(N).apply(lambda x: np.argmax(x[::-1]), raw=True).values
+    arr = np.asarray(S, dtype=float)
+    out = np.full(len(arr), np.nan, dtype=float)
+    if N <= 0 or len(arr) == 0:
+        return out
+
+    q = deque()
+    for i, _ in enumerate(arr):
+        # >= 保留“最近”最高点，语义对齐原始反转+argmax逻辑
+        while q and arr[i] >= arr[q[-1]]:
+            q.pop()
+        q.append(i)
+
+        left = i - N + 1
+        while q and q[0] < left:
+            q.popleft()
+
+        if i >= N - 1:
+            out[i] = float(i - q[0])
+
+    return out
 
 
 def LLVBARS(S, N):  # 求N周期内S最低值到当前周期数, 返回序列
-    return pd.Series(S).rolling(N).apply(lambda x: np.argmin(x[::-1]), raw=True).values
+    arr = np.asarray(S, dtype=float)
+    out = np.full(len(arr), np.nan, dtype=float)
+    if N <= 0 or len(arr) == 0:
+        return out
+
+    q = deque()
+    for i, _ in enumerate(arr):
+        # <= 保留“最近”最低点，语义对齐原始反转+argmin逻辑
+        while q and arr[i] <= arr[q[-1]]:
+            q.pop()
+        q.append(i)
+
+        left = i - N + 1
+        while q and q[0] < left:
+            q.popleft()
+
+        if i >= N - 1:
+            out[i] = float(i - q[0])
+
+    return out
 
 
 def MA(S, N):  # 求序列的N日简单移动平均值，返回序列
@@ -110,7 +149,15 @@ def SMA(S, N, M=1):  # 中国式的SMA,至少需要120周期才精确 (雪球180
 
 
 def WMA(S, N):  # 通达信S序列的N日加权移动平均 Yn = (1*X1+2*X2+3*X3+...+n*Xn)/(1+2+3+...+Xn)
-    return pd.Series(S).rolling(N).apply(lambda x: x[::-1].cumsum().sum() * 2 / N / (N + 1), raw=True).values
+    arr = np.asarray(S, dtype=float)
+    out = np.full(len(arr), np.nan, dtype=float)
+    if N <= 0 or len(arr) < N:
+        return out
+
+    weights = np.arange(1, N + 1, dtype=float)
+    denom = weights.sum()
+    out[N - 1:] = np.correlate(arr, weights, mode='valid') / denom
+    return out
 
 
 def DMA(S, A):  # 求S的动态移动平均，A作平滑因子,必须 0<A<1  (此为核心函数，非指标）
@@ -128,11 +175,44 @@ def AVEDEV(S, N):  # 平均绝对偏差  (序列与其平均值的绝对差的�
 
 
 def SLOPE(S, N):  # 返S序列N周期回线性回归斜率
-    return pd.Series(S).rolling(N).apply(lambda x: np.polyfit(range(N), x, deg=1)[0], raw=True).values
+    arr = np.asarray(S, dtype=float)
+    out = np.full(len(arr), np.nan, dtype=float)
+    if N <= 1 or len(arr) < N:
+        return out
+
+    x = np.arange(N, dtype=float)
+    x_sum = x.sum()
+    x2_sum = np.dot(x, x)
+    denom = N * x2_sum - x_sum * x_sum
+    if denom == 0:
+        return out
+
+    y_sum = np.convolve(arr, np.ones(N, dtype=float), mode='valid')
+    xy_sum = np.correlate(arr, x, mode='valid')
+    out[N - 1:] = (N * xy_sum - x_sum * y_sum) / denom
+    return out
 
 
 def FORCAST(S, N):  # 返回S序列N周期回线性回归后的预测值， jqz1226改进成序列出
-    return pd.Series(S).rolling(N).apply(lambda x: np.polyval(np.polyfit(range(N), x, deg=1), N - 1), raw=True).values
+    arr = np.asarray(S, dtype=float)
+    out = np.full(len(arr), np.nan, dtype=float)
+    if N <= 1 or len(arr) < N:
+        return out
+
+    x = np.arange(N, dtype=float)
+    x_sum = x.sum()
+    x2_sum = np.dot(x, x)
+    denom = N * x2_sum - x_sum * x_sum
+    if denom == 0:
+        return out
+
+    y_sum = np.convolve(arr, np.ones(N, dtype=float), mode='valid')
+    xy_sum = np.correlate(arr, x, mode='valid')
+    slope = (N * xy_sum - x_sum * y_sum) / denom
+    y_mean = y_sum / N
+    # y_hat(x=N-1) = mean + slope * ((N-1) - mean(x))
+    out[N - 1:] = y_mean + slope * ((N - 1) - (x_sum / N))
+    return out
 
 
 def LAST(S, A, B):  # 从前A日到前B日一直满足S_BOOL条件, 要求A>B & A>0 & B>=0

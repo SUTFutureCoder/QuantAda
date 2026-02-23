@@ -254,7 +254,10 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         in_loop = False
         try:
-            if asyncio.get_running_loop():
+            loop = asyncio.get_running_loop()
+            # 只有当程序真实处于 async task (例如回调函数) 内部时，才被判定为 in_loop
+            # 这允许主线程首次 run() 时能成功阻塞并预订阅 HKD 等外汇汇率
+            if asyncio.current_task(loop=loop) is not None:
                 in_loop = True
         except RuntimeError:
             pass
@@ -450,20 +453,17 @@ class IBBrokerAdapter(BaseLiveBroker):
         contract = self.parse_contract(data._name)
         action = 'BUY' if side == 'BUY' else 'SELL'
 
-        # 使用市价单 (MarketOrder) 或 限价单 (LimitOrder)
-        # 此处简单起见使用市价单，你可以根据 price 参数决定是否发限价单
-        if price > 0:
-            # 加上一点滑点保护
-            # lmt_price = price * 1.01 if side == 'BUY' else price * 0.99
-            # order = LimitOrder(action, abs(volume), lmt_price)
-            order = MarketOrder(action, abs(volume))  # 暂时全用市价
-        else:
-            order = MarketOrder(action, abs(volume))
+        # 强制将数量转换为整数 (向下取整，防止买入超额资金)
+        volume_int = int(abs(volume))
 
         # 防止零股交易 (IB部分账户不支持小于1股)
-        if abs(volume) < 1:
-            print(f"[IB Warning] Order size < 1 ({volume}), skipped.")
+        if volume_int < 1:
+            print(f"[IB Warning] Order size < 1 (raw: {volume}), skipped.")
             return None
+
+        # 使用市价单 (MarketOrder) 或 限价单 (LimitOrder)
+        # 此处简单起见使用市价单
+        order = MarketOrder(action, volume_int)
 
         trade = self.ib.placeOrder(contract, order)
         return IBOrderProxy(trade, data=data)

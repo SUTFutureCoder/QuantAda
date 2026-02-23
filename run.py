@@ -154,7 +154,12 @@ if __name__ == '__main__':
     # Optimizer 专用参数
     parser.add_argument('--opt_params', type=str, default=None, help="[优化模式] 优化参数空间定义 JSON")
     parser.add_argument('--n_trials', type=int, default=None, help="[优化模式] 尝试次数 (默认: 自动推断)")
-    parser.add_argument('--n_jobs', type=int, default=-1, help="[优化模式] 并行核心数 (-1 表示使用所有核心)")
+    parser.add_argument(
+        '--n_jobs',
+        type=int,
+        default=-1,
+        help="[优化模式] 并行核心数: >0=指定worker数, -1=自动保留15%且至少2核系统冗余, <-1=保留(abs(n_jobs)-1)核"
+    )
     parser.add_argument('--metric', type=str, default='mix_score_origin',
                         help="[优化模式] 优化目标 (支持逗号分隔的多私有指标串行执行)")
     parser.add_argument('--train_roll_period', type=str, default=None,
@@ -283,20 +288,35 @@ if __name__ == '__main__':
         bootstrap_job = None
         dashboard_launcher_job = None
         shared_dashboard_log_file = None
+        log_dir = None
 
         if is_multi_metric:
             log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
             os.makedirs(log_dir, exist_ok=True)
-            run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            shared_dashboard_log_file = os.path.join(log_dir, f"optuna_multi_metric_{run_stamp}.log")
+
+        def build_shared_optuna_log_file(train_range, test_range, symbols):
+            if not log_dir:
+                return None
+
+            name_tag = optimizer.OptimizationJob.build_optuna_name_tag(
+                metric="multi_metric",
+                train_period=args.train_roll_period,
+                test_period=args.test_roll_period,
+                train_range=train_range,
+                test_range=test_range,
+                data_source=args.data_source,
+                symbols=symbols,
+                selection=args.selection,
+                run_dt=datetime.datetime.now(),
+                run_pid=os.getpid(),
+            )
+            return os.path.join(log_dir, f"optuna_{name_tag}.log")
 
         # 先构建一次共享上下文，确保基准与多指标训练处于同一数据宇宙（同一选股与同一数据切分）
         try:
             bootstrap_args = copy.deepcopy(args)
             bootstrap_args.metric = metrics_list[0]
             bootstrap_args.auto_launch_dashboard = not is_multi_metric
-            if shared_dashboard_log_file:
-                bootstrap_args.shared_journal_log_file = shared_dashboard_log_file
             bootstrap_job = optimizer.OptimizationJob(
                 args=bootstrap_args,
                 fixed_params=s_params,
@@ -305,8 +325,22 @@ if __name__ == '__main__':
             )
             shared_context = bootstrap_job.export_shared_context()
             dashboard_launcher_job = bootstrap_job
+            if is_multi_metric:
+                shared_dashboard_log_file = build_shared_optuna_log_file(
+                    train_range=bootstrap_job.train_range,
+                    test_range=bootstrap_job.test_range,
+                    symbols=bootstrap_job.target_symbols,
+                )
         except Exception as e:
             print(f"[警告] 共享上下文构建失败，将降级为逐metric独立初始化: {e}")
+            if is_multi_metric and not shared_dashboard_log_file:
+                fallback_train_range = (args.start_date, args.end_date)
+                fallback_test_range = (args.end_date, args.end_date) if args.test_roll_period else (None, None)
+                shared_dashboard_log_file = build_shared_optuna_log_file(
+                    train_range=fallback_train_range,
+                    test_range=fallback_test_range,
+                    symbols=symbol_list,
+                )
 
         if explicit_params_passed:
             print("\n--- Running Baseline Backtest from --params (Recent 3Y) ---")
