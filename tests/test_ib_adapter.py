@@ -17,7 +17,7 @@ sys.modules["ib_insync"] = mock_ib_insync
 
 # 重新导入被测模块，确保使用上面的 mock ib_insync
 sys.modules.pop("live_trader.adapters.ib_broker", None)
-from live_trader.adapters.ib_broker import IBOrderProxy
+from live_trader.adapters.ib_broker import IBBrokerAdapter, IBOrderProxy
 
 
 class DummyIBOrderStatus:
@@ -49,6 +49,30 @@ class DummyIBTrade:
         self.order = DummyIBOrder(order_id=order_id, action=action, total_quantity=total_quantity)
         self.orderStatus = DummyIBOrderStatus(status=status, filled=filled, avg_fill_price=avg_fill_price)
         self.fills = [DummyFill(c) for c in (commissions or [])]
+
+
+class DummyAccountValue:
+    def __init__(self, tag, currency, value):
+        self.tag = tag
+        self.currency = currency
+        self.value = value
+
+
+class DummyIBForCash:
+    def __init__(self, cash_usd):
+        self.cash_usd = cash_usd
+
+    def isConnected(self):
+        return True
+
+    def accountSummary(self):
+        return [DummyAccountValue(tag="TotalCashValue", currency="USD", value=str(self.cash_usd))]
+
+    def accountValues(self):
+        return self.accountSummary()
+
+    def openTrades(self):
+        return []
 
 
 def test_ib_status_translation_accuracy():
@@ -120,3 +144,17 @@ def test_ib_executed_stats_extraction():
     assert executed.price == pytest.approx(150.25), "成交均价提取错误：executed.price 应为 150.25！"
     assert executed.value == pytest.approx(75125.0), "成交金额计算错误：executed.value 应为 500*150.25=75125.0！"
     assert executed.comm == pytest.approx(2.0), "手续费提取错误：executed.comm 应等于 commissionReport 合计 2.0！"
+
+
+def test_ib_get_cash_respects_virtual_ledger():
+    """
+    资金口径回归:
+    get_cash 必须扣减 _virtual_spent_cash，防止 openTrades 回报延迟窗口内重复下单。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=10000.0))
+    broker = IBBrokerAdapter(context=context)
+    broker._virtual_spent_cash = 2500.0
+
+    assert broker.get_cash() == pytest.approx(7500.0), (
+        "IB get_cash 未扣减虚拟账本，占资保护失效。"
+    )

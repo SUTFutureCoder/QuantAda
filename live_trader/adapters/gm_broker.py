@@ -92,7 +92,8 @@ class GmOrderProxy(BaseOrderProxy):
         return self.platform_order.status not in terminal_states
 
     def is_accepted(self) -> bool:
-        return self.platform_order.status not in [OrderStatus_New, OrderStatus_Rejected]
+        # 仅“在途态”视为 accepted；终态(Filled/Canceled/Rejected)必须返回 False。
+        return self.platform_order.status in [OrderStatus_New, OrderStatus_PendingNew, OrderStatus_PartiallyFilled]
 
     def is_buy(self) -> bool:
         return hasattr(self.platform_order, 'side') and self.platform_order.side == OrderSide_Buy

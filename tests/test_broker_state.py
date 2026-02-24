@@ -198,6 +198,23 @@ def test_risk_block_buy():
     assert len(broker._deferred_orders) == 0, "风控拦截后不应写入延迟队列"
 
 
+def test_risk_block_buy_target_percent():
+    """
+    风控锁命中后，order_target_percent 也必须被物理拦截。
+    防止目标仓位接口绕过风控锁重新买回。
+    """
+    broker = MockBroker(initial_cash=100000.0)
+    data = _make_data("SHSE.600000")
+    broker.set_datas([data])
+    broker.lock_for_risk("SHSE.600000")
+
+    ret = broker.order_target_percent(data, target=0.5)
+
+    assert ret is None, "风控锁命中时 order_target_percent 应直接返回 None"
+    assert len(broker.submitted_orders) == 0, "风控拦截后不应发出真实订单"
+    assert len(broker._deferred_orders) == 0, "风控拦截后不应写入延迟队列"
+
+
 def test_lot_size_truncation():
     """
     碎片股拦截:

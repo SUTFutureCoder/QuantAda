@@ -154,8 +154,12 @@ class IBBrokerAdapter(BaseLiveBroker):
         except Exception as e:
             print(f"[IBBroker] 计算买单虚拟冻结资金时发生异常: {e}")
 
-        # 3. 真实购买力 = 账面资金 - 虚拟冻结资金 (防止透支显示)
-        real_available_cash = raw_cash - virtual_frozen_cash
+        # 3. 真实购买力 = 账面资金 - 在途冻结资金 - 本地虚拟预扣资金
+        # 说明：
+        # - virtual_frozen_cash 覆盖券商已感知到的 openTrades
+        # - _virtual_spent_cash 覆盖“刚发单尚未出现在 openTrades”的短窗口
+        ledger_spent_cash = getattr(self, "_virtual_spent_cash", 0.0)
+        real_available_cash = raw_cash - virtual_frozen_cash - ledger_spent_cash
         return max(0.0, real_available_cash)
 
     def getvalue(self):

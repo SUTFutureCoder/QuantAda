@@ -10,6 +10,7 @@ import pandas as pd
 import config
 from alarms.manager import AlarmManager
 from data_providers.base_provider import BaseDataProvider
+from data_providers.manager import DataManager
 from live_trader.adapters.base_broker import BaseLiveBroker
 from run import get_class_from_name
 
@@ -34,6 +35,7 @@ class LiveTrader:
         self.broker = None
         self.config = None
         self.risk_control = None
+        self.data_manager = None
 
     def _load_adapter_classes(self, platform: str):
         """
@@ -269,11 +271,43 @@ class LiveTrader:
     def _determine_symbols(self) -> list:
         """根据最终配置决定交易的标的列表"""
         if self.selector_class:
-            selector_instance = self.selector_class(data_manager=None)
-            symbols = selector_instance.run_selection()
+            if self.data_manager is None:
+                self.data_manager = DataManager()
+
+            selector_instance = self.selector_class(data_manager=self.data_manager)
+            selection_result = selector_instance.run_selection()
+            symbols = self._normalize_symbol_list(selection_result)
             print(f"Selector selected symbols: {symbols}")
             return symbols
-        return self.config.get('symbols', [])
+        return self._normalize_symbol_list(self.config.get('symbols', []))
+
+    @staticmethod
+    def _normalize_symbol_list(raw_symbols) -> list:
+        """
+        统一 selector/config 的标的返回格式:
+        - list[str]
+        - DataFrame(index=symbols)
+        - 'AAA,BBB' 字符串
+        """
+        if raw_symbols is None:
+            return []
+
+        if isinstance(raw_symbols, pd.DataFrame):
+            candidates = raw_symbols.index.tolist()
+        elif isinstance(raw_symbols, str):
+            candidates = raw_symbols.split(',')
+        else:
+            try:
+                candidates = list(raw_symbols)
+            except TypeError:
+                candidates = [raw_symbols]
+
+        normalized = []
+        for symbol in candidates:
+            sym = str(symbol).strip()
+            if sym:
+                normalized.append(sym)
+        return normalized
 
     def _fetch_all_history_data(self, symbols: list, context, is_live: bool,
                                 timeframe: str, compression: int) -> dict:
@@ -447,14 +481,8 @@ class LiveTrader:
                 # 使用 BaseOrderProxy 的标准接口检查状态
                 # 注意：这里依赖 callback 或 broker 自动更新 pending_order 对象的内部状态
 
-                if pending_order.is_pending() or pending_order.is_accepted():
-                    # 关键点：订单正在交易所排队或处理中。
-                    # 此时绝对不能再次发送订单，也不能清除状态。
-                    self.broker.log(f"[Risk] Pending exit order for {data_name} is active. Waiting for execution...")
-                    triggered_action = True  # 标记为 True，告诉 engine 跳过 strategy.next()
-                    continue
-
-                elif pending_order.is_completed():
+                # 先判定终态，避免某些适配器把终态同时标记成 accepted 导致卡死。
+                if pending_order.is_completed():
                     # 订单已完成
                     # 理论上仓位会在下一次循环被判定为 0，从而走入 A 步骤清理状态。
                     # 这里先移除追踪，允许逻辑继续
@@ -469,6 +497,13 @@ class LiveTrader:
                     self.broker.log(
                         f"[Risk] Exit order for {data_name} failed (Rejected/Canceled). Resetting to retry.")
                     del self._pending_risk_orders[data_name]
+
+                elif pending_order.is_pending() or pending_order.is_accepted():
+                    # 关键点：订单正在交易所排队或处理中。
+                    # 此时绝对不能再次发送订单，也不能清除状态。
+                    self.broker.log(f"[Risk] Pending exit order for {data_name} is active. Waiting for execution...")
+                    triggered_action = True  # 标记为 True，告诉 engine 跳过 strategy.next()
+                    continue
 
                 else:
                     # 其他未知状态，保守起见视为 Pending

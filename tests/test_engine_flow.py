@@ -1,6 +1,7 @@
 from datetime import datetime
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -313,3 +314,423 @@ def test_backtest_mode_auto_warmup_start_date(monkeypatch):
     expected_warmup_start = (pd.Timestamp("2026-02-01") - pd.Timedelta(days=252)).strftime("%Y-%m-%d")
     assert calls[0]["start_date"] == expected_warmup_start, "回测预热起点不正确，未按默认窗口前推。"
     assert calls[0]["end_date"] == "20260213", "回测结束日期透传异常。"
+
+
+def test_selector_dataframe_contract_in_live_engine(monkeypatch):
+    """
+    实盘 selector 契约测试:
+    1) selector 必须收到非空 data_manager
+    2) selector 返回 DataFrame 时，引擎应读取 index 作为 symbols
+    """
+    import live_trader.engine as engine_module
+
+    class FakeDataManager:
+        def __init__(self):
+            self.marker = "fake_dm"
+
+    class DataFrameSelector:
+        captured_data_manager = None
+
+        def __init__(self, data_manager):
+            DataFrameSelector.captured_data_manager = data_manager
+
+        def run_selection(self):
+            return pd.DataFrame(index=["SHSE.600000", "SZSE.000001"])
+
+    def _resolver(class_name, paths):
+        if class_name == "DataFrameSelector":
+            return DataFrameSelector
+        return DummyHeartbeatStrategy
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(engine_module, "DataManager", FakeDataManager)
+    monkeypatch.setattr(engine_module, "get_class_from_name", _resolver)
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "selection_name": "DataFrameSelector",
+        "platform": "mock_engine",
+        "symbols": [],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+
+    assert isinstance(DataFrameSelector.captured_data_manager, FakeDataManager), (
+        "selector 未收到有效 data_manager，实盘选股契约仍然不完整。"
+    )
+
+    loaded_symbols = [d._name for d in engine.broker.datas]
+    assert loaded_symbols == ["SHSE.600000", "SZSE.000001"], (
+        "selector 返回 DataFrame 时应使用 index 作为标的列表。"
+    )
+
+
+def test_risk_pending_order_terminal_precedence(monkeypatch):
+    """
+    风控状态机回归:
+    若 pending 风控单对象同时表现为 is_canceled=True 且 is_accepted=True，
+    引擎必须优先按终态处理并清理追踪，不能被 accepted 分支卡死。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 35, 0))
+    engine.init(context)
+    engine.broker.set_datetime(context.now)
+
+    class DummyRisk:
+        def __init__(self):
+            self.exit_triggered = set()
+
+        def check(self, data):
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    engine.risk_control = DummyRisk()
+
+    symbol = engine.broker.datas[0]._name
+    # 复用测试桩 MockOrderProxy: 对于 Canceled 状态，is_canceled=True 且 is_accepted=True
+    engine._pending_risk_orders = {
+        symbol: MockOrderProxy("RISK_1", is_buy_order=False, status="Canceled")
+    }
+
+    engine._check_risk_controls()
+
+    assert symbol not in engine._pending_risk_orders, (
+        "风控终态优先级错误：Canceled 风控单未被清理，存在状态机卡死风险。"
+    )
+
+
+def test_on_order_status_callback_sell_fill_triggers_balance_and_deferred(monkeypatch):
+    """
+    回调链路测试:
+    卖单成交后，必须触发 sync_balance + process_deferred_orders。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.status = "Filled"
+            self.data = SimpleNamespace(_name="SHSE.600000")
+            self.executed = SimpleNamespace(size=100, price=10.0, value=1000.0, comm=0.0)
+
+        def is_buy(self):
+            return False
+
+        def is_sell(self):
+            return True
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.order_status_calls = 0
+            self.sync_calls = 0
+            self.deferred_calls = 0
+            self.proxy = DummyOrderProxy()
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            self.order_status_calls += 1
+
+        def sync_balance(self):
+            self.sync_calls += 1
+
+        def process_deferred_orders(self):
+            self.deferred_calls += 1
+
+        def get_cash(self):
+            return 12345.0
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+            self.notify_calls = 0
+
+        def notify_order(self, order):
+            self.notify_calls += 1
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(
+        strategy_instance=strategy,
+        now=datetime(2026, 2, 17, 10, 5, 0)
+    )
+    raw_order = SimpleNamespace(statusMsg="filled")
+
+    engine_module.on_order_status_callback(context, raw_order)
+
+    assert broker.order_status_calls == 1, "回调应先喂给 broker.on_order_status。"
+    assert strategy.notify_calls == 1, "回调应通知策略 notify_order。"
+    assert broker.sync_calls == 1, "卖单成交后应触发资金同步。"
+    assert broker.deferred_calls == 1, "卖单成交后应触发延迟队列重放。"
+
+
+def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
+    """
+    回调链路测试:
+    卖单被拒绝时，不应触发 sync_balance/process_deferred_orders。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.status = "Rejected"
+            self.data = SimpleNamespace(_name="SHSE.600000")
+            # size>0 用于验证仍不会进入“卖出成交重试”分支
+            self.executed = SimpleNamespace(size=100, price=10.0, value=1000.0, comm=0.0)
+
+        def is_buy(self):
+            return False
+
+        def is_sell(self):
+            return True
+
+        def is_rejected(self):
+            return True
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.sync_calls = 0
+            self.deferred_calls = 0
+            self.proxy = DummyOrderProxy()
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            pass
+
+        def sync_balance(self):
+            self.sync_calls += 1
+
+        def process_deferred_orders(self):
+            self.deferred_calls += 1
+
+        def get_cash(self):
+            return 12345.0
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def notify_order(self, order):
+            pass
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(
+        strategy_instance=strategy,
+        now=datetime(2026, 2, 17, 10, 10, 0)
+    )
+    raw_order = SimpleNamespace(statusMsg="rejected")
+
+    engine_module.on_order_status_callback(context, raw_order)
+
+    assert broker.sync_calls == 0, "拒单不应触发资金同步。"
+    assert broker.deferred_calls == 0, "拒单不应触发延迟队列重放。"
+
+
+def test_refresh_live_data_merges_dedupes_and_trims(monkeypatch):
+    """
+    实盘增量刷新:
+    - 增量起点应按 last_bar-2d 计算
+    - 合并后按索引去重（保留新值）
+    - 按 ANNUAL_FACTOR 保持固定预热窗口
+    """
+    import live_trader.engine as engine_module
+
+    initial_idx = pd.to_datetime([
+        "2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04",
+        "2026-02-05", "2026-02-06", "2026-02-07", "2026-02-08", "2026-02-09",
+    ])
+    initial_df = pd.DataFrame(
+        {
+            "open": [10.0] * len(initial_idx),
+            "high": [10.5] * len(initial_idx),
+            "low": [9.5] * len(initial_idx),
+            "close": [10.0] * len(initial_idx),
+            "volume": [1000] * len(initial_idx),
+        },
+        index=initial_idx,
+    )
+
+    incremental_idx = pd.to_datetime(["2026-02-08", "2026-02-09", "2026-02-10"])
+    incremental_df = pd.DataFrame(
+        {
+            "open": [18.0, 20.0, 30.0],
+            "high": [18.5, 20.5, 30.5],
+            "low": [17.5, 19.5, 29.5],
+            "close": [18.0, 20.0, 30.0],
+            "volume": [1800, 2000, 3000],
+        },
+        index=incremental_idx,
+    )
+
+    class RefreshDataProvider(DummyDataProvider):
+        def __init__(self):
+            super().__init__()
+            self.history_calls = []
+            self._counter = 0
+
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            self._counter += 1
+            self.history_calls.append(
+                {
+                    "symbol": symbol,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "timeframe": timeframe,
+                    "compression": compression,
+                }
+            )
+            if self._counter == 1:
+                return initial_df.copy()
+            return incremental_df.copy()
+
+    monkeypatch.setattr(config, "ANNUAL_FACTOR", 5)
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, RefreshDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 10, 14, 45, 0))
+    engine.init(context)
+
+    engine._refresh_live_data(context)
+
+    calls = engine.data_provider.history_calls
+    assert len(calls) >= 2, "初始化+刷新至少应触发 2 次 get_history。"
+    assert calls[1]["start_date"] == "2026-02-07", "增量刷新起点应为最后一根K线往前回看2天。"
+
+    refreshed_df = engine.broker.datas[0].p.dataname
+    # 注意：裁剪阈值使用 context.now 的具体时分秒，故 2026-02-05 00:00 会被排除。
+    assert refreshed_df.index.min() == pd.Timestamp("2026-02-06"), "应按 ANNUAL_FACTOR 截断旧数据窗口。"
+    assert refreshed_df.index.max() == pd.Timestamp("2026-02-10"), "刷新后应包含最新 bar。"
+    assert refreshed_df.loc[pd.Timestamp("2026-02-09"), "close"] == pytest.approx(20.0), (
+        "重复日期应保留新数据（keep='last'）。"
+    )
+
+
+def test_risk_unknown_status_blocks_but_not_crash(monkeypatch):
+    """
+    风控未知状态:
+    应阻断策略继续执行（返回 triggered_action=True），但不崩溃且保留待跟踪订单。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 10, 30, 0))
+    engine.init(context)
+    engine.broker.set_datetime(context.now)
+
+    class DummyRisk:
+        def __init__(self):
+            self.check_calls = 0
+            self.exit_triggered = set()
+
+        def check(self, data):
+            self.check_calls += 1
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    class UnknownOrder:
+        def is_pending(self):
+            return False
+
+        def is_accepted(self):
+            return False
+
+        def is_completed(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    engine.risk_control = DummyRisk()
+    symbol = engine.broker.datas[0]._name
+    engine._pending_risk_orders = {symbol: UnknownOrder()}
+
+    triggered = engine._check_risk_controls()
+
+    assert triggered is True, "未知订单状态应触发阻断，避免策略继续下单。"
+    assert symbol in engine._pending_risk_orders, "未知状态下不应误删待跟踪风险订单。"
+    assert engine.risk_control.check_calls == 0, "未知状态时应先阻断，不应继续执行风险 check。"
