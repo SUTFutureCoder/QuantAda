@@ -41,14 +41,22 @@ class WeComAlarm(BaseAlarm):
 
     def push_exception(self, context: str, error: Exception):
         import traceback
-        tb_str = traceback.format_exc()[-500:]
+        tb_str = ""
+        if isinstance(error, BaseException) and error.__traceback__:
+            tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))[-500:]
+        else:
+            active_tb = traceback.format_exc()
+            if active_tb and active_tb.strip() != "NoneType: None":
+                tb_str = active_tb[-500:]
+
+        tb_text = f"> `{tb_str}`" if tb_str else "> `No traceback captured (proactive alert).`"
 
         md_text = f"""### <font color=\"warning\">🚨 QuantAda 异常报警</font>
 > **模块**: {context}
 > **时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}
 > **错误**: <font color=\"warning\">{str(error)}</font>
 >
-> `{tb_str}`
+{tb_text}
 """
         payload = {
             "msgtype": "markdown",
