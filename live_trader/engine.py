@@ -623,7 +623,7 @@ def on_order_status_callback(context, raw_order):
                 msg = getattr(raw_order, 'ord_rej_reason_detail', '')  # 尝试获取拒单原因
 
             current_status = getattr(order_proxy, 'status', 'Unknown')
-            print(f"[Engine Callback] Notified strategy of order status: {order_proxy.status} ({msg})")
+            print(f"[Engine Callback] Notified strategy of order status: {current_status} ({msg})")
             # 如果状态是 "已提交" 但还没 "成交"，且未被拒绝，则推送一条消息
             if current_status in ['PreSubmitted', 'Submitted', 'PendingSubmit']:
                 # 为了防止刷屏，只有当成交量为0时才推送这个"提交确认"
@@ -637,6 +637,8 @@ def on_order_status_callback(context, raw_order):
                     # 针对其他 Broker (通用回退)
                     elif hasattr(order_proxy, 'raw_order') and hasattr(order_proxy.raw_order, 'volume'):
                         total_qty = order_proxy.raw_order.volume
+                    elif hasattr(order_proxy, 'platform_order') and hasattr(order_proxy.platform_order, 'volume'):
+                        total_qty = order_proxy.platform_order.volume
 
                     action = "BUY" if order_proxy.is_buy() else "SELL"
                     symbol = order_proxy.data._name if order_proxy.data else "Unknown"

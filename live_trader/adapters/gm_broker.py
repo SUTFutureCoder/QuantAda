@@ -339,6 +339,8 @@ class GmBrokerAdapter(BaseLiveBroker):
         # 提取选股器和标的
         selection_name = kwargs.get('selection')
         symbols = kwargs.get('symbols')
+        timeframe = kwargs.get('timeframe')
+        compression = kwargs.get('compression')
 
         def _pick_probe_symbol(raw_symbols):
             if isinstance(raw_symbols, (list, tuple)):
@@ -453,6 +455,8 @@ class GmBrokerAdapter(BaseLiveBroker):
                 if kwargs.get('cash') is not None: engine_config['cash'] = initial_cash
                 if kwargs.get('commission') is not None: engine_config['commission'] = commission
                 if kwargs.get('slippage') is not None: engine_config['slippage'] = slippage
+                if timeframe is not None: engine_config['timeframe'] = timeframe
+                if compression is not None: engine_config['compression'] = compression
 
                 # 注入选股器或标的
                 if selection_name:
@@ -473,8 +477,11 @@ class GmBrokerAdapter(BaseLiveBroker):
                 if not current_symbols:
                     current_symbols = ctx.strategy_instance._determine_symbols()
                 if current_symbols:
+                    sub_tf = ctx.strategy_instance.config.get('timeframe', 'Days')
+                    sub_cp = int(ctx.strategy_instance.config.get('compression', 1) or 1)
+                    sub_freq = f"{sub_cp * 60}s" if sub_tf == 'Minutes' else '1d'
                     print(f"[GmBroker] Subscribing to {len(current_symbols)} symbols...")
-                    subscribe(symbols=current_symbols, frequency='1d', count=1, wait_group=True)
+                    subscribe(symbols=current_symbols, frequency=sub_freq, count=1, wait_group=True)
 
                 # 实盘定时任务配置
                 if mode == MODE_LIVE and schedule_rule:

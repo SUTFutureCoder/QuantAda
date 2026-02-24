@@ -584,9 +584,15 @@ class BaseLiveBroker(ABC):
             is_long_gap = time_delta > 600  # 10分钟无心跳视为异常
 
             if is_new_day or is_long_gap:
-                if self._deferred_orders:
+                has_stale_state = bool(
+                    self._deferred_orders
+                    or self._pending_sells
+                    or self._active_buys
+                    or self._virtual_spent_cash > 0
+                )
+                if has_stale_state:
                     print(f"[Broker] {'New Day' if is_new_day else 'Long Gap'} detected. "
-                          f"Clearing {len(self._deferred_orders)} stale deferred orders.")
+                          f"Resetting stale broker state.")
                     self._reset_stale_state(new_dt=dt)
 
             # 注意：对于同一个交易日内的正常 Bar 更新（比如 10:00 -> 10:01），

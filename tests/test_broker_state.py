@@ -326,6 +326,35 @@ def test_intraday_long_gap_reset():
     assert len(broker._deferred_orders) == 0, "日内长中断后 _deferred_orders 必须被强制清空"
 
 
+def test_cross_day_reset_without_deferred_still_cleans_pending_and_active():
+    """
+    跨日恢复兜底:
+    即使 _deferred_orders 为空，只要存在 _pending_sells/_active_buys 脏状态，也必须触发 reset。
+    """
+    broker = MockBroker(initial_cash=10000.0)
+    data = _make_data()
+
+    broker.set_datetime(datetime(2026, 2, 16, 14, 55, 0))
+    broker._pending_sells.add("SELL_STALE_1")
+    broker._active_buys["BUY_STALE_1"] = {
+        "data": data,
+        "shares": 100,
+        "price": 10.0,
+        "lot_size": 100,
+        "retries": 0,
+    }
+    broker._virtual_spent_cash = 1000.0
+
+    assert len(broker._deferred_orders) == 0, "前置失败：该用例要求 deferred 为空。"
+    assert len(broker._pending_sells) == 1, "前置失败：pending_sells 注入失败。"
+    assert len(broker._active_buys) == 1, "前置失败：active_buys 注入失败。"
+
+    broker.set_datetime(datetime(2026, 2, 17, 9, 31, 0))
+
+    assert len(broker._pending_sells) == 0, "跨日后 _pending_sells 必须被清空。"
+    assert len(broker._active_buys) == 0, "跨日后 _active_buys 必须被清空。"
+
+
 def test_cash_override_and_virtual_ledger_exhaustion():
     """
     资金覆写 + 虚拟账本耗尽:

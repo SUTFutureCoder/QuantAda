@@ -229,15 +229,17 @@ if __name__ == '__main__':
             sys.exit(1)
 
         broker_name, conn_name = args.connect.split(':', 1)
-
         # 收集执行参数 (Execution Args)
         # 这些参数之前只用于内部回测，现在我们也传给 Broker
         exec_args = {
             'start_date': args.start_date,
             'end_date': args.end_date,
             'cash': args.cash,
-            'commission': args.commission,
+            # 实盘佣金由券商柜台结算，此处不透传 commission 覆盖值。
+            'commission': None,
             'slippage': args.slippage,
+            'timeframe': args.timeframe,
+            'compression': args.compression,
             # 透传选股器和标的参数
             'selection': args.selection,
             # 同时也处理 symbols (转为列表)，以防没有选股器时使用

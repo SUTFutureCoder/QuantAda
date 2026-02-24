@@ -577,6 +577,10 @@ class IBBrokerAdapter(BaseLiveBroker):
         engine_config['params'] = params
         engine_config['platform'] = 'ib'
         engine_config['symbols'] = symbols
+        if kwargs.get('timeframe') is not None:
+            engine_config['timeframe'] = kwargs.get('timeframe')
+        if kwargs.get('compression') is not None:
+            engine_config['compression'] = kwargs.get('compression')
         if selection_name: engine_config['selection_name'] = selection_name
 
         trader = LiveTrader(engine_config)
