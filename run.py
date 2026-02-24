@@ -160,7 +160,7 @@ if __name__ == '__main__':
         default=-1,
         help="[优化模式] 并行核心数: >0=指定worker数, -1=自动保留15%且至少2核系统冗余, <-1=保留(abs(n_jobs)-1)核"
     )
-    parser.add_argument('--metric', type=str, default='mix_score_origin',
+    parser.add_argument('--metric', type=str, default='mix_score_origin,mix_score_defender,mix_score_sniper,mix_score_turbo',
                         help="[优化模式] 优化目标 (支持逗号分隔的多私有指标串行执行)")
     parser.add_argument('--train_roll_period', type=str, default=None,
                         help="[优化模式] 训练集滚动周期 (从测试集开始时间往前推)。例如：1y, 3y")
@@ -301,7 +301,7 @@ if __name__ == '__main__':
                 return None
 
             name_tag = optimizer.OptimizationJob.build_optuna_name_tag(
-                metric="multi_metric",
+                metric="mix_score_origin,mix_score_defender,mix_score_sniper,mix_score_turbo",
                 train_period=args.train_roll_period,
                 test_period=args.test_roll_period,
                 train_range=train_range,
