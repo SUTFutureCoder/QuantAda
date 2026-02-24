@@ -123,8 +123,6 @@ class LiveTrader:
                 except ImportError:
                     pass
 
-        print("[Engine] Effective configuration:", self.config)
-
         # 3. 使用最终配置实例化所有组件
         self.strategy_class = get_class_from_name(self.config['strategy_name'], ['strategies'])
         if self.config.get('selection_name'):
