@@ -53,7 +53,8 @@ trader = LiveTrader(config)
 # 4. 对接掘金的生命周期函数
 def init(context):
     trader.init(context)
-    context.strategy_instance = trader.strategy
+    # 与正式 adapter 保持一致：回调链路统一持有 LiveTrader 引擎实例
+    context.strategy_instance = trader
     # 设置策略执行频率
     schedule(schedule_func=trader.run, date_rule='1d', time_rule='14:45:00')
 

@@ -330,12 +330,15 @@ def test_selector_dataframe_contract_in_live_engine(monkeypatch):
 
     class DataFrameSelector:
         captured_data_manager = None
+        run_calls = 0
 
         def __init__(self, data_manager):
             DataFrameSelector.captured_data_manager = data_manager
 
         def run_selection(self):
-            return pd.DataFrame(index=["SHSE.600000", "SZSE.000001"])
+            DataFrameSelector.run_calls += 1
+            # 覆盖去重与空值过滤逻辑
+            return pd.DataFrame(index=["SHSE.600000", "SZSE.000001", "SHSE.600000", " "])
 
     def _resolver(class_name, paths):
         if class_name == "DataFrameSelector":
@@ -371,6 +374,75 @@ def test_selector_dataframe_contract_in_live_engine(monkeypatch):
     assert loaded_symbols == ["SHSE.600000", "SZSE.000001"], (
         "selector 返回 DataFrame 时应使用 index 作为标的列表。"
     )
+
+    # 二次查询应命中缓存，不应再次执行 selector
+    _ = engine._determine_symbols()
+    _ = engine._determine_symbols()
+    assert DataFrameSelector.run_calls == 1, "同一次引擎会话内，selector 不应被重复执行。"
+
+
+def test_live_minutes_warmup_window_uses_full_timestamp(monkeypatch):
+    """
+    实盘分钟级预热:
+    初始化拉取窗口应包含完整时间戳(含 HH:MM:SS)，避免分钟数据边界被截断到 00:00:00。
+    """
+    import live_trader.engine as engine_module
+
+    class RecordingDataProvider(DummyDataProvider):
+        def __init__(self):
+            super().__init__()
+            self.history_calls = []
+
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            self.history_calls.append(
+                {
+                    "symbol": symbol,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "timeframe": timeframe,
+                    "compression": compression,
+                }
+            )
+            return super().get_history(symbol, start_date, end_date, timeframe, compression)
+
+    monkeypatch.setattr(config, "ANNUAL_FACTOR", 30)
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, RecordingDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "timeframe": "Minutes",
+        "compression": 5,
+        "params": {},
+    }
+
+    now = datetime(2026, 2, 17, 14, 35, 20)
+    engine = LiveTrader(cfg)
+    context = MockContext(now=now)
+    engine.init(context)
+
+    calls = engine.data_provider.history_calls
+    assert calls, "分钟级初始化应触发至少一次 get_history。"
+    first = calls[0]
+
+    expected_start = (pd.Timestamp(now) - pd.Timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    expected_end = pd.Timestamp(now).strftime("%Y-%m-%d %H:%M:%S")
+
+    assert first["timeframe"] == "Minutes", "分钟级配置应透传给 DataProvider。"
+    assert first["start_date"] == expected_start, "分钟级预热起点应保留完整时分秒。"
+    assert first["end_date"] == expected_end, "分钟级预热终点应保留完整时分秒。"
 
 
 def test_risk_pending_order_terminal_precedence(monkeypatch):

@@ -10,6 +10,7 @@ import pandas as pd
 import config
 from alarms.manager import AlarmManager
 from data_providers.base_provider import BaseDataProvider
+from data_providers.manager import DataManager
 from live_trader.adapters.base_broker import BaseLiveBroker
 from run import get_class_from_name
 
@@ -34,6 +35,8 @@ class LiveTrader:
         self.broker = None
         self.config = None
         self.risk_control = None
+        self._data_manager = None
+        self._resolved_symbols = None
 
     def _load_adapter_classes(self, platform: str):
         """
@@ -268,12 +271,47 @@ class LiveTrader:
 
     def _determine_symbols(self) -> list:
         """根据最终配置决定交易的标的列表"""
+        if self._resolved_symbols is not None:
+            return list(self._resolved_symbols)
+
+        symbols = []
         if self.selector_class:
-            selector_instance = self.selector_class(data_manager=None)
-            symbols = selector_instance.run_selection()
+            if self._data_manager is None:
+                self._data_manager = DataManager()
+
+            selector_instance = self.selector_class(data_manager=self._data_manager)
+            raw_symbols = selector_instance.run_selection()
+
+            if isinstance(raw_symbols, pd.DataFrame):
+                symbols = [str(s) for s in raw_symbols.index.tolist()]
+            elif isinstance(raw_symbols, (pd.Index, list, tuple, set)):
+                symbols = [str(s) for s in raw_symbols]
+            else:
+                raise ValueError(
+                    f"Selector '{self.selector_class.__name__}' returned unsupported type: {type(raw_symbols).__name__}"
+                )
             print(f"Selector selected symbols: {symbols}")
-            return symbols
-        return self.config.get('symbols', [])
+        else:
+            configured_symbols = self.config.get('symbols', [])
+            if isinstance(configured_symbols, str):
+                symbols = [configured_symbols]
+            elif isinstance(configured_symbols, (list, tuple, set, pd.Index)):
+                symbols = [str(s) for s in configured_symbols]
+            else:
+                raise ValueError(f"Unsupported symbols type in config: {type(configured_symbols).__name__}")
+
+        # 去重并过滤空值，保持原始顺序
+        deduped = []
+        seen = set()
+        for sym in symbols:
+            sym_norm = str(sym).strip()
+            if not sym_norm or sym_norm in seen:
+                continue
+            deduped.append(sym_norm)
+            seen.add(sym_norm)
+
+        self._resolved_symbols = deduped
+        return list(self._resolved_symbols)
 
     def _fetch_all_history_data(self, symbols: list, context, is_live: bool,
                                 timeframe: str, compression: int) -> dict:
@@ -282,9 +320,15 @@ class LiveTrader:
 
         if is_live:
             # 实盘模式: 仅获取最近的预热数据，用于计算指标
-            end_date = context.now.strftime('%Y-%m-%d')
+            if timeframe == 'Minutes':
+                end_date = context.now.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                end_date = context.now.strftime('%Y-%m-%d')
             # 默认使用年交易日以适应各种长周期指标，无需用户配置
-            start_date = (context.now - pd.Timedelta(days=config.ANNUAL_FACTOR)).strftime('%Y-%m-%d')
+            if timeframe == 'Minutes':
+                start_date = (context.now - pd.Timedelta(days=config.ANNUAL_FACTOR)).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                start_date = (context.now - pd.Timedelta(days=config.ANNUAL_FACTOR)).strftime('%Y-%m-%d')
             print(f"[Engine] Live mode data fetch (warm-up): from {start_date} to {end_date}")
         else:
             # 平台回测模式: 默认从 start_date 往前预热，保证长周期指标可用
@@ -447,14 +491,8 @@ class LiveTrader:
                 # 使用 BaseOrderProxy 的标准接口检查状态
                 # 注意：这里依赖 callback 或 broker 自动更新 pending_order 对象的内部状态
 
-                if pending_order.is_pending() or pending_order.is_accepted():
-                    # 关键点：订单正在交易所排队或处理中。
-                    # 此时绝对不能再次发送订单，也不能清除状态。
-                    self.broker.log(f"[Risk] Pending exit order for {data_name} is active. Waiting for execution...")
-                    triggered_action = True  # 标记为 True，告诉 engine 跳过 strategy.next()
-                    continue
-
-                elif pending_order.is_completed():
+                # 终态优先判断，避免 is_accepted=True 的对象吞掉已撤单/拒单状态
+                if pending_order.is_completed():
                     # 订单已完成
                     # 理论上仓位会在下一次循环被判定为 0，从而走入 A 步骤清理状态。
                     # 这里先移除追踪，允许逻辑继续
@@ -469,6 +507,13 @@ class LiveTrader:
                     self.broker.log(
                         f"[Risk] Exit order for {data_name} failed (Rejected/Canceled). Resetting to retry.")
                     del self._pending_risk_orders[data_name]
+
+                elif pending_order.is_pending() or pending_order.is_accepted():
+                    # 关键点：订单正在交易所排队或处理中。
+                    # 此时绝对不能再次发送订单，也不能清除状态。
+                    self.broker.log(f"[Risk] Pending exit order for {data_name} is active. Waiting for execution...")
+                    triggered_action = True  # 标记为 True，告诉 engine 跳过 strategy.next()
+                    continue
 
                 else:
                     # 其他未知状态，保守起见视为 Pending
@@ -619,7 +664,8 @@ def on_order_status_callback(context, raw_order):
 
             # B. 异常状态推送 (拒单)
             if order_proxy.is_rejected():
-                alarm_manager.push_text(f"⚠️ 订单被拒绝: {order_proxy.data._name} - {msg}", level='WARNING')
+                symbol = order_proxy.data._name if order_proxy.data else "Unknown"
+                alarm_manager.push_text(f"⚠️ 订单被拒绝: {symbol} - {msg}", level='WARNING')
 
             # 3. 如果卖单成交（有钱回笼），触发重试
             if order_proxy.is_sell() and order_proxy.executed.size > 0:
@@ -700,7 +746,8 @@ def launch_live(broker_name: str, conn_name: str, strategy_path: str, params: di
         # 查找逻辑：是类 + 是BaseLiveBroker的子类 + 不是BaseLiveBroker本身
         if (inspect.isclass(obj)
                 and issubclass(obj, BaseLiveBroker)
-                and obj is not BaseLiveBroker):
+                and obj is not BaseLiveBroker
+                and obj.__module__ == adapter_module.__name__):
             broker_class = obj
             break
 

@@ -3,6 +3,7 @@ import types
 
 import pytest
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 
 # 拦截 ib_insync 导入，避免任何真实 TWS/Gateway 连接依赖
@@ -73,6 +74,25 @@ class DummyIBForCash:
 
     def openTrades(self):
         return []
+
+
+class DummyIBForCashWithOpenTrades(DummyIBForCash):
+    def __init__(self, cash_usd, open_trades):
+        super().__init__(cash_usd=cash_usd)
+        self._open_trades = open_trades
+
+    def openTrades(self):
+        return self._open_trades
+
+
+class DummyTicker:
+    def __init__(self, price):
+        self._price = price
+        self.close = None
+        self.last = None
+
+    def marketPrice(self):
+        return self._price
 
 
 def test_ib_status_translation_accuracy():
@@ -157,4 +177,38 @@ def test_ib_get_cash_respects_virtual_ledger():
 
     assert broker.get_cash() == pytest.approx(7500.0), (
         "IB get_cash 未扣减虚拟账本，占资保护失效。"
+    )
+
+
+def test_ib_get_cash_dedupes_open_orders_and_local_ledger():
+    """
+    占资去重回归:
+    openTrades 已覆盖的本地订单不应重复扣减，但本地额外订单仍应继续扣减。
+    """
+    open_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=1, action="BUY"),
+        contract=SimpleNamespace(symbol="AAPL"),
+        orderStatus=SimpleNamespace(remaining=10),
+    )
+    context = types.SimpleNamespace(ib_instance=DummyIBForCashWithOpenTrades(cash_usd=10000.0, open_trades=[open_trade]))
+    broker = IBBrokerAdapter(context=context)
+
+    broker._tickers = {"AAPL": DummyTicker(100.0)}
+    broker._active_buys = {
+        "1": {"data": None, "shares": 10, "price": 100.0, "lot_size": 1, "retries": 0},
+        "2": {"data": None, "shares": 5, "price": 200.0, "lot_size": 1, "retries": 0},
+    }
+    broker._virtual_spent_cash = (
+        10 * 100.0 * broker.safety_multiplier
+        + 5 * 200.0 * broker.safety_multiplier
+    )
+
+    expected_reserved = (
+        10 * 100.0 * 1.015  # openTrades 估算冻结 (id=1)
+        + 5 * 200.0 * broker.safety_multiplier  # 本地额外订单 (id=2)
+    )
+    expected_cash = 10000.0 - expected_reserved
+
+    assert broker.get_cash() == pytest.approx(expected_cash), (
+        "IB get_cash 占资去重异常：应扣减 openTrades 冻结 + 本地额外订单占资。"
     )

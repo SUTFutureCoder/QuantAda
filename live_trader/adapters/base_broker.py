@@ -207,6 +207,11 @@ class BaseLiveBroker(ABC):
         current_size = self.get_expected_size(data)
         delta_shares = expected_shares - current_size
 
+        # 风控拦截：Percent 模式与 Value 模式保持一致
+        if data._name in self._risk_locked_symbols and delta_shares > 0:
+            print(f"[Broker Risk Block] 🚫 风控拦截: {data._name} 触发风控，买单已被底层静默吃掉。")
+            return None
+
         # 4. 决策分发
         if delta_shares > 0:
             return self._smart_buy(data, delta_shares, price, target, **kwargs)
@@ -275,8 +280,8 @@ class BaseLiveBroker(ABC):
             proxy = self._finalize_and_submit(data, shares, price, lot_size)
             # 记账到虚拟账本
             if proxy:
-                with self._ledger_lock:
-                    self._virtual_spent_cash += (shares * price * buffer_rate)
+                submitted_shares = self._active_buys.get(proxy.id, {}).get('shares', shares)
+                self._virtual_spent_cash += (submitted_shares * price * buffer_rate)
         return proxy
 
     def _smart_buy_value(self, data, shares, price, target_value, **kwargs):
@@ -306,8 +311,8 @@ class BaseLiveBroker(ABC):
         with self._ledger_lock:
             proxy = self._finalize_and_submit(data, shares, price, lot_size)
             if proxy:
-                with self._ledger_lock:
-                    self._virtual_spent_cash += (shares * price * buffer_rate)
+                submitted_shares = self._active_buys.get(proxy.id, {}).get('shares', shares)
+                self._virtual_spent_cash += (submitted_shares * price * buffer_rate)
         return proxy
 
     def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):

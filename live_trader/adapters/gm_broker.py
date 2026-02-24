@@ -88,11 +88,20 @@ class GmOrderProxy(BaseOrderProxy):
     def is_rejected(self) -> bool: return self.platform_order.status == OrderStatus_Rejected
 
     def is_pending(self) -> bool:
-        terminal_states = [OrderStatus_Filled, OrderStatus_Canceled, OrderStatus_Rejected, OrderStatus_PendingNew]
-        return self.platform_order.status not in terminal_states
+        status = self.platform_order.status
+        # 回测兼容：PendingNew 被上层视为 completed
+        if not self.is_live and status == OrderStatus_PendingNew:
+            return False
+        terminal_states = [OrderStatus_Filled, OrderStatus_Canceled, OrderStatus_Rejected]
+        return status not in terminal_states
 
     def is_accepted(self) -> bool:
-        return self.platform_order.status not in [OrderStatus_New, OrderStatus_Rejected]
+        status = self.platform_order.status
+        # 回测兼容：PendingNew 被上层视为 completed
+        if not self.is_live and status == OrderStatus_PendingNew:
+            return False
+        terminal_states = [OrderStatus_Filled, OrderStatus_Canceled, OrderStatus_Rejected]
+        return status not in terminal_states
 
     def is_buy(self) -> bool:
         return hasattr(self.platform_order, 'side') and self.platform_order.side == OrderSide_Buy
@@ -438,6 +447,7 @@ class GmBrokerAdapter(BaseLiveBroker):
                 engine_config['strategy_name'] = strategy_path
                 engine_config['params'] = params
                 engine_config['platform'] = 'gm'
+                ctx.use_schedule = False
 
                 # 将资金和费率头传到 LiveTrader 引擎
                 if kwargs.get('cash') is not None: engine_config['cash'] = initial_cash
@@ -459,10 +469,12 @@ class GmBrokerAdapter(BaseLiveBroker):
                 ctx.strategy_instance = trader
 
                 # 订阅行情
-                current_symbols = ctx.strategy_instance._determine_symbols()
+                current_symbols = [d._name for d in ctx.strategy_instance.broker.datas]
+                if not current_symbols:
+                    current_symbols = ctx.strategy_instance._determine_symbols()
                 if current_symbols:
-                    print(f"[GmBroker] Subscribing to {len(ctx.strategy_instance._determine_symbols())} symbols...")
-                    subscribe(symbols=ctx.strategy_instance._determine_symbols(), frequency='1d', count=1, wait_group=True)
+                    print(f"[GmBroker] Subscribing to {len(current_symbols)} symbols...")
+                    subscribe(symbols=current_symbols, frequency='1d', count=1, wait_group=True)
 
                 # 实盘定时任务配置
                 if mode == MODE_LIVE and schedule_rule:
@@ -483,6 +495,8 @@ class GmBrokerAdapter(BaseLiveBroker):
                         print(f"[GmBroker Error] 定时任务注册失败: {e}")
 
             def on_bar(ctx, bars):
+                if getattr(ctx, 'use_schedule', False):
+                    return
                 if hasattr(ctx, 'strategy_instance'):
                     ctx.strategy_instance.run(ctx)
 

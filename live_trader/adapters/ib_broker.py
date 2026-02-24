@@ -121,10 +121,12 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         # 2. 盘点所有在途买单，计算尚未物理扣款的“虚拟冻结资金”
         virtual_frozen_cash = 0.0
+        covered_local_order_ids = set()
         try:
             pending_orders = self.get_pending_orders()
             for po in pending_orders:
                 if po['direction'] == 'BUY':
+                    poid = str(po.get('id', '')).strip()
                     symbol = po['symbol']
                     size = po['size']
 
@@ -150,12 +152,33 @@ class IBBrokerAdapter(BaseLiveBroker):
                     # 附加 1.5% 的乘数作为防爆仓安全垫（覆盖滑点与 IBKR 佣金）
                     if price > 0:
                         virtual_frozen_cash += size * price * 1.015
+                        if poid:
+                            covered_local_order_ids.add(poid)
 
         except Exception as e:
             print(f"[IBBroker] 计算买单虚拟冻结资金时发生异常: {e}")
 
-        # 3. 真实购买力 = 账面资金 - 虚拟冻结资金 (防止透支显示)
-        real_available_cash = raw_cash - virtual_frozen_cash
+        # 3. 与本地占资做去重合并:
+        # - active_buys_total: 基于 _active_buys 逐单估算的本地占资
+        # - local_virtual_total: 与 _virtual_spent_cash 取大，兼容异常恢复场景
+        # - overlap_cost: 已被 openTrades 成功估算覆盖的本地订单成本
+        # 最终占资 = openTrades 冻结 + (本地占资 - 重叠部分)
+        active_buys_total = 0.0
+        overlap_cost = 0.0
+        for oid, buy_info in getattr(self, '_active_buys', {}).items():
+            try:
+                cost = buy_info['shares'] * buy_info['price'] * self.safety_multiplier
+            except Exception:
+                continue
+            active_buys_total += cost
+            if str(oid) in covered_local_order_ids:
+                overlap_cost += cost
+
+        local_virtual_total = max(getattr(self, '_virtual_spent_cash', 0.0), active_buys_total)
+        local_virtual_extra = max(0.0, local_virtual_total - overlap_cost)
+
+        reserved_cash = virtual_frozen_cash + local_virtual_extra
+        real_available_cash = raw_cash - reserved_cash
         return max(0.0, real_available_cash)
 
     def getvalue(self):
@@ -178,6 +201,7 @@ class IBBrokerAdapter(BaseLiveBroker):
                     rem = t.orderStatus.remaining
                     if rem > 0:
                         res.append({
+                            'id': str(t.order.orderId),
                             # 从 Trade 对象中提取 contract 和 order 信息
                             'symbol': t.contract.symbol,
                             'direction': 'BUY' if t.order.action == 'BUY' else 'SELL',
@@ -561,7 +585,7 @@ class IBBrokerAdapter(BaseLiveBroker):
             trader.data_provider.ib = ib
 
         trader.init(ctx)
-        ctx.strategy_instance = trader.strategy
+        ctx.strategy_instance = trader
 
         # 确定标的列表
         target_symbols = []
