@@ -81,13 +81,13 @@ class PortfolioRebalancer:
 
         # 拼接 Markdown 字符串数组
         md_lines = [
-            "### 🔄 调仓计划生成",
+            "#### 🔄 调仓计划生成",
             f"- **目标市值/股**: `{target_value:,.2f}`",
             f"- **偏离阈值**: `{rebalance_threshold:.1%}`",
             f"- **当前持仓**: `{_curr_pos}`",
             f"- **目标标的**: `{_fmt_list(target_symbols)}`",
             "",
-            "#### 📝 执行清单"
+            "##### 📝 执行清单"
         ]
 
         has_action = False

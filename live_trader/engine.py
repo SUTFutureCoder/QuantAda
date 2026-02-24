@@ -289,10 +289,33 @@ class LiveTrader:
             start_date = (context.now - pd.Timedelta(days=config.ANNUAL_FACTOR)).strftime('%Y-%m-%d')
             print(f"[Engine] Live mode data fetch (warm-up): from {start_date} to {end_date}")
         else:
-            # 平台回测模式: 使用配置的完整时间段
-            start_date = self.config.get('start_date')
+            # 平台回测模式: 默认从 start_date 往前预热，保证长周期指标可用
+            raw_start_date = self.config.get('start_date')
             end_date = self.config.get('end_date')
-            print(f"[Engine] Backtest mode data fetch: from {start_date} to {end_date}")
+            start_date = raw_start_date
+
+            warmup_days = config.ANNUAL_FACTOR
+            if raw_start_date and warmup_days > 0:
+                try:
+                    warmup_start_ts = pd.to_datetime(raw_start_date) - pd.Timedelta(days=warmup_days)
+                    if timeframe == 'Minutes':
+                        start_date = warmup_start_ts.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        start_date = warmup_start_ts.strftime('%Y-%m-%d')
+
+                    print(
+                        "[Engine] Backtest mode data fetch "
+                        f"(warm-up {warmup_days}d): from {start_date} to {end_date} (run starts at {raw_start_date})"
+                    )
+                except Exception as e:
+                    start_date = raw_start_date
+                    print(
+                        f"[Engine Warning] Backtest warm-up failed for start_date={raw_start_date}: {e}. "
+                        "Fallback to raw start_date."
+                    )
+                    print(f"[Engine] Backtest mode data fetch: from {start_date} to {end_date}")
+            else:
+                print(f"[Engine] Backtest mode data fetch: from {start_date} to {end_date}")
 
         for symbol in symbols:
             df = self.data_provider.get_history(symbol, start_date, end_date,

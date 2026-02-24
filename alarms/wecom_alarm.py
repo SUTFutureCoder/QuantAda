@@ -19,11 +19,9 @@ class WeComAlarm(BaseAlarm):
             print(f"[WeCom Error] Failed to send alarm: {e}")
 
     def push_text(self, content: str, level: str = 'INFO'):
-        color = "info" if level == 'INFO' else "warning"
-        md_text = f"<font color=\"{color}\">{content}</font>"
         payload = {
             "msgtype": "markdown",
-            "markdown": {"content": md_text}
+            "markdown": {"content": content}
         }
         self._send(payload)
 

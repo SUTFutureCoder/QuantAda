@@ -90,7 +90,9 @@ class AlarmManager:
 
     def push_text(self, content, level='INFO'):
         if self.context_tag:
-            content = f"{self.context_tag} {content}"
+            content = f"""### {self.context_tag}
+{content}         
+"""
 
         for alarm in self.alarms:
             threading.Thread(target=alarm.push_text, args=(content, level)).start()

@@ -9,7 +9,7 @@ from live_trader.engine import LiveTrader, on_order_status_callback
 from .base_broker import BaseLiveBroker, BaseOrderProxy
 
 try:
-    from gm.api import order_target_percent, order_target_value, order_volume, current, get_cash, subscribe, OrderType_Market, OrderType_Limit, MODE_LIVE, MODE_BACKTEST, \
+    from gm.api import order_target_percent, order_target_value, order_volume, current, get_cash, subscribe, history, OrderType_Market, OrderType_Limit, MODE_LIVE, MODE_BACKTEST, \
         OrderStatus_New, OrderStatus_PartiallyFilled, OrderStatus_Filled, \
         OrderStatus_Canceled, OrderStatus_Rejected, OrderStatus_PendingNew, \
         OrderSide_Buy, OrderSide_Sell
@@ -24,7 +24,7 @@ try:
     from gm.api._errors import check_gm_status
 except ImportError:
     print("Warning: 'gm' module not found. GmAdapter will not be available.")
-    order_target_percent = order_target_value = get_cash = subscribe = OrderType_Market = MODE_BACKTEST = None
+    order_target_percent = order_target_value = get_cash = subscribe = history = OrderType_Market = MODE_BACKTEST = None
 
 
 class GmOrderProxy(BaseOrderProxy):
@@ -248,7 +248,7 @@ class GmBrokerAdapter(BaseLiveBroker):
             estimated_cost = volume * freeze_price * buffer_rate
 
             if freeze_price <= 0:
-                print(f"[GmBroker] ⚠️ 无法获取 {data._name} 的有效价格 (price={price})，拒绝计算并跳过发单。")
+                print(f"[GmBroker Warning] 无法获取 {data._name} 的有效价格 (price={price})，拒绝计算并跳过发单。")
                 return None
 
             if estimated_cost > available_cash:
@@ -327,24 +327,75 @@ class GmBrokerAdapter(BaseLiveBroker):
         strategy_id = conn_cfg.get('strategy_id')
         schedule_rule = conn_cfg.get('schedule')
 
+        # 提取选股器和标的
+        selection_name = kwargs.get('selection')
+        symbols = kwargs.get('symbols')
+
+        def _pick_probe_symbol(raw_symbols):
+            if isinstance(raw_symbols, (list, tuple)):
+                for s in raw_symbols:
+                    if isinstance(s, str) and s.strip():
+                        return s.strip()
+            elif isinstance(raw_symbols, str) and raw_symbols.strip():
+                return raw_symbols.strip()
+            return None
+
+        def _clip_backtest_end_by_history(dt_end_value):
+            probe_symbol = _pick_probe_symbol(symbols)
+            if not probe_symbol or history is None:
+                return dt_end_value
+
+            try:
+                probe_start = (dt_end_value - pd.Timedelta(days=180)).strftime('%Y-%m-%d 00:00:00')
+                probe_end = dt_end_value.strftime('%Y-%m-%d 23:59:59')
+                probe_df = history(
+                    symbol=probe_symbol,
+                    frequency='1d',
+                    start_time=probe_start,
+                    end_time=probe_end,
+                    fields='eob',
+                    adjust=ADJUST_PREV,
+                    df=True,
+                )
+
+                if probe_df is None or probe_df.empty:
+                    return dt_end_value
+
+                latest_eob = pd.Timestamp(probe_df['eob'].iloc[-1])
+                if latest_eob.tzinfo is not None:
+                    latest_eob = latest_eob.tz_convert('Asia/Shanghai').tz_localize(None)
+                latest_close = latest_eob.to_pydatetime().replace(hour=16, minute=0, second=0, microsecond=0)
+
+                if dt_end_value > latest_close:
+                    print(
+                        "[GmBroker] Backtest end clipped to latest GM history: "
+                        f"{latest_close.strftime('%Y-%m-%d 16:00:00')} (requested: {dt_end_value.strftime('%Y-%m-%d 16:00:00')})"
+                    )
+                    return latest_close
+            except Exception as e:
+                print(f"[GmBroker Warning] Failed to probe latest GM history date: {e}")
+
+            return dt_end_value
+
         # --- 1. 处理回测参数与模式判断 ---
         start_date = kwargs.get('start_date')
         end_date = kwargs.get('end_date')
         mode = MODE_LIVE
         gm_start_time = ''
         gm_end_time = ''
+        dt_start = None
+        dt_end = None
 
         if start_date:
             mode = MODE_BACKTEST
             print(f"  Mode: BACKTEST")
             try:
-                dt_start = pd.to_datetime(str(start_date))
-                gm_start_time = dt_start.strftime('%Y-%m-%d 08:00:00')
+                dt_start = pd.to_datetime(str(start_date)).to_pydatetime()
                 if end_date:
-                    dt_end = pd.to_datetime(str(end_date))
-                    gm_end_time = dt_end.strftime('%Y-%m-%d 16:00:00')
+                    dt_end = pd.to_datetime(str(end_date)).to_pydatetime()
                 else:
-                    gm_end_time = datetime.datetime.now().strftime('%Y-%m-%d 23:59:59')
+                    dt_end = datetime.datetime.now()
+                dt_end = dt_end.replace(hour=16, minute=0, second=0, microsecond=0)
             except Exception as e:
                 print(f"[Error] Date format error: {e}")
                 return
@@ -356,13 +407,21 @@ class GmBrokerAdapter(BaseLiveBroker):
         commission = float(kwargs.get('commission')) if kwargs.get('commission') is not None else 0.0003
         slippage = float(kwargs.get('slippage')) if kwargs.get('slippage') is not None else 0.0001
 
-        # 提取选股器和标的
-        selection_name = kwargs.get('selection')
-        symbols = kwargs.get('symbols')
-
         # 设置全局配置
         if serv_addr: set_serv_addr(serv_addr)
         set_token(token)
+
+        if mode == MODE_BACKTEST:
+            dt_end = _clip_backtest_end_by_history(dt_end)
+            if dt_end <= dt_start:
+                print("[Error] Invalid backtest period: start_date must be earlier than end_date.")
+                print(
+                    f"        start_date={dt_start.strftime('%Y-%m-%d 08:00:00')}, "
+                    f"end_date={dt_end.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                return
+            gm_start_time = dt_start.strftime('%Y-%m-%d 08:00:00')
+            gm_end_time = dt_end.strftime('%Y-%m-%d %H:%M:%S')
 
         # --- 2. 核心运行逻辑 ---
         def run_session():
@@ -412,7 +471,7 @@ class GmBrokerAdapter(BaseLiveBroker):
                         # 解析格式 "1d:14:50:00" -> freq="1d", time="14:50:00"
                         if ':' in schedule_rule:
                             rule_type, rule_time = schedule_rule.split(':', 1)
-                            print(f"[GmBroker] ⏰ 定时任务已启用 (来自配置): {rule_type} @ {rule_time}")
+                            print(f"[GmBroker] Schedule enabled (from config): {rule_type} @ {rule_time}")
                             print(f"            策略将在指定时间主动运行，忽略 on_bar 事件。")
 
                             schedule(schedule_func=trader.run, date_rule=rule_type, time_rule=rule_time)
@@ -458,11 +517,11 @@ class GmBrokerAdapter(BaseLiveBroker):
                 win_ratio = indicator.get('win_ratio', 0)
                 open_count = indicator.get('open_count', 0)
 
-                print(f"  💰 总收益率 (Total Return):    {pnl_ratio:>.2%}")
-                print(f"  📅 年化收益 (Annual Return):   {pnl_ratio_annual:>.2%}")
-                print(f"  📉 最大回撤 (Max Drawdown):    {max_drawdown:>.2%}")
-                print(f"  🎯 胜率 (Win Rate):           {win_ratio:>.2%}")
-                print(f"  🔢 开仓次数 (Trade Count):     {int(open_count)}")
+                print(f"  Total Return:                 {pnl_ratio:>.2%}")
+                print(f"  Annual Return:                {pnl_ratio_annual:>.2%}")
+                print(f"  Max Drawdown:                 {max_drawdown:>.2%}")
+                print(f"  Win Rate:                     {win_ratio:>.2%}")
+                print(f"  Trade Count:                  {int(open_count)}")
 
                 print("-" * 50)
                 print("  注意: 详细的回测报告（包含资金曲线、Alpha等）请登录掘金终端后查看。")
@@ -497,16 +556,22 @@ class GmBrokerAdapter(BaseLiveBroker):
                     check_cache=1,
                     match_mode=0
                 )
-
                 status = py_gmi_run()
-                check_gm_status(status)
+                try:
+                    check_gm_status(status)
+                except Exception as e:
+                    msg = str(e)
+                    if status == 1027 and "开始时间要在结束时间之前" in msg:
+                        print("[GmBroker Warning] Backtest reached GM data boundary. Exiting gracefully.")
+                        return False
+                    raise
                 return False
 
             else:  # 实盘模式
                 print("  Status: Connecting to GM terminal...")
                 status = gmi_init()
                 if status != 0:
-                    print(f"[Phoenix] ⚠️ Init failed (Code: {status}). Retrying in 10s...")
+                    print(f"[Phoenix] Init failed (Code: {status}). Retrying in 10s...")
                     return True  # 初始化失败，要求重试
 
                 check_gm_status(status)
@@ -522,7 +587,7 @@ class GmBrokerAdapter(BaseLiveBroker):
                         time.sleep(1)
 
                 except Exception as e:
-                    print(f"[Phoenix] ⚠️ Event Loop Crashed: {e}")
+                    print(f"[Phoenix] Event Loop Crashed: {e}")
                     raise e  # 抛出异常给外层处理
 
 
@@ -536,9 +601,9 @@ class GmBrokerAdapter(BaseLiveBroker):
                     break  # 回测结束或正常退出
 
                 # 如果 run_session 返回 True，说明是异常退出或断线，需要冷却后重启
-                print("[Phoenix] ⏳ Waiting 10s before restart...")
+                print("[Phoenix] Waiting 10s before restart...")
                 time.sleep(10)
-                print("[Phoenix] 🔄 Restarting now...")
+                print("[Phoenix] Restarting now...")
 
             except KeyboardInterrupt:
                 print("\n[Stop] User interrupted (Ctrl+C). Exiting Phoenix Loop.")
@@ -557,6 +622,6 @@ class GmBrokerAdapter(BaseLiveBroker):
                     except:
                         pass
 
-                print("[Phoenix] ⚠️ Critical error. Restarting in 15s...")
+                print("[Phoenix] Critical error. Restarting in 15s...")
                 time.sleep(15)
                 continue

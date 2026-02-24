@@ -243,3 +243,73 @@ def test_full_day_engine_lifecycle(monkeypatch):
     sell_orders = [o for o in engine.broker.submitted_orders if o["side"] == "SELL"]
     assert len(sell_orders) >= 1, "收盘阶段未触发清仓卖单，目标仓位归零链路失效！"
     assert sell_orders[-1]["volume"] == 1000, "清仓卖单数量异常，应与当前真实持仓 1000 股对齐！"
+
+
+def test_backtest_mode_auto_warmup_start_date(monkeypatch):
+    """
+    回测模式默认预热:
+    传入 start_date 后，引擎应自动向前拉取 ANNUAL_FACTOR 天历史。
+    """
+    import live_trader.engine as engine_module
+
+    class RecordingDataProvider(DummyDataProvider):
+        def __init__(self):
+            super().__init__()
+            self.history_calls = []
+
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            self.history_calls.append(
+                {
+                    "symbol": symbol,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "timeframe": timeframe,
+                    "compression": compression,
+                }
+            )
+            return super().get_history(symbol, start_date, end_date, timeframe, compression)
+
+    class MockBacktestBroker(MockEngineBroker):
+        @staticmethod
+        def is_live_mode(context):
+            return False
+
+        @staticmethod
+        def extract_run_config(context):
+            return {
+                "start_date": "20260201",
+                "end_date": "20260213",
+                "cash": 100000.0,
+            }
+
+    monkeypatch.setattr(config, "ANNUAL_FACTOR", 252)
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockBacktestBroker, RecordingDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+
+    calls = engine.data_provider.history_calls
+    assert calls, "回测初始化阶段未触发历史数据拉取。"
+
+    expected_warmup_start = (pd.Timestamp("2026-02-01") - pd.Timedelta(days=252)).strftime("%Y-%m-%d")
+    assert calls[0]["start_date"] == expected_warmup_start, "回测预热起点不正确，未按默认窗口前推。"
+    assert calls[0]["end_date"] == "20260213", "回测结束日期透传异常。"

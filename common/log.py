@@ -35,13 +35,13 @@ def info(msg, dt=None):
 def warning(msg, dt=None):
     """警告日志"""
     time_str = _fmt_dt(dt)
-    print(f"⚠️ [{time_str}] {msg}")
+    print(f"[WARN] [{time_str}] {msg}")
 
 
 def error(msg, dt=None):
     """错误日志"""
     time_str = _fmt_dt(dt)
-    print(f"❌ [{time_str}] {msg}")
+    print(f"[ERROR] [{time_str}] {msg}")
 
 
 def signal(action, symbol, size, price, tag="信号触发", dt=None):
@@ -59,7 +59,7 @@ def signal(action, symbol, size, price, tag="信号触发", dt=None):
         safe_size = size if size is not None else 0
         safe_price = price if price is not None else 0.0
 
-        emoji = "🚀" if action == 'BUY' else "🔻"
+        action_tag = "BUY" if action == 'BUY' else "SELL"
         act_cn = "买入" if action == 'BUY' else "卖出"
 
         # est_val 必须确保是数字计算结果
@@ -74,4 +74,4 @@ def signal(action, symbol, size, price, tag="信号触发", dt=None):
         time_str = _fmt_dt(dt)
         # 使用 safe_size 和 safe_price 打印
         print(
-            f"{emoji} [{tag}] {time_str} {act_cn} {symbol:<12} 数量: {int(safe_size):<8} 价格: {safe_price:.2f} (约 {val_str})")
+            f"[{action_tag}] [{tag}] {time_str} {act_cn} {symbol:<12} 数量: {int(safe_size):<8} 价格: {safe_price:.2f} (约 {val_str})")
