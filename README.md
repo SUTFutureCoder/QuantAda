@@ -26,7 +26,7 @@
 
 ### 🛠️ 法典一：零代码全球券商接入 (Prompt-Driven Adapter Generation)
 想要将 QuantAda 接入全球任何一家提供 Python SDK 的券商（如嘉信理财、长桥、盈立等），只需喝杯咖啡的时间：
-1. **获取法典**：打开项目根目录下的 `BROKER_PROMPT.md`。
+1. **获取法典**：打开 `vibe_coding_prompts/broker/BROKER_PROMPT.md`。
 2. **喂给算力**：将该 Prompt 与目标券商的官方 API 文档（或 SDK 示例）打包，发送给 AI。
 3. **开箱即用**：AI 会严格遵循 QuantAda 的接口签名，吐出一份标准化的 `[broker]_broker.py`。将其丢进 `live_trader/adapters/` 并在 `config.py` 配置，即可瞬间完成实盘点火！
 
@@ -34,7 +34,7 @@
 
 ### 🧠 法典二：双范式工程级策略生成 (Prompt-Driven Strategy Generation)
 让 AI 帮你写策略不再是停留在 Jupyter 里的玩具，而是可以直接免审对接实盘的工程级交付：
-1. **获取法典**：使用根目录下的 `STRATEGY_PROMPT.md`。
+1. **获取法典**：使用 `vibe_coding_prompts/strategy/STRATEGY_PROMPT.md`。
 2. **定义逻辑**：告诉 AI 你的交易灵感（如“基于布林带和 RSI 的多因子轮动”），并附上该 Prompt。
 3. **双范式分流**：Prompt 强制约束 AI 在以下两种最佳实践范式中二选一，杜绝冗长脆弱的 if-else 逻辑：
    - **范式 A（独立标的信号驱动）**：适用于 CTA 趋势跟随。AI 仅需生成目标仓位，调用引擎的 `order_target_percent`，系统自动计算安全垫与差额。

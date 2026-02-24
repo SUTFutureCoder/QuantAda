@@ -430,57 +430,76 @@ class GmBrokerAdapter(BaseLiveBroker):
             gmi_set_mode(mode)
             context.mode = mode
             context.strategy_id = strategy_id
+            context._phoenix_init_ok = False
+            context._phoenix_init_failed = False
+            context._phoenix_init_error = ""
 
 
             def init(ctx):
                 print(f"[Phoenix] Initializing Strategy '{strategy_path}'...")
-                engine_config = config.__dict__.copy()
-                engine_config['strategy_name'] = strategy_path
-                engine_config['params'] = params
-                engine_config['platform'] = 'gm'
+                try:
+                    engine_config = config.__dict__.copy()
+                    engine_config['strategy_name'] = strategy_path
+                    engine_config['params'] = params
+                    engine_config['platform'] = 'gm'
 
-                # 将资金和费率头传到 LiveTrader 引擎
-                if kwargs.get('cash') is not None: engine_config['cash'] = initial_cash
-                if kwargs.get('commission') is not None: engine_config['commission'] = commission
-                if kwargs.get('slippage') is not None: engine_config['slippage'] = slippage
+                    # 将资金和费率头传到 LiveTrader 引擎
+                    if kwargs.get('cash') is not None: engine_config['cash'] = initial_cash
+                    if kwargs.get('commission') is not None: engine_config['commission'] = commission
+                    if kwargs.get('slippage') is not None: engine_config['slippage'] = slippage
 
-                # 注入选股器或标的
-                if selection_name:
-                    engine_config['selection_name'] = selection_name
-                if symbols:
-                    engine_config['symbols'] = symbols
+                    # 注入选股器或标的
+                    if selection_name:
+                        engine_config['selection_name'] = selection_name
+                    if symbols:
+                        engine_config['symbols'] = symbols
 
-                if mode == MODE_BACKTEST:
-                    engine_config['start_date'] = start_date
+                    if mode == MODE_BACKTEST:
+                        engine_config['start_date'] = start_date
 
-                # 实例化引擎
-                trader = LiveTrader(engine_config)
-                trader.init(ctx)
-                ctx.strategy_instance = trader
+                    # 实例化引擎
+                    trader = LiveTrader(engine_config)
+                    trader.init(ctx)
+                    ctx.strategy_instance = trader
+                    ctx._phoenix_init_ok = True
+                    ctx._phoenix_init_failed = False
+                    ctx._phoenix_init_error = ""
 
-                # 订阅行情
-                current_symbols = ctx.strategy_instance._determine_symbols()
-                if current_symbols:
-                    print(f"[GmBroker] Subscribing to {len(ctx.strategy_instance._determine_symbols())} symbols...")
-                    subscribe(symbols=ctx.strategy_instance._determine_symbols(), frequency='1d', count=1, wait_group=True)
+                    # 订阅行情
+                    current_symbols = ctx.strategy_instance._determine_symbols()
+                    if current_symbols:
+                        print(f"[GmBroker] Subscribing to {len(ctx.strategy_instance._determine_symbols())} symbols...")
+                        subscribe(symbols=ctx.strategy_instance._determine_symbols(), frequency='1d', count=1, wait_group=True)
 
-                # 实盘定时任务配置
-                if mode == MODE_LIVE and schedule_rule:
-                    try:
-                        from gm.api import schedule
-                        # 解析格式 "1d:14:50:00" -> freq="1d", time="14:50:00"
-                        if ':' in schedule_rule:
-                            rule_type, rule_time = schedule_rule.split(':', 1)
-                            print(f"[GmBroker] Schedule enabled (from config): {rule_type} @ {rule_time}")
-                            print(f"            策略将在指定时间主动运行，忽略 on_bar 事件。")
+                    # 实盘定时任务配置
+                    if mode == MODE_LIVE and schedule_rule:
+                        try:
+                            from gm.api import schedule
+                            # 解析格式 "1d:14:50:00" -> freq="1d", time="14:50:00"
+                            if ':' in schedule_rule:
+                                rule_type, rule_time = schedule_rule.split(':', 1)
+                                print(f"[GmBroker] Schedule enabled (from config): {rule_type} @ {rule_time}")
+                                print(f"            策略将在指定时间主动运行，忽略 on_bar 事件。")
 
-                            schedule(schedule_func=trader.run, date_rule=rule_type, time_rule=rule_time)
-                            ctx.use_schedule = True
-                        else:
-                            print(f"[GmBroker Warning] 定时配置格式错误 (应为 freq:time): {schedule_rule}")
+                                schedule(schedule_func=trader.run, date_rule=rule_type, time_rule=rule_time)
+                                ctx.use_schedule = True
+                            else:
+                                print(f"[GmBroker Warning] 定时配置格式错误 (应为 freq:time): {schedule_rule}")
 
-                    except Exception as e:
-                        print(f"[GmBroker Error] 定时任务注册失败: {e}")
+                        except Exception as e:
+                            print(f"[GmBroker Error] 定时任务注册失败: {e}")
+                except Exception as e:
+                    ctx._phoenix_init_ok = False
+                    ctx._phoenix_init_failed = True
+                    ctx._phoenix_init_error = traceback.format_exc()
+                    print(f"[Phoenix] Strategy initialization failed: {e}")
+
+                    if mode == MODE_LIVE:
+                        try:
+                            AlarmManager().push_exception("GM Strategy Init", e)
+                        except Exception:
+                            pass
+                    raise
 
             def on_bar(ctx, bars):
                 if hasattr(ctx, 'strategy_instance'):
@@ -582,7 +601,20 @@ class GmBrokerAdapter(BaseLiveBroker):
                     # 这是一个阻塞循环，通常 gmi_poll 会一直运行
                     # 如果 gmi_poll 返回，说明连接断开或 shutdown 触发
                     while True:
-                        gmi_poll()
+                        poll_status = gmi_poll()
+
+                        # SDK 内部回调异常会被吞掉并 stop，这里通过标记感知并转入 Phoenix 重启流程
+                        if getattr(context, '_phoenix_init_failed', False):
+                            err_msg = getattr(context, '_phoenix_init_error', '')
+                            print("[Phoenix] Detected strategy init failure inside GM callback. Restart requested.")
+                            if err_msg:
+                                print(err_msg)
+                            return True
+
+                        # 防御：如果 SDK 返回非0状态，按异常会话处理
+                        if poll_status not in (None, 0):
+                            print(f"[Phoenix] gmi_poll returned non-zero status ({poll_status}). Restart requested.")
+                            return True
                         # 稍微休眠，释放 CPU，同时检测外部中断
                         time.sleep(1)
 
