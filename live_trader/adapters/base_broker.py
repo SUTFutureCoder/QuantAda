@@ -191,11 +191,6 @@ class BaseLiveBroker(ABC):
         """
         return {}
 
-    def _is_risk_locked_for_buy(self, data) -> bool:
-        """统一风控买入拦截判断，防止不同下单路径出现口径漂移。"""
-        symbol = getattr(data, "_name", "")
-        return symbol in self._risk_locked_symbols
-
     def order_target_percent(self, data, target, **kwargs):
         # 1. 原子操作：查价
         price = self.get_current_price(data)
@@ -211,11 +206,6 @@ class BaseLiveBroker(ABC):
         # 改用预期仓位计算差额
         current_size = self.get_expected_size(data)
         delta_shares = expected_shares - current_size
-
-        # 风控拦截
-        if self._is_risk_locked_for_buy(data) and delta_shares > 0:
-            print(f"[Broker Risk Block] 🚫 风控拦截: {data._name} 触发风控，买单已被底层静默吃掉。")
-            return None
 
         # 4. 决策分发
         if delta_shares > 0:
@@ -241,7 +231,7 @@ class BaseLiveBroker(ABC):
         delta_shares = expected_shares - current_size
 
         # 风控拦截
-        if self._is_risk_locked_for_buy(data) and delta_shares > 0:
+        if data._name in self._risk_locked_symbols and delta_shares > 0:
             print(f"[Broker Risk Block] 🚫 风控拦截: {data._name} 触发风控，买单已被底层静默吃掉。")
             return None
 
@@ -322,11 +312,6 @@ class BaseLiveBroker(ABC):
 
     def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):
         """通用的下单收尾逻辑：取整 + 提交"""
-        # 终极防线：任何买入路径（含拒单降级重试）都不能绕过风控物理锁。
-        if self._is_risk_locked_for_buy(data):
-            print(f"[Broker Risk Block] 🚫 风控拦截: {data._name} 触发风控，买单已被底层静默吃掉。")
-            return None
-
         raw_shares = shares
         if lot_size > 1:
             shares = int(shares // lot_size) * lot_size
