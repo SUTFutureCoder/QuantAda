@@ -315,6 +315,47 @@ class BaseLiveBroker(ABC):
                 self._virtual_spent_cash += (submitted_shares * price * buffer_rate)
         return proxy
 
+    def _infer_submitted_shares(self, proxy, fallback_shares):
+        """
+        推断券商最终受理的委托数量。
+        某些适配器会在 _submit_order 内做二次降仓，必须以真实数量记账。
+        """
+        try:
+            fallback = int(abs(float(fallback_shares)))
+        except Exception:
+            fallback = 0
+
+        if not proxy:
+            return fallback
+
+        def _read_path(obj, path):
+            cur = obj
+            for attr in path:
+                if not hasattr(cur, attr):
+                    return None
+                cur = getattr(cur, attr)
+            return cur
+
+        candidate_paths = [
+            ('submitted_size',),              # 适配器可选显式字段
+            ('requested_size',),              # 适配器可选显式字段
+            ('trade', 'order', 'totalQuantity'),
+            ('platform_order', 'volume'),
+            ('raw_order', 'volume'),
+            ('order', 'totalQuantity'),
+        ]
+
+        for path in candidate_paths:
+            raw = _read_path(proxy, path)
+            try:
+                val = int(abs(float(raw)))
+                if val > 0:
+                    return val
+            except Exception:
+                continue
+
+        return fallback
+
     def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):
         """通用的下单收尾逻辑：取整 + 提交"""
         raw_shares = shares
@@ -347,10 +388,11 @@ class BaseLiveBroker(ABC):
             with self._ledger_lock:
                 proxy = self._submit_order(data, shares, 'BUY', price)
                 if proxy:
+                    final_submitted_shares = self._infer_submitted_shares(proxy, shares)
                     # 注册到活跃买单库，记录当前的参数和重试次数
                     self._active_buys[proxy.id] = {
                         'data': data,
-                        'shares': shares,
+                        'shares': final_submitted_shares,
                         'price': price,
                         'lot_size': lot_size,
                         'retries': retries
@@ -397,7 +439,15 @@ class BaseLiveBroker(ABC):
             # ==========================================
             if proxy.is_buy():
                 if proxy.is_completed():
-                    self._active_buys.pop(oid, None)
+                    # 买单终态(Filled): 物理现金已结算，必须回退本地虚拟预扣，避免双重扣减可用资金
+                    buy_info = self._active_buys.pop(oid, None)
+                    if buy_info:
+                        refund_amount = buy_info['shares'] * buy_info['price'] * self.safety_multiplier
+                        self._virtual_spent_cash = max(
+                            0.0,
+                            getattr(self, '_virtual_spent_cash', 0.0) - refund_amount
+                        )
+                        print(f"[Broker] ✅ 买单 {oid} 已成交。已释放虚拟扣款: {refund_amount:.2f}")
 
                 elif proxy.is_canceled():
                     # 撤单防御：精准回退被冻结的虚拟预扣资金（不触发降级重试）
@@ -569,15 +619,16 @@ class BaseLiveBroker(ABC):
         """设置当前时间，并进行跨周期检查"""
         # 检查时间是否推进 (进入了新的 Bar/Day，跨周期)
         if self._datetime and dt > self._datetime:
-            # 跨周期时清空虚拟账本
-            self._virtual_spent_cash = 0.0
-
             # 不要因为 tick/bar 的更新就清理订单（会误杀 HFT 买单）。
             # 只有在以下两种情况才清理：
             # 1. 跨日了 (New Trading Day) -> 昨天的单子肯定是死单
             # 2. 两次心跳间隔太久 (例如 > 10分钟) -> 说明程序可能断线重启过，状态不可信
 
             is_new_day = dt.date() > self._datetime.date()
+
+            # 仅跨日清空虚拟占资，避免日内 bar 推进误释放占资保护。
+            if is_new_day:
+                self._virtual_spent_cash = 0.0
 
             # 计算时间差 (秒)
             time_delta = (dt - self._datetime).total_seconds()
@@ -632,6 +683,9 @@ class BaseLiveBroker(ABC):
         # 3. 清理买单跟踪器
         if hasattr(self, '_active_buys'):
             self._active_buys.clear()
+
+        # 4. 清理虚拟占资，避免长中断后出现幽灵冻结资金
+        self._virtual_spent_cash = 0.0
         print("  >>> Broker state reset completed.")
 
     def force_reset_state(self):

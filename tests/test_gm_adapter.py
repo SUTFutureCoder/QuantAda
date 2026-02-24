@@ -200,3 +200,56 @@ def test_gm_submit_order_backtest_market_mode(monkeypatch):
     assert call["order_type"] == mock_gm_api.OrderType_Market, "回测应使用市价单。"
     assert call["price"] == 0, "回测市价单应传 price=0 交由撮合引擎决定。"
     assert call["volume"] == 1000, "资金充足场景不应降仓。"
+
+
+def test_gm_secondary_downsize_updates_active_buy_and_virtual_ledger(monkeypatch):
+    """
+    回归测试:
+    当 GM 在 _submit_order 内进行二次降仓时，基类应使用“真实受理数量”更新:
+    - _active_buys[oid]['shares']
+    - _virtual_spent_cash
+    """
+    import live_trader.adapters.gm_broker as gm_module
+
+    order_calls = []
+
+    monkeypatch.setattr(gm_module, "OrderType_Market", mock_gm_api.OrderType_Market, raising=False)
+    monkeypatch.setattr(gm_module, "OrderType_Limit", mock_gm_api.OrderType_Limit, raising=False)
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    # 模拟柜台返回对象，携带最终受理 volume
+    class SubmittedOrder(DummyGMOrder):
+        def __init__(self, status, side, volume):
+            super().__init__(status=status, side=side)
+            self.volume = volume
+
+    def _fake_order_volume(**kwargs):
+        order_calls.append(kwargs)
+        return [SubmittedOrder(status=mock_gm_api.OrderStatus_New, side=kwargs["side"], volume=kwargs["volume"])]
+
+    monkeypatch.setattr(gm_module, "order_volume", _fake_order_volume)
+
+    broker = GmBrokerAdapter(context=MagicMock(), slippage_override=0.01, commission_override=0.0003)
+    broker.is_live = True
+    # 关键构造:
+    # - 基类 _smart_buy_value 看到 cash=10200 时不会先降仓 (1000*10*safety_multiplier < 10200)
+    # - GM _submit_order 会按 freeze_price=10.1 做二次降仓到 900
+    monkeypatch.setattr(broker, "_fetch_real_cash", lambda: 10200.0)
+    monkeypatch.setattr(broker, "get_current_price", lambda data: 10.0)
+    monkeypatch.setattr(broker, "get_pending_orders", lambda: [])
+
+    data = SimpleNamespace(_name="SHSE.600000")
+    proxy = broker.order_target_value(data=data, target=10000.0)  # expected_shares=1000
+
+    assert proxy is not None, "应成功提交降仓后的买单。"
+    assert len(order_calls) == 1, "应实际触发一次 order_volume。"
+    assert order_calls[0]["volume"] == 900, "GM 二次降仓后真实委托量应为 900。"
+
+    tracked = broker._active_buys.get(proxy.id)
+    assert tracked is not None, "_active_buys 应记录该订单。"
+    assert tracked["shares"] == 900, "活跃买单跟踪应使用真实受理数量，而非降仓前数量。"
+
+    expected_ledger = 900 * 10.0 * broker.safety_multiplier
+    assert broker._virtual_spent_cash == pytest.approx(expected_ledger), (
+        "虚拟账本占资应基于真实受理数量计算。"
+    )

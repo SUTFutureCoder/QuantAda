@@ -326,6 +326,29 @@ def test_intraday_long_gap_reset():
     assert len(broker._deferred_orders) == 0, "日内长中断后 _deferred_orders 必须被强制清空"
 
 
+def test_virtual_ledger_not_cleared_by_intraday_bar_progress():
+    """
+    占资口径回归:
+    _virtual_spent_cash 只能在跨日时清零，日内 bar 推进(例如 10:00 -> 10:01)不应清零。
+    """
+    broker = MockBroker(initial_cash=10000.0)
+
+    broker.set_datetime(datetime(2026, 2, 17, 10, 0, 0))
+    broker._virtual_spent_cash = 1234.5
+
+    # 日内正常推进
+    broker.set_datetime(datetime(2026, 2, 17, 10, 1, 0))
+    assert broker._virtual_spent_cash == pytest.approx(1234.5), (
+        "日内 bar 推进不应清零 _virtual_spent_cash。"
+    )
+
+    # 跨日推进
+    broker.set_datetime(datetime(2026, 2, 18, 9, 31, 0))
+    assert broker._virtual_spent_cash == pytest.approx(0.0), (
+        "跨日时必须清零 _virtual_spent_cash。"
+    )
+
+
 def test_cross_day_reset_without_deferred_still_cleans_pending_and_active():
     """
     跨日恢复兜底:
@@ -414,6 +437,35 @@ def test_buy_order_canceled_virtual_cash_leak():
     # 断言2（核心）：虚拟资金必须回退，否则会出现“幽灵占资”
     assert broker._virtual_spent_cash == pytest.approx(0.0), (
         "买单撤销后，虚拟资金未回退，发生幽灵账本泄漏！"
+    )
+
+
+def test_buy_order_filled_releases_virtual_cash():
+    """
+    占资终态回归:
+    买单 Filled 后，_virtual_spent_cash 必须回退到 0，避免与柜台已扣现金发生双重扣减。
+    """
+    broker = MockBroker(initial_cash=100000.0)
+    data = _make_data()
+
+    first = broker.order_target_value(data, target=10000.0)  # 1000 股
+    assert first is not None, "前置失败：首笔买单应成功发出"
+    assert first.id == "ORDER_1", "前置失败：首笔订单 ID 应为 ORDER_1"
+    assert "ORDER_1" in broker._active_buys, "前置失败：活跃买单跟踪器中应包含 ORDER_1"
+
+    pre_deduct = 1000 * 10.0 * broker.safety_multiplier
+    assert broker._virtual_spent_cash == pytest.approx(pre_deduct), "前置失败：首笔买单虚拟预扣金额异常"
+
+    # 模拟柜台成交后物理现金已扣减
+    broker.mock_cash = 90000.0
+    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Filled"))
+
+    assert "ORDER_1" not in broker._active_buys, "买单成交后，_active_buys 未清理，存在状态机脏数据风险！"
+    assert broker._virtual_spent_cash == pytest.approx(0.0), (
+        "买单成交后，虚拟资金未回退，发生可用资金双重扣减风险！"
+    )
+    assert broker.get_cash() == pytest.approx(90000.0), (
+        "买单成交后 get_cash 应与柜台实扣现金对齐，不能继续被虚拟账本二次扣减。"
     )
 
 
