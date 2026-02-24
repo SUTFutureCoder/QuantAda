@@ -330,6 +330,9 @@ class GmBrokerAdapter(BaseLiveBroker):
         # 提取选股器和标的
         selection_name = kwargs.get('selection')
         symbols = kwargs.get('symbols')
+        alarm_manager = AlarmManager()
+        last_init_fail_alarm_ts = 0.0
+        init_fail_alarm_cooldown = 300.0
 
         def _pick_probe_symbol(raw_symbols):
             if isinstance(raw_symbols, (list, tuple)):
@@ -425,6 +428,7 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         # --- 2. 核心运行逻辑 ---
         def run_session():
+            nonlocal last_init_fail_alarm_ts
             # 每次启动前重置 context 身份
             py_gmi_set_strategy_id(strategy_id)
             gmi_set_mode(mode)
@@ -591,8 +595,21 @@ class GmBrokerAdapter(BaseLiveBroker):
                 status = gmi_init()
                 if status != 0:
                     print(f"[Phoenix] Init failed (Code: {status}). Retrying in 10s...")
+
+                    # 连接层失败也要告警（带冷却，避免无限刷屏）
+                    now_ts = time.time()
+                    if now_ts - last_init_fail_alarm_ts >= init_fail_alarm_cooldown:
+                        last_init_fail_alarm_ts = now_ts
+                        try:
+                            alarm_manager.push_exception(
+                                "GM Init",
+                                RuntimeError(f"gmi_init failed with status={status}, serv_addr={serv_addr}")
+                            )
+                        except Exception:
+                            pass
                     return True  # 初始化失败，要求重试
 
+                last_init_fail_alarm_ts = 0.0
                 check_gm_status(status)
 
                 print("[Phoenix] Entering Event Loop (Ctrl+C to stop)...")
@@ -625,6 +642,15 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         # --- 3. 守护进程主循环 (The Phoenix Loop) ---
         # 只要不是回测或手动停止，这里会永远运行
+        if mode == MODE_LIVE:
+            try:
+                alarm_manager.push_status(
+                    "STARTED",
+                    f"GM Phoenix launched. Waiting for terminal connection ({serv_addr})."
+                )
+            except Exception:
+                pass
+
         while True:
             try:
                 should_retry = run_session()

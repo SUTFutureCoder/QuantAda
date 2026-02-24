@@ -15,6 +15,20 @@ class WeComAlarm(BaseAlarm):
         if not self.enabled: return
         try:
             resp = requests.post(self.webhook, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
+            if resp.status_code != 200:
+                print(f"[WeCom Error] HTTP {resp.status_code}: {resp.text}")
+                return
+
+            try:
+                body = resp.json()
+            except ValueError:
+                print(f"[WeCom Error] Non-JSON response: {resp.text}")
+                return
+
+            errcode = body.get("errcode", 0)
+            if errcode != 0:
+                errmsg = body.get("errmsg", "")
+                print(f"[WeCom Error] API errcode={errcode}, errmsg={errmsg}")
         except Exception as e:
             print(f"[WeCom Error] Failed to send alarm: {e}")
 
