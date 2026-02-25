@@ -255,7 +255,30 @@ class LiveTrader:
             if hasattr(self, 'alarm_manager'):
                 self.alarm_manager.push_exception("Engine Main Loop", e)
 
+        # 估算下一次运行时间（实际由底层的 schedule 调度器或行情 tick 决定）
+        timeframe = self.config.get('timeframe', 'Days')
+        compression = self.config.get('compression', 1)
+        next_expected_str = "未知"
+
+        try:
+            import pandas as pd
+            if timeframe == 'Minutes':
+                next_expected = context.now + pd.Timedelta(minutes=compression)
+                next_expected_str = next_expected.strftime('%Y-%m-%d %H:%M:%S')
+            elif timeframe == 'Days':
+                next_expected = context.now + pd.Timedelta(days=compression)
+                # 日线通常只精确到天，但为了美观也格式化
+                next_expected_str = next_expected.strftime('%Y-%m-%d %H:%M:%S')
+            elif timeframe == 'Weeks':
+                next_expected = context.now + pd.Timedelta(weeks=compression)
+                next_expected_str = next_expected.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+
         print("--- LiveTrader Run Finished ---")
+        if self.broker.is_live:
+            print(
+                f"[Engine] ⏳ 实盘引擎保持运行中... 预计下一个 K线/调度时间约为: {next_expected_str} (以实际行情或定时任务时区为准)")
 
     def notify_order(self, order):
         """
