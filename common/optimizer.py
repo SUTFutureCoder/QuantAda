@@ -1334,10 +1334,13 @@ class OptimizationJob:
                 legacy_complexity_score += 10.0
 
         legacy_base = 100.0 + legacy_complexity_score * math.sqrt(total_dims)
-        legacy_16_scale = 1.0 + math.sqrt(16.0)  # 固定参考16核历史尺度
-        legacy_16_estimated = int(round(max(1.0, legacy_base * legacy_16_scale)))
 
-        estimated = max(entropy_estimated, legacy_16_estimated)
+        # 获取当前机器的真实核心数，用于动态缩放算力预算
+        actual_cores = self._get_total_cpu_cores()
+        dynamic_core_scale = 1.0 + math.sqrt(float(actual_cores))
+        legacy_dynamic_estimated = int(round(max(1.0, legacy_base * dynamic_core_scale)))
+
+        estimated = max(entropy_estimated, legacy_dynamic_estimated)
 
         # 有限空间下不超过总组合数
         if is_finite_space:
@@ -1346,7 +1349,7 @@ class OptimizationJob:
         print(
             "[Optimizer] n_trials estimator: "
             f"entropy={entropy_nats:.2f}, dims={effective_dims}, cont_dims={continuous_dims}, "
-            f"entropy_est={entropy_estimated}, legacy16_est={legacy_16_estimated}, "
+            f"entropy_est={entropy_estimated}, legacy_{actual_cores}cores_est={legacy_dynamic_estimated}, "
             f"finite_space={'yes' if is_finite_space else 'no'} -> {estimated}"
         )
         return estimated
