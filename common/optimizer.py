@@ -25,9 +25,11 @@ QuantAda 启发式并行贝叶斯优化器
 5. **动态滚动训练**：支持基于时间周期的自动滚动切分 (Walk-Forward)，自动推断训练/测试窗口。
 """
 
+import ast
 import copy
 import datetime
 import importlib
+import logging
 import math
 import multiprocessing as mp
 import os
@@ -36,6 +38,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import shared_memory
@@ -132,6 +135,270 @@ def is_port_in_use(port):
     """检查本地端口是否被占用"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('127.0.0.1', port)) == 0
+
+
+def run_optimizer_mode(args, fixed_params, risk_params, symbol_list):
+    """
+    运行优化模式主流程（从 run.py 下沉的编排逻辑）。
+
+    Args:
+        args: argparse 解析结果。
+        fixed_params: 策略固定参数（由 --params 解析）。
+        risk_params: 风控参数（由 --risk_params 解析）。
+        symbol_list: CLI symbols 列表（用于共享上下文兜底）。
+
+    Returns:
+        int: 进程退出码（0=成功；1=输入/初始化错误）。
+    """
+    print(f"\n>>> Mode: PARAMETER OPTIMIZATION (Target: {args.metric}) <<<")
+
+    # 1. 解析传入的 metric (支持单个或逗号分隔的多个)
+    # 自动过滤空字符串，避免出现如 "sharpe,,calmar," 的脏输入
+    metrics_list = [m.strip() for m in args.metric.split(',') if m.strip()]
+    if not metrics_list:
+        print("Error: --metric contains no valid metric after filtering empty entries.")
+        return 1
+
+    config.LOG = False
+    logging.getLogger("optuna").setLevel(logging.INFO)
+
+    try:
+        opt_p_def = ast.literal_eval(args.opt_params)
+    except Exception as e:
+        print(f"Error parsing opt_params JSON: {e}")
+        return 1
+
+    final_reports = []
+    total_metrics = len(metrics_list)
+    is_multi_metric = total_metrics > 1
+    explicit_params_passed = any(
+        (arg == '--params') or arg.startswith('--params=')
+        for arg in sys.argv[1:]
+    )
+    baseline_report = None
+    baseline_elapsed_hours = None
+    shared_context = None
+    bootstrap_job = None
+    dashboard_launcher_job = None
+    shared_dashboard_log_file = None
+    log_dir = None
+
+    if is_multi_metric:
+        log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
+        os.makedirs(log_dir, exist_ok=True)
+
+    def build_shared_optuna_log_file(train_range, test_range, symbols):
+        if not log_dir:
+            return None
+
+        name_tag = OptimizationJob.build_optuna_name_tag(
+            metric="mix_score_origin,mix_score_defender,mix_score_sniper,mix_score_turbo",
+            train_period=args.train_roll_period,
+            test_period=args.test_roll_period,
+            train_range=train_range,
+            test_range=test_range,
+            data_source=args.data_source,
+            symbols=symbols,
+            selection=args.selection,
+            run_dt=datetime.datetime.now(),
+            run_pid=os.getpid(),
+        )
+        return os.path.join(log_dir, f"optuna_{name_tag}.log")
+
+    # 先构建一次共享上下文，确保基准与多指标训练处于同一数据宇宙（同一选股与同一数据切分）
+    try:
+        bootstrap_args = copy.deepcopy(args)
+        bootstrap_args.metric = metrics_list[0]
+        bootstrap_args.auto_launch_dashboard = not is_multi_metric
+        bootstrap_job = OptimizationJob(
+            args=bootstrap_args,
+            fixed_params=fixed_params,
+            opt_params_def=opt_p_def,
+            risk_params=risk_params
+        )
+        shared_context = bootstrap_job.export_shared_context()
+        dashboard_launcher_job = bootstrap_job
+        if is_multi_metric:
+            shared_dashboard_log_file = build_shared_optuna_log_file(
+                train_range=bootstrap_job.train_range,
+                test_range=bootstrap_job.test_range,
+                symbols=bootstrap_job.target_symbols,
+            )
+    except Exception as e:
+        print(f"[警告] 共享上下文构建失败，将降级为逐metric独立初始化: {e}")
+        if is_multi_metric and not shared_dashboard_log_file:
+            fallback_train_range = (args.start_date, args.end_date)
+            fallback_test_range = (args.end_date, args.end_date) if args.test_roll_period else (None, None)
+            shared_dashboard_log_file = build_shared_optuna_log_file(
+                train_range=fallback_train_range,
+                test_range=fallback_test_range,
+                symbols=symbol_list,
+            )
+
+    if explicit_params_passed:
+        print("\n--- Running Baseline Backtest from --params (Recent 3Y) ---")
+        baseline_start = time.time()
+        try:
+            if bootstrap_job is not None:
+                baseline_report = bootstrap_job._run_recent_3y_backtest(copy.deepcopy(fixed_params))
+            else:
+                baseline_args = copy.deepcopy(args)
+                baseline_args.metric = metrics_list[0]
+                baseline_args.auto_launch_dashboard = not is_multi_metric
+                if shared_dashboard_log_file:
+                    baseline_args.shared_journal_log_file = shared_dashboard_log_file
+                baseline_job = OptimizationJob(
+                    args=baseline_args,
+                    fixed_params=fixed_params,
+                    opt_params_def=opt_p_def,
+                    risk_params=risk_params
+                )
+                baseline_report = baseline_job._run_recent_3y_backtest(copy.deepcopy(fixed_params))
+        except Exception as e:
+            print(f"[警告] 当前基准回测失败: {e}")
+        finally:
+            baseline_elapsed_hours = (time.time() - baseline_start) / 3600.0
+
+    for idx, current_metric in enumerate(metrics_list, 1):
+        print(f"\n\n{'=' * 65}")
+        print(f"🚀 [指标 {idx}/{total_metrics} 正在训练]: {current_metric}")
+        print(f"{'=' * 65}")
+
+        # 深拷贝 args，确保物理隔离
+        current_args = copy.deepcopy(args)
+        current_args.metric = current_metric
+        current_args.auto_launch_dashboard = not is_multi_metric
+        if shared_dashboard_log_file:
+            current_args.shared_journal_log_file = shared_dashboard_log_file
+
+        start_time = time.time()
+
+        try:
+            job_kwargs = {
+                "args": current_args,
+                "fixed_params": fixed_params,
+                "opt_params_def": opt_p_def,
+                "risk_params": risk_params,
+            }
+            if shared_context is not None:
+                job_kwargs["shared_context"] = shared_context
+
+            job = OptimizationJob(**job_kwargs)
+            if dashboard_launcher_job is None:
+                dashboard_launcher_job = job
+
+            # 执行优化并接收返回的字典战报
+            result_dict = job.run()
+            elapsed_hours = (time.time() - start_time) / 3600.0
+
+            if result_dict and isinstance(result_dict, dict):
+                result_dict['metric_name'] = current_args.metric
+                result_dict['elapsed_hours'] = elapsed_hours
+                result_dict['study_db'] = getattr(current_args, 'study_name', 'N/A')
+                final_reports.append(result_dict)
+
+        except Exception as e:
+            print(f"\n[致命错误] 指标 '{current_metric}' 训练崩溃: {e}")
+            traceback.print_exc()
+            print(">>> 引擎防宕机保护触发，强行切入下一个指标...")
+            continue
+
+    if final_reports or explicit_params_passed:
+        print("=== 请忽略上文日志输出，请将下文提供给AI辅助分析 ===")
+        print(">>> 多臂赌博机训练结果汇总(MULTI-METRIC BANDIT SUMMARY)  <<<")
+
+        header = (
+            f"| {'指标 (Metric)':<30} | {'年化收益':<10} | {'回撤':<10} | "
+            f"{'Calmar':<8} | {'Sharpe':<8} | {'交易数':<8} | {'胜率':<10} | {'PF':<8} | "
+            f"{'耗时(h)':<8} | {'最优参数 (Params)':<22} | {'关联日志 (Log)'}"
+        )
+        table_width = len(header)
+        print("-" * table_width)
+        print(header)
+        print("-" * table_width)
+
+        if explicit_params_passed:
+            baseline_recent = baseline_report or {}
+            baseline_fmt = format_recent_backtest_metrics(baseline_recent)
+            m_str = "当前基准"
+            ret_str = baseline_fmt['annual_return']
+            dd_str = baseline_fmt['max_drawdown']
+            calmar_str = baseline_fmt['calmar_ratio']
+            sharpe_str = baseline_fmt['sharpe_ratio']
+            trades_str = baseline_fmt['total_trades']
+            winrate_str = baseline_fmt['win_rate']
+            pf_str = baseline_fmt['profit_factor']
+            t_str = format_float(baseline_elapsed_hours, digits=1)
+            b_str = str(fixed_params)
+            db_str = "N/A"
+            print(
+                f"| {m_str:<30} | {ret_str:<10} | {dd_str:<10} | "
+                f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
+                f"{t_str:<8} | {b_str:<22} | {db_str}"
+            )
+            if final_reports:
+                print("-" * table_width)
+
+        for r in final_reports:
+            recent = r.get('recent_backtest') or {}
+            recent_fmt = format_recent_backtest_metrics(recent)
+            metric_name = str(r.get('metric_name', 'Unknown'))
+            score_str = str(r.get('best_score', 'N/A'))
+            metric_with_score = f"{metric_name} ({score_str})" if score_str != "N/A" else metric_name
+            m_str = metric_with_score[:30]
+            ret_str = recent_fmt['annual_return']
+            dd_str = recent_fmt['max_drawdown']
+            calmar_str = recent_fmt['calmar_ratio']
+            sharpe_str = recent_fmt['sharpe_ratio']
+            trades_str = recent_fmt['total_trades']
+            winrate_str = recent_fmt['win_rate']
+            pf_str = recent_fmt['profit_factor']
+            t_str = format_float(r.get('elapsed_hours', 0), digits=1)
+            b_str = str(r.get('best_params', 'N/A'))
+            db_str = str(r.get('log_file', 'N/A'))
+            print(
+                f"| {m_str:<30} | {ret_str:<10} | {dd_str:<10} | "
+                f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
+                f"{t_str:<8} | {b_str:<22} | {db_str}"
+            )
+
+        print("-" * table_width + "\n")
+
+        if final_reports:
+            print("请在 Dashboard 中回放并排查孤点: ")
+            dashboard_logs = []
+            for r in final_reports:
+                log_file = r.get('log_file')
+                if log_file and log_file not in dashboard_logs:
+                    dashboard_logs.append(log_file)
+            for log_file in dashboard_logs:
+                print(f"optuna-dashboard {log_file}")
+
+            # 多 metric 场景只在末尾弹一次 Dashboard（共享 Journal 可聚合全部 metric）
+            if is_multi_metric and dashboard_launcher_job and dashboard_logs:
+                final_log = shared_dashboard_log_file or dashboard_logs[0]
+                if os.path.exists(final_log):
+                    base_port = getattr(config, 'OPTUNA_DASHBOARD_PORT', 8090)
+                    target_port = base_port
+                    for _ in range(100):
+                        if not is_port_in_use(target_port):
+                            break
+                        target_port += 1
+                    else:
+                        print(f"[Warning] Could not find an available port starting from {base_port}.")
+                        target_port = base_port
+                    print(f"[Info] Multi-metric training completed. Launching aggregated dashboard: {final_log}")
+                    print("[Info] Dashboard will run in foreground. Analyze results, then press Ctrl-C to exit.")
+                    dashboard_launcher_job._launch_dashboard(final_log, port=target_port, background=False)
+                else:
+                    print(f"[Warning] Aggregated dashboard log file not found: {final_log}")
+        else:
+            print("[警告] 当前仅有基准回测结果，训练指标未返回结果。")
+    else:
+        print("\n[警告] 所有指标均未返回结果")
+
+    return 0
+
 
 class OptimizationJob:
     CN_EXCHANGE_PREFIXES = {"SHSE", "SZSE", "SH", "SZ"}
