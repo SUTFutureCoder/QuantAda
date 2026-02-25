@@ -1269,15 +1269,16 @@ class OptimizationJob:
 
     def _estimate_n_trials(self):
         """
-        启发式算法：熵模型保底 + 16核历史公式放大校准。
+        启发式算法：熵模型保底 + 动态多核历史公式放大校准。
         核心公式：
-            N = max(N_entropy, N_legacy16)
-            N_legacy16 = (100 + S * sqrt(d_all)) * (1 + sqrt(16))
+            N = max(N_entropy, N_legacy_dynamic)
+            N_legacy_dynamic = (100 + S * sqrt(d_all)) * (1 + sqrt(C))
         其中：
-            - N_entropy: 熵复杂度估计（与机器核数解耦）
-            - N_legacy16: 参考你原先 16 核公式的目标规模
+            - N_entropy: 熵复杂度估计（基于参数空间的离散组合或连续区间）
+            - N_legacy_dynamic: 基于当前机器真实CPU核数(C)动态缩放的历史经验公式
             - S: 历史复杂度评分（沿用旧版评分口径）
             - d_all: 总参数维度
+            - C: 当前机器可用的 CPU 核心数
         """
         entropy_nats = 0.0
         effective_dims = 0
