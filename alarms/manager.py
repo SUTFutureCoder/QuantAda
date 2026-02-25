@@ -3,6 +3,7 @@ import signal
 import socket
 import sys
 import threading
+from typing import Dict, Tuple
 
 import config
 from .dingtalk_alarm import DingTalkAlarm
@@ -12,6 +13,7 @@ from .wecom_alarm import WeComAlarm
 class AlarmManager:
     _instance = None
     _lock = threading.Lock()
+    _TEXT_AGGREGATION_WINDOW_SECONDS = 60
 
     def __new__(cls):
         if not cls._instance:
@@ -38,12 +40,18 @@ class AlarmManager:
         self.context_tag = ""  # 例如: [IB:7497]
         self.context_detail = ""  # 例如: 策略参数详情
 
+        # 文本报警聚合: 默认开启，固定 60 秒窗口内合并相同(level, content)
+        self._text_aggregation_window_seconds = self._TEXT_AGGREGATION_WINDOW_SECONDS
+        self._text_aggregation_lock = threading.Lock()
+        self._text_aggregation_buffer: Dict[Tuple[str, str], int] = {}
+        self._text_flush_timer = None
+
         self._register_dead_letter_handlers()
         self._initialized = True
         print(f"[AlarmManager] Initialized with {len(self.alarms)} channels.")
 
     # 供 Launcher 调用，注入身份信息
-    def set_runtime_context(self, broker, conn_id, strategy, params):
+    def set_runtime_context(self, broker, conn_id, strategy, params, market_scope=""):
         """
         设置运行时上下文，用于区分多实例
         """
@@ -51,9 +59,11 @@ class AlarmManager:
 
         # 格式化参数详情，便于在报警中查看
         param_str = ", ".join([f"{k}={v}" for k, v in params.items()]) if params else "None"
+        market_str = market_scope if market_scope else "N/A"
         self.context_detail = (
             f"Machine: {self.host_name}\n"
             f"Strategy: {strategy}\n"
+            f"Market: {market_str}\n"
             f"Params: {param_str}"
         )
 
@@ -89,13 +99,15 @@ class AlarmManager:
     # --- 统一推送接口 ---
 
     def push_text(self, content, level='INFO'):
+        if not self.alarms:
+            return
+
         if self.context_tag:
             content = f"""### {self.context_tag}
 {content}         
 """
 
-        for alarm in self.alarms:
-            threading.Thread(target=alarm.push_text, args=(content, level)).start()
+        self._buffer_text_alarm(content, level)
 
     def push_exception(self, context, error):
         full_context = f"{self.context_tag} {context} @ {self.host_name}"
@@ -127,3 +139,34 @@ class AlarmManager:
 
         for alarm in self.alarms:
             threading.Thread(target=alarm.push_status, args=(full_status, full_detail)).start()
+
+    def _dispatch_text(self, content, level):
+        for alarm in self.alarms:
+            threading.Thread(target=alarm.push_text, args=(content, level)).start()
+
+    def _buffer_text_alarm(self, content, level):
+        key = (level, content)
+        with self._text_aggregation_lock:
+            self._text_aggregation_buffer[key] = self._text_aggregation_buffer.get(key, 0) + 1
+
+            if self._text_flush_timer and self._text_flush_timer.is_alive():
+                return
+
+            self._text_flush_timer = threading.Timer(
+                self._text_aggregation_window_seconds,
+                self._flush_text_aggregation
+            )
+            self._text_flush_timer.daemon = True
+            self._text_flush_timer.start()
+
+    def _flush_text_aggregation(self):
+        with self._text_aggregation_lock:
+            buffered_items = list(self._text_aggregation_buffer.items())
+            self._text_aggregation_buffer.clear()
+            self._text_flush_timer = None
+
+        for (level, content), count in buffered_items:
+            merged_content = content
+            if count > 1:
+                merged_content = f"{content}\n\n重复次数: {count}"
+            self._dispatch_text(merged_content, level)

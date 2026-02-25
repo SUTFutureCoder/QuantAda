@@ -15,6 +15,20 @@ from live_trader.adapters.base_broker import BaseLiveBroker
 from run import get_class_from_name
 
 
+def _format_market_scope(selection=None, symbols=None):
+    """格式化市场范围上下文，便于报警消息区分运行实例。"""
+    if selection:
+        symbols_text = ",".join([str(s).strip() for s in (symbols or []) if str(s).strip()])
+        if symbols_text:
+            return f"selector={selection} | symbols={symbols_text}"
+        return f"selector={selection}"
+
+    symbol_list = [str(s).strip() for s in (symbols or []) if str(s).strip()]
+    if symbol_list:
+        return f"symbols={','.join(symbol_list)}"
+    return "symbols=N/A"
+
+
 class LiveTrader:
     """实盘交易引擎"""
 
@@ -804,12 +818,18 @@ def launch_live(broker_name: str, conn_name: str, strategy_path: str, params: di
             # 掘金ID太长，截取前8位
             identity = str(conn_cfg['strategy_id'])[:8] + "..."
 
+        market_scope = _format_market_scope(
+            selection=kwargs.get('selection'),
+            symbols=kwargs.get('symbols')
+        )
+
         # 这里的 params 就是运行时透传的策略参数
         AlarmManager().set_runtime_context(
             broker=broker_name,
             conn_id=identity,
             strategy=strategy_path,
-            params=params
+            params=params,
+            market_scope=market_scope
         )
 
         # 净化 sys.argv
