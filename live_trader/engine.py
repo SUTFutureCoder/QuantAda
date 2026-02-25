@@ -154,7 +154,19 @@ class LiveTrader:
         self.strategy.init()
 
         # 发送启动死信/通知
-        self.alarm_manager.push_start(self.config['strategy_name'])
+        selection_name = self.config.get('selection_name')
+        if selection_name:
+            market_tag = f"选股: {selection_name}"
+        else:
+            display_syms = symbols[:3]
+            sym_str = ",".join(display_syms)
+            if len(symbols) > 3:
+                sym_str += f" 等{len(symbols)}个标的"
+            market_tag = f"标的: {sym_str}"
+
+        # 发送带有市场标签的启动死信/通知
+        start_msg = f"{self.config['strategy_name']} [{market_tag}]"
+        self.alarm_manager.push_start(start_msg)
 
         # 5. 加载风控模块 ---
         self.risk_control = None
@@ -251,9 +263,11 @@ class LiveTrader:
             import traceback
             self.broker.log(traceback.format_exc())
             # 即使出错，也打印 "Finished"，表示此bar安全退出
-            # 推送异常报警
+            # 推送带有市场上下文的异常报警
             if hasattr(self, 'alarm_manager'):
-                self.alarm_manager.push_exception("Engine Main Loop", e)
+                selection_name = self.config.get('selection_name')
+                market_tag = f"[{selection_name}]" if selection_name else "[自选标的]"
+                self.alarm_manager.push_exception(f"Engine Main Loop {market_tag}", e)
 
         # 估算下一次运行时间（实际由底层的 schedule 调度器或行情 tick 决定）
         timeframe = self.config.get('timeframe', 'Days')
