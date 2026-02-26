@@ -10,10 +10,14 @@ from live_trader.engine import _format_market_scope
 class FakeAlarmChannel:
     def __init__(self):
         self.text_calls = []
+        self.exception_calls = []
         self.status_calls = []
 
     def push_text(self, content: str, level: str = 'INFO'):
         self.text_calls.append((content, level))
+
+    def push_exception(self, context: str, error):
+        self.exception_calls.append((context, str(error)))
 
     def push_status(self, status: str, detail: str = ''):
         self.status_calls.append((status, detail))
@@ -39,9 +43,13 @@ def fresh_alarm_manager(monkeypatch):
     mgr = AlarmManager()
     # 生产默认 60 秒窗口，单测缩短到 1 秒以避免等待过久
     mgr._text_aggregation_window_seconds = 1
+    mgr._exception_aggregation_window_seconds = 1
     yield mgr
 
     timer = getattr(mgr, "_text_flush_timer", None)
+    if timer:
+        timer.cancel()
+    timer = getattr(mgr, "_exception_flush_timer", None)
     if timer:
         timer.cancel()
     AlarmManager._instance = None
@@ -83,6 +91,23 @@ def test_runtime_context_status_detail_contains_market_scope(fresh_alarm_manager
     status, detail = fake.status_calls[0]
     assert status == "STARTED [IB_BROKER:7497]", "状态标题应包含 broker/连接身份上下文。"
     assert f"Market: {market_scope}" in detail, "状态详情应包含 selector/symbols 市场上下文。"
+
+
+def test_push_exception_aggregates_same_error_with_count(fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    mgr.push_exception("GM Kernel Error", "Code: 1100, Msg: 交易消息服务连接失败")
+    mgr.push_exception("GM Kernel Error", "Code: 1100, Msg: 交易消息服务连接失败")
+
+    assert fake.exception_calls == [], "聚合窗口内不应立即发送重复异常报警。"
+    assert _wait_until(lambda: len(fake.exception_calls) == 1), "聚合窗口到期后应触发一次异常合并推送。"
+
+    context, error_text = fake.exception_calls[0]
+    assert "GM Kernel Error" in context, "异常合并推送应保留原始模块上下文。"
+    assert "Code: 1100, Msg: 交易消息服务连接失败" in error_text, "异常合并推送应保留原始错误内容。"
+    assert "重复次数: 2" in error_text, "相同异常应附带聚合数量。"
 
 
 def test_format_market_scope_prefers_selector_and_symbols():

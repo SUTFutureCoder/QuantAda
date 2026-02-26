@@ -160,6 +160,14 @@ class LiveTrader:
         # 4. 传入 is_live 标志来获取数据
         datas = self._fetch_all_history_data(symbols, context, is_live=is_live, timeframe=timeframe, compression=compression)
         self.broker.set_datas(list(datas.values()))
+        missing_symbols = [s for s in symbols if s not in datas]
+        if missing_symbols:
+            print(f"[Engine Warning] Data warm-up missing symbols: {missing_symbols}")
+        if not self.broker.datas:
+            print(
+                "[Engine Warning] No data feed loaded during init. "
+                "Engine will keep running and retry data recovery on each schedule."
+            )
         params = self.config.get('params', {})
         # 将环境级的豁免名单透传给策略
         if 'ignored_symbols' in self.config:
@@ -212,6 +220,21 @@ class LiveTrader:
             if self.broker.is_live:
                 print("[Engine] Live Mode: Refreshing data...")
                 self._refresh_live_data(context)
+
+            # 初始化或临时网络故障下，可能出现 datas 为空。
+            # 此时禁止继续执行策略，先尝试自愈拉数，避免“空仓/无目标”的误导性计划。
+            if not self.broker.datas:
+                recovered = self._recover_data_feeds(context)
+                if not recovered:
+                    print(
+                        "[Engine Warning] No tradable data feeds available after recovery. "
+                        "Skipping this run."
+                    )
+                    if hasattr(self, 'alarm_manager'):
+                        self.alarm_manager.push_text(
+                            "实盘跳过: 当前无可用数据源（已尝试恢复）。请检查选股器返回、IB数据权限或网络状态。"
+                        )
+                    return
 
             # 1. 检查策略是否有挂单
             strategy_order = getattr(self.strategy, 'order', None)
@@ -423,6 +446,11 @@ class LiveTrader:
                         return self._name
 
                 datas[symbol] = DataFeedProxy(df, symbol)
+            else:
+                print(
+                    f"[Engine Warning] No history data for {symbol} "
+                    f"({start_date} -> {end_date}, {compression} {timeframe})."
+                )
         return datas
 
     def _refresh_live_data(self, context):
@@ -640,6 +668,32 @@ class LiveTrader:
                         self.broker.log(f"[Risk] Error: Failed to submit sell order for {data_name}")
 
         return triggered_action
+
+    def _recover_data_feeds(self, context) -> bool:
+        """
+        当 broker.datas 为空时，尝试按当前 symbols 重拉预热数据并重建 DataFeed。
+        返回是否恢复成功。
+        """
+        symbols = self._determine_symbols()
+        if not symbols:
+            print("[Engine Warning] Recovery skipped: selector returned no symbols.")
+            return False
+
+        timeframe = self.config.get('timeframe', 'Days')
+        compression = self.config.get('compression', 1)
+        datas = self._fetch_all_history_data(
+            symbols=symbols,
+            context=context,
+            is_live=True,
+            timeframe=timeframe,
+            compression=compression
+        )
+        self.broker.set_datas(list(datas.values()))
+        if self.broker.datas:
+            loaded = [d._name for d in self.broker.datas]
+            print(f"[Engine] Data feeds recovered: {loaded}")
+            return True
+        return False
 
 def on_order_status_callback(context, raw_order):
     """

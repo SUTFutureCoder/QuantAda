@@ -3,7 +3,12 @@ import datetime
 
 import pandas as pd
 from ib_insync import IB, Stock, MarketOrder, Trade, Forex, Contract
+try:
+    from ib_insync import Crypto
+except ImportError:
+    Crypto = None
 
+from common.ib_symbol_parser import resolve_ib_contract_spec
 from data_providers.ibkr_provider import IbkrDataProvider
 from .base_broker import BaseLiveBroker, BaseOrderProxy
 
@@ -231,42 +236,30 @@ class IBBrokerAdapter(BaseLiveBroker):
         3. "00700" -> 港股 (保持兼容)
         4. "AAPL" -> 默认 SMART/USD
         """
-        symbol = symbol.upper()
+        spec = resolve_ib_contract_spec(symbol)
 
-        # --- A. 特殊前缀处理 (A股/外汇等) ---
-        if symbol.startswith('SHSE.') or symbol.startswith('SZSE.'):
-            code = symbol.split('.')[-1]
-            return Stock(code, 'SEHK', 'CNH')  # A股走深港/沪港通
+        if spec['kind'] == 'forex':
+            return Forex(spec['pair'])
 
-        if symbol.startswith('CASH.'):
-            # CASH.EUR.USD -> Forex('EURUSD')
-            parts = symbol.split('.')
-            return Forex(f"{parts[1]}{parts[2]}")
+        if spec['kind'] == 'crypto':
+            if Crypto is not None:
+                return Crypto(spec['symbol'], spec['exchange'], spec['currency'])
+            return Contract(
+                symbol=spec['symbol'],
+                secType='CRYPTO',
+                exchange=spec['exchange'],
+                currency=spec['currency'],
+            )
 
-        # --- B. 核心升级：支持 SYMBOL.EXCHANGE 格式 ---
-        # 识别逻辑：如果包含点，且点后面的是已知的交易所代码
-        if '.' in symbol:
-            parts = symbol.split('.')
-            # 确保切分后只有两部分，防止干扰其他复杂格式
-            if len(parts) == 2:
-                code, exch = parts
+        if spec['primary_exchange']:
+            return Stock(
+                spec['symbol'],
+                spec['exchange'],
+                spec['currency'],
+                primaryExchange=spec['primary_exchange']
+            )
 
-                # 定义美股常用主交易所白名单 (防止误判)
-                # ISLAND=Nasdaq, ARCA=NYSE Arca, BATS=Cboe BZX
-                us_exchanges = ['ISLAND', 'NASDAQ', 'ARCA', 'NYSE', 'AMEX', 'BATS', 'PINK']
-
-                if exch in us_exchanges:
-                    # 关键点：Routing 依然用 SMART (保证流动性)，但指定 primaryExchange (消除歧义)
-                    return Stock(code, 'SMART', 'USD', primaryExchange=exch)
-
-        # --- C. 港股纯数字逻辑 (保持兼容) ---
-        if symbol.isdigit() or (len(symbol) == 5 and symbol.startswith('0')):
-            code = int(symbol)
-            return Stock(str(code), 'SEHK', 'HKD')
-
-        # --- D. 默认兜底 (Fall back to SMART) ---
-        # 这是你要求的：仅当没有交易所信息时，才使用默认 SMART
-        return Stock(symbol, 'SMART', 'USD')
+        return Stock(spec['symbol'], spec['exchange'], spec['currency'])
 
     # 1. 查钱 (重构为通用方法，支持指定 Tag)
     def _fetch_smart_value(self, target_tags=None) -> float:
@@ -405,15 +398,46 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         if not self.ib: return Pos()
 
-        symbol = data._name
-        # 遍历 ib.positions()
-        # 注意：IB position 的 symbol 格式可能和 data._name 不完全一致，需要模糊匹配
+        symbol = str(getattr(data, '_name', '')).strip()
+        if not symbol:
+            return Pos()
+
+        # 遍历 ib.positions()；兼容 QQQ.ISLAND / QQQ.SMART 与 QQQ 的双向匹配
         positions = self.ib.positions()
-        target_contract = self.parse_contract(symbol)
+
+        expected_symbols = {symbol.upper(), symbol.split('.')[0].upper()}
+        expected_sec_type = None
+        try:
+            target_contract = self.parse_contract(symbol)
+            target_symbol = str(getattr(target_contract, 'symbol', '')).strip().upper()
+            if target_symbol:
+                expected_symbols.add(target_symbol)
+                expected_symbols.add(target_symbol.split('.')[0])
+            expected_sec_type = str(getattr(target_contract, 'secType', '')).strip().upper() or None
+            valid_sec_types = {'STK', 'CASH', 'CRYPTO', 'FUT', 'OPT', 'FOP', 'CFD', 'BOND', 'CMDTY', 'IND', 'WAR'}
+            if expected_sec_type not in valid_sec_types:
+                expected_sec_type = None
+        except Exception:
+            pass
 
         for p in positions:
-            # 简单对比 symbol
-            if p.contract.symbol == target_contract.symbol and p.contract.secType == target_contract.secType:
+            pos_contract = getattr(p, 'contract', None)
+            if not pos_contract:
+                continue
+
+            pos_sec_type = str(getattr(pos_contract, 'secType', '')).strip().upper()
+            if expected_sec_type and pos_sec_type and pos_sec_type != expected_sec_type:
+                continue
+
+            raw_symbol = str(getattr(pos_contract, 'symbol', '')).strip().upper()
+            local_symbol = str(getattr(pos_contract, 'localSymbol', '')).strip().upper()
+            position_symbols = set()
+            for s in (raw_symbol, local_symbol):
+                if s:
+                    position_symbols.add(s)
+                    position_symbols.add(s.split('.')[0])
+
+            if position_symbols & expected_symbols:
                 o = Pos()
                 o.size = p.position
                 o.price = p.avgCost

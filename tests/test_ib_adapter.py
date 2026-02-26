@@ -14,11 +14,13 @@ mock_ib_insync.MarketOrder = MagicMock(name="MarketOrder")
 mock_ib_insync.Trade = MagicMock(name="Trade")
 mock_ib_insync.Forex = MagicMock(name="Forex")
 mock_ib_insync.Contract = MagicMock(name="Contract")
+mock_ib_insync.Crypto = MagicMock(name="Crypto")
 sys.modules["ib_insync"] = mock_ib_insync
 
 # 重新导入被测模块，确保使用上面的 mock ib_insync
 sys.modules.pop("live_trader.adapters.ib_broker", None)
 from live_trader.adapters.ib_broker import IBBrokerAdapter, IBOrderProxy
+from data_providers.ibkr_provider import IbkrDataProvider
 
 
 class DummyIBOrderStatus:
@@ -83,6 +85,15 @@ class DummyIBForCashWithOpenTrades(DummyIBForCash):
 
     def openTrades(self):
         return self._open_trades
+
+
+class DummyIBForPositions(DummyIBForCash):
+    def __init__(self, cash_usd, positions):
+        super().__init__(cash_usd=cash_usd)
+        self._positions = positions
+
+    def positions(self):
+        return self._positions
 
 
 class DummyTicker:
@@ -212,3 +223,81 @@ def test_ib_get_cash_dedupes_open_orders_and_local_ledger():
     assert broker.get_cash() == pytest.approx(expected_cash), (
         "IB get_cash 占资去重异常：应扣减 openTrades 冻结 + 本地额外订单占资。"
     )
+
+
+def test_ib_parse_contract_accepts_smart_suffix():
+    """
+    EWJ.SMART 这类符号必须拆分为 ticker + SMART 路由，不能把 '.SMART' 当作 ticker 一部分。
+    """
+    mock_ib_insync.Stock.reset_mock()
+
+    IBBrokerAdapter.parse_contract("EWJ.SMART")
+
+    mock_ib_insync.Stock.assert_called_with("EWJ", "SMART", "USD")
+
+
+def test_ib_parse_contract_supports_generic_exchange_suffix():
+    """
+    任意常见交易所后缀应可直接识别，无需每次扩白名单。
+    """
+    mock_ib_insync.Stock.reset_mock()
+
+    IBBrokerAdapter.parse_contract("AAPL.IEX")
+
+    mock_ib_insync.Stock.assert_called_with("AAPL", "SMART", "USD", primaryExchange="IEX")
+
+
+def test_ib_parse_contract_supports_exchange_prefix_variant():
+    """
+    兼容 Exchange.Ticker 写法（如 NASDAQ.AAPL）。
+    """
+    mock_ib_insync.Stock.reset_mock()
+
+    IBBrokerAdapter.parse_contract("NASDAQ.AAPL")
+
+    mock_ib_insync.Stock.assert_called_with("AAPL", "SMART", "USD", primaryExchange="NASDAQ")
+
+
+def test_ib_parse_contract_keeps_share_class_symbols():
+    """
+    BRK.B 这类一位后缀是股票代码本体，不应误判为交易所。
+    """
+    mock_ib_insync.Stock.reset_mock()
+
+    IBBrokerAdapter.parse_contract("BRK.B")
+
+    mock_ib_insync.Stock.assert_called_with("BRK.B", "SMART", "USD")
+
+
+def test_ib_get_position_matches_symbol_suffix_variants():
+    """
+    持仓匹配回归:
+    data._name='EWJ.SMART' 时，应能命中 IB 返回的 symbol='EWJ' 持仓。
+    """
+    ib_positions = [
+        SimpleNamespace(
+            contract=SimpleNamespace(symbol="EWJ", secType="STK", localSymbol="EWJ"),
+            position=140,
+            avgCost=92.01,
+        )
+    ]
+    context = types.SimpleNamespace(ib_instance=DummyIBForPositions(cash_usd=10000.0, positions=ib_positions))
+    broker = IBBrokerAdapter(context=context)
+
+    data = SimpleNamespace(_name="EWJ.SMART")
+    pos = broker.get_position(data)
+
+    assert pos.size == pytest.approx(140), "后缀容错失效：EWJ.SMART 必须匹配到 EWJ 持仓。"
+    assert pos.price == pytest.approx(92.01), "持仓成本提取异常：应返回 IB 的 avgCost。"
+
+
+def test_ib_provider_parse_contract_supports_generic_exchange_suffix():
+    """
+    数据源与实盘 Broker 必须共享同一解析语义，避免一边能下单一边拉不到行情。
+    """
+    provider = IbkrDataProvider(ib_instance=MagicMock())
+    mock_ib_insync.Stock.reset_mock()
+
+    provider._parse_contract("MSFT.MEMX")
+
+    mock_ib_insync.Stock.assert_called_with("MSFT", "SMART", "USD", primaryExchange="MEMX")

@@ -46,6 +46,12 @@ class AlarmManager:
         self._text_aggregation_buffer: Dict[Tuple[str, str], int] = {}
         self._text_flush_timer = None
 
+        # 异常报警聚合: 默认开启，固定 60 秒窗口内合并相同(context, error)
+        self._exception_aggregation_window_seconds = self._TEXT_AGGREGATION_WINDOW_SECONDS
+        self._exception_aggregation_lock = threading.Lock()
+        self._exception_aggregation_buffer: Dict[Tuple[str, str], int] = {}
+        self._exception_flush_timer = None
+
         self._register_dead_letter_handlers()
         self._initialized = True
         print(f"[AlarmManager] Initialized with {len(self.alarms)} channels.")
@@ -86,6 +92,8 @@ class AlarmManager:
         """程序正常结束的回调"""
         # 只有在非异常退出时才发 Finish，如果是 crash，会被 Exception 捕获
         # 这里可以发一个简单的结束报告
+        self._flush_text_aggregation()
+        self._flush_exception_aggregation()
         self.push_status("STOPPED", "Program exited normally.")
         pass
 
@@ -110,13 +118,12 @@ class AlarmManager:
         self._buffer_text_alarm(content, level)
 
     def push_exception(self, context, error):
+        if not self.alarms:
+            return
+
         full_context = f"{self.context_tag} {context} @ {self.host_name}"
-        for alarm in self.alarms:
-            # 异常推送建议同步发送，防止主进程崩溃导致发不出去
-            try:
-                alarm.push_exception(full_context, error)
-            except:
-                pass
+        error_text = str(error).strip()
+        self._buffer_exception_alarm(full_context, error_text)
 
     def push_trade(self, order_info):
         for alarm in self.alarms:
@@ -161,6 +168,8 @@ class AlarmManager:
 
     def _flush_text_aggregation(self):
         with self._text_aggregation_lock:
+            if self._text_flush_timer and self._text_flush_timer.is_alive():
+                self._text_flush_timer.cancel()
             buffered_items = list(self._text_aggregation_buffer.items())
             self._text_aggregation_buffer.clear()
             self._text_flush_timer = None
@@ -170,3 +179,40 @@ class AlarmManager:
             if count > 1:
                 merged_content = f"{content}\n\n重复次数: {count}"
             self._dispatch_text(merged_content, level)
+
+    def _dispatch_exception(self, context, error):
+        for alarm in self.alarms:
+            # 异常推送保持同步发送，提升进程异常场景下的送达概率
+            try:
+                alarm.push_exception(context, error)
+            except:
+                pass
+
+    def _buffer_exception_alarm(self, context, error_text):
+        key = (context, error_text)
+        with self._exception_aggregation_lock:
+            self._exception_aggregation_buffer[key] = self._exception_aggregation_buffer.get(key, 0) + 1
+
+            if self._exception_flush_timer and self._exception_flush_timer.is_alive():
+                return
+
+            self._exception_flush_timer = threading.Timer(
+                self._exception_aggregation_window_seconds,
+                self._flush_exception_aggregation
+            )
+            self._exception_flush_timer.daemon = True
+            self._exception_flush_timer.start()
+
+    def _flush_exception_aggregation(self):
+        with self._exception_aggregation_lock:
+            if self._exception_flush_timer and self._exception_flush_timer.is_alive():
+                self._exception_flush_timer.cancel()
+            buffered_items = list(self._exception_aggregation_buffer.items())
+            self._exception_aggregation_buffer.clear()
+            self._exception_flush_timer = None
+
+        for (context, error_text), count in buffered_items:
+            merged_error = error_text
+            if count > 1:
+                merged_error = f"{error_text}\n重复次数: {count}"
+            self._dispatch_exception(context, merged_error)

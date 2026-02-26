@@ -10,6 +10,7 @@ except ImportError:
     IB = object  # Mock for class definition
 
 import config
+from common.ib_symbol_parser import resolve_ib_contract_spec
 from data_providers.base_provider import BaseDataProvider
 
 
@@ -106,35 +107,23 @@ class IbkrDataProvider(BaseDataProvider):
             ib_client_logger.setLevel(original_level)
 
     def _parse_contract(self, symbol: str):
-        parts = symbol.split('.')
+        spec = resolve_ib_contract_spec(symbol)
 
-        # 情况 1: 标准 Backtrader 格式 (Type.Ticker.Currency)
-        if len(parts) == 3:
-            sec_type, ticker, currency = parts
-            if sec_type == 'STK':
-                return Stock(ticker, 'SMART', currency)
-            elif sec_type == 'CASH':
-                return Forex(f"{ticker}{currency}")
-            elif sec_type == 'CRYPTO':
-                return Crypto(ticker, 'PAXOS', currency)
+        if spec['kind'] == 'forex':
+            return Forex(spec['pair'])
 
-        # 情况 2: 处理两段式 (可能是 Ticker.Exchange 也可能是 Exchange.Ticker)
-        if len(parts) == 2:
-            p1, p2 = parts
+        if spec['kind'] == 'crypto':
+            return Crypto(spec['symbol'], spec['exchange'], spec['currency'])
 
-            # A. 识别美股 Ticker.Exchange (如 QQQ.ISLAND)
-            # 常用美股主交易所白名单
-            us_exchanges = ['ISLAND', 'NASDAQ', 'ARCA', 'NYSE', 'AMEX', 'BATS', 'PINK', 'SMART']
-            if p2 in us_exchanges:
-                # 关键修正：拆分 symbol 和 primaryExchange
-                return Stock(p1, 'SMART', 'USD', primaryExchange=p2)
+        if spec['primary_exchange']:
+            return Stock(
+                spec['symbol'],
+                spec['exchange'],
+                spec['currency'],
+                primaryExchange=spec['primary_exchange']
+            )
 
-            # B. 识别港股/A股 Exchange.Ticker (如 SEHK.700)
-            if p1 in ['SEHK', 'HK']:
-                return Stock(p2, 'SEHK', 'HKD')
-
-        # 情况 3: 默认作为美股 Ticker 处理
-        return Stock(symbol, 'SMART', 'USD')
+        return Stock(spec['symbol'], spec['exchange'], spec['currency'])
 
     def _calc_duration(self, start_date, end_date):
         """计算 IB API 需要的 durationStr"""

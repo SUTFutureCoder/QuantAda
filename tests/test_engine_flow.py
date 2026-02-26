@@ -167,6 +167,15 @@ class DummyHeartbeatStrategy(BaseStrategy):
         self.order = None
 
 
+class CounterStrategy(BaseStrategy):
+    def init(self):
+        self.next_calls = 0
+        self.order = None
+
+    def next(self):
+        self.next_calls += 1
+
+
 class MockContext:
     def __init__(self, now):
         self.now = now
@@ -736,6 +745,97 @@ def test_refresh_live_data_merges_dedupes_and_trims(monkeypatch):
     assert refreshed_df.loc[pd.Timestamp("2026-02-09"), "close"] == pytest.approx(20.0), (
         "重复日期应保留新数据（keep='last'）。"
     )
+
+
+def test_live_run_recovers_data_feeds_when_init_has_none(monkeypatch):
+    """
+    实盘自愈回归:
+    若初始化阶段所有标的拉数失败导致 datas 为空，run() 应尝试恢复，
+    恢复成功后继续执行策略 next。
+    """
+    import live_trader.engine as engine_module
+
+    class FlakyDataProvider(DummyDataProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            self.calls += 1
+            if self.calls == 1:
+                return pd.DataFrame()
+            return super().get_history(symbol, start_date, end_date, timeframe, compression)
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, FlakyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+    assert len(engine.broker.datas) == 0, "初始化首轮应模拟拉数失败，datas 必须为空。"
+
+    engine.run(context)
+
+    assert len(engine.broker.datas) == 1, "run() 自愈失败：未恢复 data feeds。"
+    assert engine.strategy.next_calls == 1, "恢复成功后应继续执行策略 next。"
+
+
+def test_live_run_skips_when_recovery_still_has_no_data(monkeypatch):
+    """
+    实盘保护回归:
+    若恢复后仍无数据，run() 必须跳过，不得执行策略 next。
+    """
+    import live_trader.engine as engine_module
+
+    class EmptyDataProvider(DummyDataProvider):
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, EmptyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+    assert len(engine.broker.datas) == 0, "初始化应无数据，用于触发恢复保护分支。"
+
+    engine.run(context)
+
+    assert engine.strategy.next_calls == 0, "无数据时应跳过策略执行，防止误报空仓计划。"
 
 
 def test_risk_unknown_status_blocks_but_not_crash(monkeypatch):
