@@ -77,7 +77,7 @@ def test_runtime_context_status_detail_contains_market_scope(fresh_alarm_manager
     fake = FakeAlarmChannel()
     mgr.alarms = [fake]
 
-    market_scope = "selector=us_growth_selector | symbols=QQQ,SPY,IWM"
+    market_scope = "selector=us_growth_selector"
     mgr.set_runtime_context(
         broker="ib_broker",
         conn_id="7497",
@@ -110,6 +110,6 @@ def test_push_exception_aggregates_same_error_with_count(fresh_alarm_manager):
     assert "重复次数: 2" in error_text, "相同异常应附带聚合数量。"
 
 
-def test_format_market_scope_prefers_selector_and_symbols():
+def test_format_market_scope_prefers_selector_only():
     scope = _format_market_scope(selection="cn_topn_selector", symbols=["SHSE.510300", "SZSE.159915"])
-    assert scope == "selector=cn_topn_selector | symbols=SHSE.510300,SZSE.159915"
+    assert scope == "selector=cn_topn_selector"

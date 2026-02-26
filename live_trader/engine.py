@@ -18,9 +18,6 @@ from run import get_class_from_name
 def _format_market_scope(selection=None, symbols=None):
     """格式化市场范围上下文，便于报警消息区分运行实例。"""
     if selection:
-        symbols_text = ",".join([str(s).strip() for s in (symbols or []) if str(s).strip()])
-        if symbols_text:
-            return f"selector={selection} | symbols={symbols_text}"
         return f"selector={selection}"
 
     symbol_list = [str(s).strip() for s in (symbols or []) if str(s).strip()]
