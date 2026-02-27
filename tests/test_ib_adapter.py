@@ -1,5 +1,6 @@
 import sys
 import types
+import datetime
 
 import pytest
 from unittest.mock import MagicMock
@@ -77,6 +78,15 @@ class DummyIBForCash:
     def openTrades(self):
         return []
 
+    def qualifyContracts(self, contract):
+        return [contract]
+
+    def reqMktData(self, contract, genericTickList="", snapshot=False, regulatorySnapshot=False):
+        return DummyTicker(float("nan"))
+
+    def reqHistoricalData(self, *args, **kwargs):
+        return []
+
 
 class DummyIBForCashWithOpenTrades(DummyIBForCash):
     def __init__(self, cash_usd, open_trades):
@@ -101,9 +111,42 @@ class DummyTicker:
         self._price = price
         self.close = None
         self.last = None
+        self.bid = None
+        self.ask = None
 
     def marketPrice(self):
         return self._price
+
+
+class DummyIBForMissingFx(DummyIBForCash):
+    def __init__(self):
+        super().__init__(cash_usd=0.0)
+
+    def accountSummary(self):
+        return [
+            DummyAccountValue(tag="TotalCashValue", currency="USD", value="1000"),
+            DummyAccountValue(tag="TotalCashValue", currency="HKD", value="7800"),
+            DummyAccountValue(tag="TotalCashValue", currency="BASE", value="2000"),
+        ]
+
+
+class DummyIBForSubmit(DummyIBForCash):
+    def __init__(self):
+        super().__init__(cash_usd=10000.0)
+        self.last_contract = None
+        self.last_order = None
+        self._oid = 900
+
+    def placeOrder(self, contract, order):
+        self._oid += 1
+        self.last_contract = contract
+        self.last_order = order
+        return DummyIBTrade(
+            status="Submitted",
+            action=getattr(order, "action", "BUY"),
+            order_id=self._oid,
+            total_quantity=getattr(order, "totalQuantity", 0),
+        )
 
 
 def test_ib_status_translation_accuracy():
@@ -225,6 +268,36 @@ def test_ib_get_cash_dedupes_open_orders_and_local_ledger():
     )
 
 
+def test_ib_fetch_smart_value_falls_back_to_base_when_fx_missing():
+    """
+    汇率兜底回归:
+    若非 USD 货币无法换汇，但券商提供 BASE 汇总，必须回退 BASE，避免低估资金。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForMissingFx())
+    broker = IBBrokerAdapter(context=context)
+
+    val = broker._fetch_smart_value(["TotalCashValue"])
+
+    assert val == pytest.approx(2000.0), "汇率缺口存在时应回退 BASE 汇总口径。"
+
+
+def test_ib_get_rebalance_cash_uses_conservative_cash_floor():
+    """
+    调仓资金口径回归:
+    get_rebalance_cash 应使用 min(get_cash, TotalCashValue)，避免计划层误用杠杆。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=10000.0))
+    broker = IBBrokerAdapter(context=context)
+
+    # spendable 口径 = 9000, TotalCashValue 口径 = 7000 => 调仓应取 7000
+    broker.get_cash = lambda: 9000.0
+    broker._fetch_smart_value = lambda tags=None: 7000.0 if tags == ["TotalCashValue"] else 9000.0
+
+    assert broker.get_rebalance_cash() == pytest.approx(7000.0), (
+        "调仓现金口径应取更保守值。"
+    )
+
+
 def test_ib_parse_contract_accepts_smart_suffix():
     """
     EWJ.SMART 这类符号必须拆分为 ticker + SMART 路由，不能把 '.SMART' 当作 ticker 一部分。
@@ -301,3 +374,124 @@ def test_ib_provider_parse_contract_supports_generic_exchange_suffix():
     provider._parse_contract("MSFT.MEMX")
 
     mock_ib_insync.Stock.assert_called_with("MSFT", "SMART", "USD", primaryExchange="MEMX")
+
+
+def test_ib_daily_schedule_parse_and_validation():
+    """
+    调度解析回归:
+    - 支持 1d:HH:MM(:SS)
+    - 非法时间抛出异常
+    """
+    parsed = IBBrokerAdapter._parse_daily_schedule("1d:15:45:00")
+    assert parsed == (15, 45, 0, "15:45:00"), "应正确解析带秒的 daily schedule。"
+
+    parsed_no_sec = IBBrokerAdapter._parse_daily_schedule("1d:09:30")
+    assert parsed_no_sec == (9, 30, 0, "09:30"), "应兼容不带秒的 daily schedule。"
+
+    with pytest.raises(ValueError):
+        IBBrokerAdapter._parse_daily_schedule("1d:25:61:00")
+
+
+def test_ib_daily_schedule_should_only_trigger_in_tolerance_window():
+    """
+    调度触发回归:
+    - 到点后短窗口内可触发
+    - 错过窗口后同日不补跑
+    - 同日已跑过不再重复触发
+    """
+    now = datetime.datetime(2026, 2, 27, 15, 45, 2)
+    should_run, delta, day_str = IBBrokerAdapter._should_trigger_daily_schedule(
+        now=now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        last_schedule_run_date=None,
+    )
+    assert should_run, "目标时间后的容忍窗口内应触发。"
+    assert delta == pytest.approx(2.0), "delta 应为当前与目标时刻的秒差。"
+    assert day_str == "2026-02-27"
+
+    late_now = datetime.datetime(2026, 2, 27, 15, 50, 0)
+    should_run_late, _, _ = IBBrokerAdapter._should_trigger_daily_schedule(
+        now=late_now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        last_schedule_run_date=None,
+    )
+    assert not should_run_late, "错过容忍窗口后不应补跑。"
+
+    should_run_again, _, _ = IBBrokerAdapter._should_trigger_daily_schedule(
+        now=now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        last_schedule_run_date="2026-02-27",
+    )
+    assert not should_run_again, "同一自然日只允许运行一次。"
+
+
+def test_ib_submit_order_allows_fractional_sell_for_full_close(monkeypatch):
+    """
+    清仓碎股回归:
+    SELL 委托在存在小数股时应允许透传小数，避免尾仓永远无法清掉。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForSubmit())
+    broker = IBBrokerAdapter(context=context)
+
+    monkeypatch.setattr(
+        mock_ib_insync,
+        "MarketOrder",
+        lambda action, qty: SimpleNamespace(action=action, totalQuantity=qty),
+    )
+    # 同步替换模块内引用，确保 _submit_order 使用到 patched 构造器
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module,
+        "MarketOrder",
+        lambda action, qty: SimpleNamespace(action=action, totalQuantity=qty),
+    )
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ALLOW_FRACTIONAL_SELL",
+        True,
+        raising=False,
+    )
+
+    data = SimpleNamespace(_name="AAPL.SMART")
+    proxy = broker._submit_order(data=data, volume=0.6441, side="SELL", price=100.0)
+
+    assert proxy is not None, "分数股卖出应提交订单，不应被 <1 直接跳过。"
+    assert context.ib_instance.last_order.totalQuantity == pytest.approx(0.6441, rel=1e-6), (
+        "SELL 小数股应按原始数量提交，避免残留尾仓。"
+    )
+
+
+def test_ib_submit_order_fractional_sell_disabled_by_default(monkeypatch):
+    """
+    安全默认值回归:
+    未显式开启时，SELL 小数股应向下取整为整数，避免触发 IB API 10243。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForSubmit())
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module,
+        "MarketOrder",
+        lambda action, qty: SimpleNamespace(action=action, totalQuantity=qty),
+    )
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ALLOW_FRACTIONAL_SELL",
+        False,
+        raising=False,
+    )
+
+    data = SimpleNamespace(_name="AAPL.SMART")
+    proxy = broker._submit_order(data=data, volume=104.617, side="SELL", price=100.0)
+
+    assert proxy is not None, "禁用小数股时也应提交整数卖单。"
+    assert context.ib_instance.last_order.totalQuantity == 104, (
+        "禁用小数股时，SELL 数量应向下取整为整数。"
+    )

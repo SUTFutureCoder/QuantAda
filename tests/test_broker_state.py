@@ -62,8 +62,12 @@ class MockBroker(BaseLiveBroker):
         # 在该测试桩里，submitted_orders 默认全部视作在途单，除非测试显式模拟完成/撤销语义。
         pending = []
         for order in self.submitted_orders:
+            status = order.get("status", "Submitted")
+            if status not in {"PendingSubmit", "Submitted", "PendingCancel"}:
+                continue
             pending.append(
                 {
+                    "id": order["id"],
                     "symbol": "SHSE.600000",
                     "direction": order["side"],
                     "size": order["volume"],
@@ -77,7 +81,7 @@ class MockBroker(BaseLiveBroker):
     def _submit_order(self, data, volume, side, price):
         oid = f"ORDER_{len(self.submitted_orders) + 1}"
         proxy = MockOrderProxy(oid, is_buy_order=(side == "BUY"))
-        self.submitted_orders.append({"id": oid, "side": side, "volume": volume})
+        self.submitted_orders.append({"id": oid, "side": side, "volume": volume, "status": "Submitted"})
         return proxy
 
     def convert_order_proxy(self, raw_order):
@@ -148,6 +152,8 @@ def test_auto_downgrade_and_refund():
     expected_before_reject = 200 * 10.0 * broker.safety_multiplier
     assert broker._virtual_spent_cash == pytest.approx(expected_before_reject), "首笔订单的虚拟预扣金额异常"
 
+    # 模拟柜台在 rejected 前已将原单从在途列表移除，允许立即重试。
+    broker.submitted_orders[0]["status"] = "Inactive"
     broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
 
     expected_after_reject = 100 * 10.0 * broker.safety_multiplier
@@ -158,6 +164,63 @@ def test_auto_downgrade_and_refund():
     assert broker.submitted_orders[1]["volume"] == 100, "降级后股数应按 lot_size 减少为 100"
     assert "ORDER_1" not in broker._active_buys, "被拒订单应从 _active_buys 移除"
     assert "ORDER_2" in broker._active_buys, "降级重试后的新订单应进入 _active_buys"
+
+
+def test_rejected_buy_recalculates_shares_by_available_cash(monkeypatch):
+    """
+    拒单后重算:
+    LOT_SIZE=1 时，应按当前可用资金一次重算到可承受股数，而非仅减 1 股。
+    """
+    monkeypatch.setattr(config, "LOT_SIZE", 1)
+
+    broker = MockBroker(initial_cash=10000.0)
+    data = _make_data()
+
+    first_proxy = broker.order_target_value(data, target=290)  # 29 股
+    assert first_proxy is not None, "首笔买单应提交成功"
+    assert broker.submitted_orders[0]["volume"] == 29, "前置条件失败: 首笔应为 29 股"
+
+    # 模拟柜台返回更紧的可用资金窗口，触发重算。
+    broker.mock_cash = 271.0
+    broker.submitted_orders[0]["status"] = "Inactive"
+    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
+
+    assert len(broker.submitted_orders) == 2, "拒单后应触发重试订单"
+    assert broker.submitted_orders[1]["side"] == "BUY", "重算后应继续提交 BUY 订单"
+    assert broker.submitted_orders[1]["volume"] == 27, "拒单后应按可用资金直接重算为 27 股"
+    assert "ORDER_2" in broker._active_buys, "重算重试后的订单应进入 _active_buys"
+    assert broker._virtual_spent_cash == pytest.approx(27 * 10.0 * broker.safety_multiplier), (
+        "重算后的虚拟占资应与 27 股一致。"
+    )
+
+
+def test_rejected_buy_waits_for_cancel_before_retry(monkeypatch):
+    """
+    竞态修复:
+    若拒单时原单仍在途，不应立即重提；应等待该单进入 Canceled 终态后再重试。
+    """
+    monkeypatch.setattr(config, "LOT_SIZE", 1)
+
+    broker = MockBroker(initial_cash=10000.0)
+    data = _make_data()
+
+    first_proxy = broker.order_target_value(data, target=290)  # 29 股
+    assert first_proxy is not None, "首笔买单应提交成功"
+    assert broker.submitted_orders[0]["volume"] == 29, "前置条件失败: 首笔应为 29 股"
+    assert broker.submitted_orders[0]["status"] == "Submitted", "前置条件失败: 首笔应仍在途"
+
+    # 1) 先收到 Rejected(Inactive)，此时仍在途，应进入缓冲，不立即重试。
+    broker.mock_cash = 280.0
+    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
+    assert len(broker.submitted_orders) == 1, "拒单但原单在途时，不应立即提交重试单"
+    assert "ORDER_1" in broker._buffered_rejected_retries, "拒单重试应被缓冲等待终态"
+
+    # 2) 原单进入 Canceled 终态，才执行缓冲重试。
+    broker.submitted_orders[0]["status"] = "Canceled"
+    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Canceled"))
+    assert len(broker.submitted_orders) == 2, "Canceled 终态到达后应执行缓冲重试"
+    assert broker.submitted_orders[1]["side"] == "BUY", "缓冲重试后的方向应为 BUY"
+    assert broker.submitted_orders[1]["volume"] == 27, "重试应基于拒单后可用资金重算到 27 股"
 
 
 def test_stale_state_reset_cross_day():

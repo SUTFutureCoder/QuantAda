@@ -235,10 +235,19 @@ class BaseStrategy(ABC):
                 managed_market_value += market_value
 
         # 3. 资金盘点
-        # 底层 Broker 的 get_cash 已由券商自动扣除买单挂单所冻结的现金。
-        # 冻结扣除的现金 + 预期新增的持仓市值 = 总权益 (NAV) 完美的数学守恒。
+        # - get_cash: 当前可立即下单资金口径（可能包含券商杠杆语义）
+        # - get_rebalance_cash: 调仓计划总资金口径（可由子类实现为更保守口径）
+        # 策略层统一使用 get_rebalance_cash，避免计划口径与下单口径发生语义撕裂。
         available_cash = self.broker.get_cash()
-        allocatable_capital = available_cash + managed_market_value
+        rebalance_cash = available_cash
+        if hasattr(self.broker, 'get_rebalance_cash'):
+            try:
+                rebalance_cash = float(self.broker.get_rebalance_cash())
+            except Exception as e:
+                self.log(f"获取调仓资金口径异常，回退 get_cash: {e}")
+                rebalance_cash = available_cash
+
+        allocatable_capital = rebalance_cash + managed_market_value
 
         return allocatable_capital, current_positions
 

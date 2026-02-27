@@ -48,6 +48,8 @@ class LiveTrader:
         self.risk_control = None
         self._data_manager = None
         self._resolved_symbols = None
+        # 分钟级数据的“每日全量重基准”执行记录（按 symbol 维度）
+        self._intraday_rebase_done_on = {}
 
     def _load_adapter_classes(self, platform: str):
         """
@@ -216,7 +218,28 @@ class LiveTrader:
             # 只有在实盘模式下，每次 schedule 触发 run 时，才需要重新拉取数据
             if self.broker.is_live:
                 print("[Engine] Live Mode: Refreshing data...")
-                self._refresh_live_data(context)
+                refresh_stats = self._refresh_live_data(context)
+                total_feeds = int(refresh_stats.get('total_feeds', 0))
+                updated_feeds = int(refresh_stats.get('updated_feeds', 0))
+                failed_feeds = int(refresh_stats.get('failed_feeds', 0))
+
+                # 刷新质量门控:
+                # - 只要有任一标的刷新失败，直接跳过本轮，避免缺失数据触发错误调仓。
+                if total_feeds > 0 and failed_feeds > 0:
+                    warn_msg = (
+                        f"[Engine Error] Live data refresh incomplete: "
+                        f"{updated_feeds}/{total_feeds} updated, {failed_feeds} failed. Skipping this run."
+                    )
+                    print(warn_msg)
+                    if hasattr(self, 'alarm_manager'):
+                        self.alarm_manager.push_text(
+                            (
+                                f"实盘报错并跳过: 当轮刷新存在缺失 "
+                                f"({updated_feeds}/{total_feeds} 成功, {failed_feeds} 失败)。"
+                            ),
+                            level='ERROR'
+                        )
+                    return
 
             # 初始化或临时网络故障下，可能出现 datas 为空。
             # 此时禁止继续执行策略，先尝试自愈拉数，避免“空仓/无目标”的误导性计划。
@@ -462,6 +485,7 @@ class LiveTrader:
         # 重新计算时间窗口 (Warmup ~ Now)
         now_ts = pd.Timestamp(context.now)
         end_date = now_ts.strftime('%Y-%m-%d %H:%M:%S') if timeframe == 'Minutes' else now_ts.strftime('%Y-%m-%d')
+        today_key = now_ts.strftime('%Y-%m-%d')
 
         def _align_to_index_tz(dt_input, index):
             dt = pd.Timestamp(dt_input)
@@ -490,15 +514,30 @@ class LiveTrader:
             start_ts = last_bar_ts - pd.Timedelta(days=2)
             return start_ts.strftime('%Y-%m-%d')
 
+        def _build_window_start() -> str:
+            start_ts = now_ts - pd.Timedelta(days=config.ANNUAL_FACTOR)
+            return start_ts.strftime('%Y-%m-%d %H:%M:%S') if timeframe == 'Minutes' else start_ts.strftime('%Y-%m-%d')
+
         # 遍历 Broker 中已有的 DataFeed
+        total_feeds = 0
+        updated_feeds = 0
+        failed_feeds = 0
         for data_feed in self.broker.datas:
+            total_feeds += 1
             symbol = data_feed._name
             old_df = None
             if hasattr(data_feed, 'p') and hasattr(data_feed.p, 'dataname'):
                 old_df = data_feed.p.dataname
 
-            # 重新拉取数据
-            start_date = _build_incremental_start(old_df)
+            # Days/Weeks 等低频：每次窗口全量替换，避免复权口径与增量拼接错位。
+            force_window_rebase = timeframe != 'Minutes'
+            # Minutes：保留增量，但每天首次做一次窗口全量重基准。
+            if timeframe == 'Minutes':
+                last_rebase_day = self._intraday_rebase_done_on.get(symbol)
+                if last_rebase_day != today_key:
+                    force_window_rebase = True
+
+            start_date = _build_window_start() if force_window_rebase else _build_incremental_start(old_df)
             new_df = self.data_provider.get_history(symbol, start_date, end_date,
                                                     timeframe=timeframe, compression=compression)
 
@@ -507,7 +546,21 @@ class LiveTrader:
                 # 这样 self.strategy.datas 中的引用会自动指向新数据
                 # 假设 DataFeedProxy 使用 .p.dataname 存储数据 (参考 _fetch_all_history_data)
                 if hasattr(data_feed, 'p') and hasattr(data_feed.p, 'dataname'):
-                    if old_df is not None and not old_df.empty:
+                    if force_window_rebase:
+                        refreshed_df = new_df.sort_index()
+                        cutoff_ts = now_ts - pd.Timedelta(days=config.ANNUAL_FACTOR)
+                        cutoff_ts = _align_to_index_tz(cutoff_ts, refreshed_df.index)
+                        refreshed_df = refreshed_df[refreshed_df.index >= cutoff_ts]
+                        if refreshed_df.empty:
+                            print(f"  Warning: Rebased window is empty for {symbol}, keeping previous data.")
+                            failed_feeds += 1
+                            continue
+                        data_feed.p.dataname = refreshed_df
+                        if timeframe == 'Minutes':
+                            self._intraday_rebase_done_on[symbol] = today_key
+                        print(f"  Data rebased for {symbol}: {len(refreshed_df)} bars (Last: {refreshed_df.index[-1]})")
+                        updated_feeds += 1
+                    elif old_df is not None and not old_df.empty:
                         merged_df = pd.concat([old_df, new_df])
                         merged_df = merged_df[~merged_df.index.duplicated(keep='last')]
                         merged_df = merged_df.sort_index()
@@ -518,13 +571,23 @@ class LiveTrader:
                         merged_df = merged_df[merged_df.index >= cutoff_ts]
                         data_feed.p.dataname = merged_df
                         print(f"  Data refreshed for {symbol}: {len(merged_df)} bars (Last: {merged_df.index[-1]})")
+                        updated_feeds += 1
                     else:
                         data_feed.p.dataname = new_df.sort_index()
                         print(f"  Data refreshed for {symbol}: {len(new_df)} bars (Last: {new_df.index[-1]})")
+                        updated_feeds += 1
                 else:
                     print(f"  Warning: Cannot update data for {symbol}. Structure mismatch.")
+                    failed_feeds += 1
             else:
                 print(f"  Warning: No new data fetched for {symbol} during refresh.")
+                failed_feeds += 1
+
+        return {
+            'total_feeds': total_feeds,
+            'updated_feeds': updated_feeds,
+            'failed_feeds': failed_feeds,
+        }
 
     # 风控检查辅助方法
     def _check_risk_controls(self) -> bool:
@@ -715,6 +778,30 @@ def on_order_status_callback(context, raw_order):
             if hasattr(broker, 'on_order_status'):
                 broker.on_order_status(order_proxy)
 
+            current_status = getattr(order_proxy, 'status', 'Unknown')
+            order_id = str(getattr(order_proxy, 'id', '') or '')
+            try:
+                exec_size = float(getattr(order_proxy.executed, 'size', 0) or 0.0)
+            except Exception:
+                exec_size = 0.0
+            try:
+                exec_price = float(getattr(order_proxy.executed, 'price', 0) or 0.0)
+            except Exception:
+                exec_price = 0.0
+
+            # 同一订单同一状态（含成交快照）重复回调去重，防止告警/日志刷屏。
+            dedupe_key = order_id if order_id else f"raw:{id(raw_order)}"
+            if not hasattr(strategy, '_order_callback_dedupe'):
+                strategy._order_callback_dedupe = {}
+            dedupe_cache = strategy._order_callback_dedupe
+            event_signature = (current_status, round(exec_size, 8), round(exec_price, 8))
+            if dedupe_cache.get(dedupe_key) == event_signature:
+                print(f"[Engine Callback] Duplicate status ignored: {current_status} ({dedupe_key})")
+                return
+            dedupe_cache[dedupe_key] = event_signature
+            if len(dedupe_cache) > 5000:
+                dedupe_cache.clear()
+
             # 调用策略通知
             strategy.notify_order(order_proxy)
 
@@ -724,7 +811,6 @@ def on_order_status_callback(context, raw_order):
             if not msg:
                 msg = getattr(raw_order, 'ord_rej_reason_detail', '')  # 尝试获取拒单原因
 
-            current_status = getattr(order_proxy, 'status', 'Unknown')
             print(f"[Engine Callback] Notified strategy of order status: {current_status} ({msg})")
             # 如果状态是 "已提交" 但还没 "成交"，且未被拒绝，则推送一条消息
             if current_status in ['PreSubmitted', 'Submitted', 'PendingSubmit']:

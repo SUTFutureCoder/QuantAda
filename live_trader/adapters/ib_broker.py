@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import math
 
 import pandas as pd
 from ib_insync import IB, Stock, MarketOrder, Trade, Forex, Contract
@@ -9,6 +10,7 @@ except ImportError:
     Crypto = None
 
 from common.ib_symbol_parser import resolve_ib_contract_spec
+import config
 from data_providers.ibkr_provider import IbkrDataProvider
 from .base_broker import BaseLiveBroker, BaseOrderProxy
 
@@ -99,6 +101,8 @@ class IBBrokerAdapter(BaseLiveBroker):
         self._fx_tickers = {}  # 缓存汇率行情
         # 最后已知有效汇率缓存 (Last Known Good Rate)
         self._last_valid_fx_rates = {}
+        # 汇率历史查询失败冷却，防止单次故障导致每次 get_cash 都阻塞。
+        self._fx_rate_retry_not_before = {}
         super().__init__(context, cash_override, commission_override, slippage_override)
 
     def _fetch_real_cash(self) -> float:
@@ -106,12 +110,35 @@ class IBBrokerAdapter(BaseLiveBroker):
         [必须实现] 基类要求的底层查钱接口
         用于初始化(_init_cash)和资金同步(sync_balance)
         """
-        # 优先获取 TotalCashValue (现金账户) 或 AvailableFunds (保证金账户可用资金)
-        return self._fetch_smart_value(['TotalCashValue', 'AvailableFunds'])
+        # 下单可用资金必须优先使用 AvailableFunds；
+        # TotalCashValue 在部分账户类型中会高估“可立即交易资金”。
+        return self._fetch_smart_value(['AvailableFunds', 'TotalCashValue'])
 
     def getcash(self):
         """兼容 Backtrader 标准接口: 获取可用资金 (Buying Power)"""
         return self.get_cash()
+
+    def get_rebalance_cash(self):
+        """
+        调仓计划资金口径（保守）:
+        - get_cash: 可立即下单资金（AvailableFunds 语义）
+        - TotalCashValue: 账户现金口径（不引入额外杠杆）
+        计划层使用两者更保守者，避免“计划金额远大于可成交金额”。
+        """
+        spendable_cash = self.get_cash()
+        total_cash_value = self._fetch_smart_value(['TotalCashValue'])
+        try:
+            spendable_cash = float(spendable_cash)
+        except Exception:
+            spendable_cash = 0.0
+        try:
+            total_cash_value = float(total_cash_value)
+        except Exception:
+            return spendable_cash
+
+        if not math.isfinite(total_cash_value):
+            return spendable_cash
+        return min(spendable_cash, total_cash_value)
 
     def get_cash(self):
         """
@@ -120,9 +147,8 @@ class IBBrokerAdapter(BaseLiveBroker):
         此处必须手动减去在途买单(Pending BUY)的预期消耗，防止产生无限杠杆幻觉。
         """
         # 1. 获取物理账面现金
-        # 明确获取可用资金 (优先 TotalCashValue，其次 AvailableFunds)，而非总资产
-        # 如果是现金账户，必须用 TotalCashValue；如果是保证金账户，AvailableFunds 包含融资额度
-        raw_cash = self._fetch_smart_value(['TotalCashValue', 'AvailableFunds'])
+        # 明确获取可用资金 (优先 AvailableFunds，其次 TotalCashValue)，而非总资产
+        raw_cash = self._fetch_smart_value(['AvailableFunds', 'TotalCashValue'])
 
         # 2. 盘点所有在途买单，计算尚未物理扣款的“虚拟冻结资金”
         virtual_frozen_cash = 0.0
@@ -301,13 +327,25 @@ class IBBrokerAdapter(BaseLiveBroker):
             if not source_data: return 0.0
 
         for tag in tags_priority:
+            base_value = None
+            for v in source_data:
+                if v.tag == tag and v.currency == 'BASE':
+                    try:
+                        base_value = float(v.value)
+                        break
+                    except Exception:
+                        continue
+
             # 提取该 tag 下所有的币种记录 (排除 BASE，由我们自己精准换算 USD)
             items = [v for v in source_data if v.tag == tag and v.currency and v.currency != 'BASE']
             if not items:
+                if base_value is not None:
+                    return base_value
                 continue
 
             total_usd = 0.0
             found_valid = False
+            missing_fx = False
 
             for item in items:
                 try:
@@ -349,14 +387,26 @@ class IBBrokerAdapter(BaseLiveBroker):
                                 exchange_rate = self._last_valid_fx_rates[pair_symbol]
                             else:
                                 if not in_loop:
-                                    try:
-                                        bars = self.ib.reqHistoricalData(
-                                            Forex(pair_symbol), endDateTime='', durationStr='2 D',
-                                            barSizeSetting='1 day', whatToShow='MIDPOINT', useRTH=True
-                                        )
-                                        if bars: exchange_rate = bars[-1].close
-                                    except:
-                                        pass
+                                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                                    retry_not_before = self._fx_rate_retry_not_before.get(pair_symbol)
+                                    if not retry_not_before or now_utc >= retry_not_before:
+                                        try:
+                                            bars = self.ib.reqHistoricalData(
+                                                Forex(pair_symbol), endDateTime='', durationStr='2 D',
+                                                barSizeSetting='1 day', whatToShow='MIDPOINT', useRTH=False,
+                                                timeout=3.0
+                                            )
+                                            if bars:
+                                                exchange_rate = bars[-1].close
+                                                self._fx_rate_retry_not_before.pop(pair_symbol, None)
+                                            else:
+                                                self._fx_rate_retry_not_before[pair_symbol] = (
+                                                    now_utc + datetime.timedelta(minutes=5)
+                                                )
+                                        except Exception:
+                                            self._fx_rate_retry_not_before[pair_symbol] = (
+                                                now_utc + datetime.timedelta(minutes=5)
+                                            )
 
                         if exchange_rate > 0:
                             self._last_valid_fx_rates[pair_symbol] = exchange_rate
@@ -367,13 +417,22 @@ class IBBrokerAdapter(BaseLiveBroker):
                             found_valid = True
                         else:
                             if val != 0:
+                                missing_fx = True
                                 print(f"[IB Warning] 无法获取 {item.currency} 汇率, 金额 {val} 未计入。")
                 except Exception:
                     continue
 
+            # 若多币种中存在无法换汇项，且券商提供 BASE 汇总，优先回退 BASE，避免低估可用资金。
+            if missing_fx and base_value is not None:
+                print(f"[IB Warning] {tag} 存在汇率缺口，回退使用 BASE 汇总口径。")
+                return base_value
+
             # 只要在这个 tag 下成功计算了哪怕一个有效条目（即便加总是负数），都直接返回
             if found_valid:
                 return total_usd
+
+            if base_value is not None:
+                return base_value
 
         return 0.0
 
@@ -501,20 +560,83 @@ class IBBrokerAdapter(BaseLiveBroker):
         contract = self.parse_contract(data._name)
         action = 'BUY' if side == 'BUY' else 'SELL'
 
-        # 强制将数量转换为整数 (向下取整，防止买入超额资金)
-        volume_int = int(abs(volume))
+        try:
+            raw_volume = abs(float(volume))
+        except Exception:
+            raw_volume = 0.0
 
-        # 防止零股交易 (IB部分账户不支持小于1股)
-        if volume_int < 1:
+        # 默认禁用 API 小数股卖单，避免在不支持分数股的 IB 账户触发 10243 拒单。
+        # 如账户已确认支持，可显式在 config 中开启 IBKR_ALLOW_FRACTIONAL_SELL=True。
+        allow_fractional_sell = bool(getattr(config, 'IBKR_ALLOW_FRACTIONAL_SELL', False))
+        should_use_fractional_sell = (
+            side == 'SELL'
+            and allow_fractional_sell
+            and raw_volume > 0
+            and abs(raw_volume - round(raw_volume)) > 1e-9
+        )
+        if should_use_fractional_sell:
+            volume_final = round(raw_volume, 6)
+        else:
+            # 买单维持整数向下取整，防止超额占资
+            volume_final = int(raw_volume)
+
+        # 防止零股交易
+        if volume_final <= 0:
             print(f"[IB Warning] Order size < 1 (raw: {volume}), skipped.")
             return None
 
         # 使用市价单 (MarketOrder) 或 限价单 (LimitOrder)
         # 此处简单起见使用市价单
-        order = MarketOrder(action, volume_int)
+        order = MarketOrder(action, volume_final)
 
         trade = self.ib.placeOrder(contract, order)
         return IBOrderProxy(trade, data=data)
+
+    @staticmethod
+    def _parse_daily_schedule(schedule_rule: str):
+        """
+        解析每日调度规则，支持:
+        - 1d:HH:MM
+        - 1d:HH:MM:SS
+        返回 (hour, minute, second, time_str)，无效则返回 None。
+        """
+        if not schedule_rule or not isinstance(schedule_rule, str):
+            return None
+        if not schedule_rule.startswith('1d:'):
+            return None
+
+        _, target_time_str = schedule_rule.split(':', 1)
+        parts = target_time_str.split(':')
+        if len(parts) not in (2, 3):
+            raise ValueError(f"Invalid schedule time format: {target_time_str}")
+
+        target_h = int(parts[0])
+        target_m = int(parts[1])
+        target_s = int(parts[2]) if len(parts) > 2 else 0
+
+        if not (0 <= target_h <= 23 and 0 <= target_m <= 59 and 0 <= target_s <= 59):
+            raise ValueError(f"Invalid schedule time value: {target_time_str}")
+
+        return target_h, target_m, target_s, target_time_str
+
+    @staticmethod
+    def _should_trigger_daily_schedule(now: datetime.datetime, target_h: int, target_m: int, target_s: int,
+                                       last_schedule_run_date: str):
+        """
+        每日调度触发判定:
+        - 仅在目标时间后的短容忍窗口内触发（不做补跑）
+        - 同一自然日只允许运行一次
+        """
+        target_dt = now.replace(hour=target_h, minute=target_m, second=target_s, microsecond=0)
+        delta = (now - target_dt).total_seconds()
+        current_date_str = now.strftime('%Y-%m-%d')
+
+        if last_schedule_run_date == current_date_str:
+            return False, delta, current_date_str
+        tolerance_window = 5.0
+        if delta < 0 or delta > tolerance_window:
+            return False, delta, current_date_str
+        return True, delta, current_date_str
 
     # 5. 将券商的原始订单对象（raw_order）转换为框架标准的 BaseOrderProxy
     def convert_order_proxy(self, raw_trade_or_order) -> 'BaseOrderProxy':
@@ -577,22 +699,36 @@ class IBBrokerAdapter(BaseLiveBroker):
         selection_name = kwargs.get('selection')
 
         print(f"\n>>> 🛡️ Launching IBKR Phoenix Mode (Host: {host}:{port}) <<<")
+        runtime_marker = getattr(config, 'RUNTIME_MARKER', 'ib-live-2026-02-27-riskfix-v1')
+        print(f">>> 🧬 Runtime Marker: {runtime_marker}")
         if schedule_rule:
             tz_info = timezone_str if timezone_str else "Server Local Time"
             print(f">>> ⏰ Schedule Active: {schedule_rule} (Zone: {tz_info})")
         else:
             print(f">>> ⚠️ No Schedule Found: Strategy will NOT run automatically. (Heartbeat Only)")
 
+        parsed_daily_schedule = None
+        if schedule_rule:
+            try:
+                parsed_daily_schedule = cls._parse_daily_schedule(schedule_rule)
+                if parsed_daily_schedule is None:
+                    print(f">>> ⚠️ Unsupported schedule format for IB adapter: {schedule_rule}. Expected: 1d:HH:MM[:SS]")
+            except Exception as e:
+                print(f">>> ⚠️ Invalid schedule config: {schedule_rule}. Error: {e}")
+                parsed_daily_schedule = None
+
         # 1. 创建全局唯一的 IB 实例
         ib = IB()
 
         # 2. 预初始化 Engine Context
         class Context:
-            now = pd.Timestamp.now()
+            now = None
             ib_instance = ib
             strategy_instance = None
 
         ctx = Context()
+        init_now = datetime.datetime.now(target_tz) if target_tz else datetime.datetime.now()
+        ctx.now = pd.Timestamp(init_now)
 
         # 初始化 Engine (只做一次)
         from live_trader.engine import LiveTrader, on_order_status_callback
@@ -705,48 +841,26 @@ class IBBrokerAdapter(BaseLiveBroker):
 
 
                     # (B) 调度检查逻辑
-                    if schedule_rule:
+                    if parsed_daily_schedule:
                         try:
-                            # 解析 "1d:HH:MM:SS" (仅处理 1d 每日任务)
-                            # 如果你的 schedule_rule 格式是 "1d:14:50:00"
-                            if schedule_rule.startswith('1d:'):
-                                _, target_time_str = schedule_rule.split(':', 1)
+                            target_h, target_m, target_s, target_time_str = parsed_daily_schedule
+                            should_run, delta, current_date_str = cls._should_trigger_daily_schedule(
+                                now=now,
+                                target_h=target_h,
+                                target_m=target_m,
+                                target_s=target_s,
+                                last_schedule_run_date=last_schedule_run_date
+                            )
+                            if should_run:
+                                print(
+                                    f"\n>>> ⏰ Schedule Triggered: {schedule_rule} (Delta: {delta:.2f}s) <<<")
 
-                                parts = target_time_str.split(':')
-                                target_h = int(parts[0])
-                                target_m = int(parts[1])
-                                target_s = int(parts[2]) if len(parts) > 2 else 0
+                                # === 触发策略运行 ===
+                                trader.run(ctx)
 
-                                target_dt = now.replace(hour=target_h, minute=target_m, second=target_s,
-                                                        microsecond=0)
-
-                                # 2. 计算当前时间与目标时间的偏差 (秒)
-                                delta = (now - target_dt).total_seconds()
-
-                                # 3. 判定触发条件：
-                                #    (a) 时间落在 [0, 5] 秒的窗口内 (允许迟到 5 秒)
-                                #    (b) 今天还没跑过 (防止 5 秒内重复触发)
-                                TOLERANCE_WINDOW = 5.0
-
-                                current_date_str = now.strftime('%Y-%m-%d')
-
-                                if 0 <= delta <= TOLERANCE_WINDOW:
-                                    if last_schedule_run_date != current_date_str:
-                                        print(
-                                            f"\n>>> ⏰ Schedule Triggered: {schedule_rule} (Delta: {delta:.2f}s) <<<")
-
-                                        # === 触发策略运行 ===
-                                        trader.run(ctx)
-
-                                        # === 更新状态锁 ===
-                                        last_schedule_run_date = current_date_str
-                                        print(f">>> Run Finished. Next run: Tomorrow {target_time_str}\n")
-                                    else:
-                                        # (可选) 如果在窗口内但已经跑过，说明正在窗口期内sleep，无需操作
-                                        pass
-                            else:
-                                # 如果以后支持其他频率 (如 1h)，在这里扩展
-                                pass
+                                # === 更新状态锁 ===
+                                last_schedule_run_date = current_date_str
+                                print(f">>> Run Finished. Next run: Tomorrow {target_time_str}\n")
 
                         except Exception as e:
                             print(f"[Schedule Error] Check failed: {e}")

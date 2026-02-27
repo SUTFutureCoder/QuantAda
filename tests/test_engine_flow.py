@@ -650,12 +650,72 @@ def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
     assert broker.deferred_calls == 0, "拒单不应触发延迟队列重放。"
 
 
-def test_refresh_live_data_merges_dedupes_and_trims(monkeypatch):
+def test_on_order_status_callback_dedupes_duplicate_status(monkeypatch):
     """
-    实盘增量刷新:
-    - 增量起点应按 last_bar-2d 计算
-    - 合并后按索引去重（保留新值）
-    - 按 ANNUAL_FACTOR 保持固定预热窗口
+    回调去重回归:
+    同一订单同一状态重复回调，不应重复通知策略，避免日志/告警刷屏。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.id = "ORDER_DUP_1"
+            self.status = "Inactive"
+            self.data = SimpleNamespace(_name="GLD.ARCA")
+            self.executed = SimpleNamespace(size=0.0, price=0.0, value=0.0, comm=0.0)
+
+        def is_buy(self):
+            return True
+
+        def is_sell(self):
+            return False
+
+        def is_rejected(self):
+            return True
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.proxy = DummyOrderProxy()
+            self.order_status_calls = 0
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            self.order_status_calls += 1
+
+    class DummyEngineStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+            self.notify_calls = 0
+
+        def notify_order(self, order):
+            self.notify_calls += 1
+
+    broker = DummyBroker()
+    strategy = DummyEngineStrategy(broker)
+    context = SimpleNamespace(
+        strategy_instance=strategy,
+        now=datetime(2026, 2, 17, 10, 10, 0)
+    )
+    raw_order = SimpleNamespace(statusMsg="inactive")
+
+    engine_module.on_order_status_callback(context, raw_order)
+    engine_module.on_order_status_callback(context, raw_order)
+
+    assert broker.order_status_calls == 2, "Broker 状态维护应仍可接收重复回调。"
+    assert strategy.notify_calls == 1, "重复状态回调应被去重，避免重复通知策略。"
+
+
+def test_refresh_live_data_rebases_window_for_daily(monkeypatch):
+    """
+    实盘日线刷新:
+    - 每次应按固定预热窗口全量重拉
+    - 不与旧数据 merge，直接替换为本次返回窗口
+    - 仍按 ANNUAL_FACTOR 做窗口截断
     """
     import live_trader.engine as engine_module
 
@@ -674,8 +734,8 @@ def test_refresh_live_data_merges_dedupes_and_trims(monkeypatch):
         index=initial_idx,
     )
 
-    incremental_idx = pd.to_datetime(["2026-02-08", "2026-02-09", "2026-02-10"])
-    incremental_df = pd.DataFrame(
+    rebased_idx = pd.to_datetime(["2026-02-08", "2026-02-09", "2026-02-10"])
+    rebased_df = pd.DataFrame(
         {
             "open": [18.0, 20.0, 30.0],
             "high": [18.5, 20.5, 30.5],
@@ -683,7 +743,7 @@ def test_refresh_live_data_merges_dedupes_and_trims(monkeypatch):
             "close": [18.0, 20.0, 30.0],
             "volume": [1800, 2000, 3000],
         },
-        index=incremental_idx,
+        index=rebased_idx,
     )
 
     class RefreshDataProvider(DummyDataProvider):
@@ -706,7 +766,7 @@ def test_refresh_live_data_merges_dedupes_and_trims(monkeypatch):
             )
             if self._counter == 1:
                 return initial_df.copy()
-            return incremental_df.copy()
+            return rebased_df.copy()
 
     monkeypatch.setattr(config, "ANNUAL_FACTOR", 5)
     monkeypatch.setattr(
@@ -736,14 +796,206 @@ def test_refresh_live_data_merges_dedupes_and_trims(monkeypatch):
 
     calls = engine.data_provider.history_calls
     assert len(calls) >= 2, "初始化+刷新至少应触发 2 次 get_history。"
-    assert calls[1]["start_date"] == "2026-02-07", "增量刷新起点应为最后一根K线往前回看2天。"
+    assert calls[1]["start_date"] == "2026-02-05", "日线刷新应按固定预热窗口全量重拉。"
 
     refreshed_df = engine.broker.datas[0].p.dataname
-    # 注意：裁剪阈值使用 context.now 的具体时分秒，故 2026-02-05 00:00 会被排除。
-    assert refreshed_df.index.min() == pd.Timestamp("2026-02-06"), "应按 ANNUAL_FACTOR 截断旧数据窗口。"
+    assert refreshed_df.index.min() == pd.Timestamp("2026-02-08"), "日线应使用本次全量窗口替换旧数据。"
     assert refreshed_df.index.max() == pd.Timestamp("2026-02-10"), "刷新后应包含最新 bar。"
     assert refreshed_df.loc[pd.Timestamp("2026-02-09"), "close"] == pytest.approx(20.0), (
-        "重复日期应保留新数据（keep='last'）。"
+        "全量窗口数据应正确生效。"
+    )
+
+
+def test_live_run_skips_when_any_refresh_failed_and_risk_not_checked(monkeypatch):
+    """
+    实盘刷新质量门控:
+    只要任一标的刷新失败，就应跳过策略执行（禁止调仓），且不执行风控检查。
+    """
+    import live_trader.engine as engine_module
+
+    class FlakyRefreshProvider(DummyDataProvider):
+        def __init__(self):
+            super().__init__()
+            self._symbol_calls = {}
+
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            # 仅让第二个标的在 refresh 阶段失败，验证“部分失败也必须跳过”。
+            count = self._symbol_calls.get(symbol, 0) + 1
+            self._symbol_calls[symbol] = count
+            if count >= 2 and symbol == "SZSE.000001":
+                return pd.DataFrame()
+            return super().get_history(symbol, start_date, end_date, timeframe, compression)
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, FlakyRefreshProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000", "SZSE.000001"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+    assert len(engine.broker.datas) == 2, "初始化应加载两路数据，用于刷新质量门控测试。"
+
+    class DummyRisk:
+        def __init__(self):
+            self.check_calls = 0
+            self.exit_triggered = set()
+
+        def check(self, data):
+            self.check_calls += 1
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    engine.risk_control = DummyRisk()
+    engine.run(context)
+
+    assert engine.strategy.next_calls == 0, "存在刷新失败时应跳过策略执行。"
+    assert engine.risk_control.check_calls == 0, "存在刷新失败时不应执行风控检查。"
+
+
+def test_refresh_live_minutes_rebase_then_incremental_same_day(monkeypatch):
+    """
+    实盘分钟刷新:
+    - 当天首次 refresh 应执行窗口全量重基准
+    - 同日后续 refresh 走增量起点 (last_bar - 3*compression minutes)
+    """
+    import live_trader.engine as engine_module
+
+    init_idx = pd.to_datetime([
+        "2026-02-10 09:50:00",
+        "2026-02-10 09:55:00",
+        "2026-02-10 10:00:00",
+        "2026-02-10 10:05:00",
+        "2026-02-10 10:10:00",
+    ])
+    init_df = pd.DataFrame(
+        {
+            "open": [10.0, 10.1, 10.2, 10.3, 10.4],
+            "high": [10.2, 10.3, 10.4, 10.5, 10.6],
+            "low": [9.9, 10.0, 10.1, 10.2, 10.3],
+            "close": [10.1, 10.2, 10.3, 10.4, 10.5],
+            "volume": [100, 110, 120, 130, 140],
+        },
+        index=init_idx,
+    )
+
+    rebased_idx = pd.to_datetime([
+        "2026-02-10 10:00:00",
+        "2026-02-10 10:05:00",
+        "2026-02-10 10:10:00",
+        "2026-02-10 10:15:00",
+        "2026-02-10 10:20:00",
+    ])
+    rebased_df = pd.DataFrame(
+        {
+            "open": [20.0, 20.1, 20.2, 20.3, 20.4],
+            "high": [20.2, 20.3, 20.4, 20.5, 20.6],
+            "low": [19.9, 20.0, 20.1, 20.2, 20.3],
+            "close": [20.1, 20.2, 20.3, 20.4, 20.5],
+            "volume": [200, 210, 220, 230, 240],
+        },
+        index=rebased_idx,
+    )
+
+    incremental_idx = pd.to_datetime([
+        "2026-02-10 10:10:00",
+        "2026-02-10 10:15:00",
+        "2026-02-10 10:20:00",
+        "2026-02-10 10:25:00",
+    ])
+    incremental_df = pd.DataFrame(
+        {
+            "open": [30.0, 30.1, 30.2, 30.3],
+            "high": [30.2, 30.3, 30.4, 30.5],
+            "low": [29.9, 30.0, 30.1, 30.2],
+            "close": [30.1, 30.2, 30.3, 30.4],
+            "volume": [300, 310, 320, 330],
+        },
+        index=incremental_idx,
+    )
+
+    class RefreshDataProvider(DummyDataProvider):
+        def __init__(self):
+            super().__init__()
+            self.history_calls = []
+            self._counter = 0
+
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            self._counter += 1
+            self.history_calls.append(
+                {
+                    "symbol": symbol,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "timeframe": timeframe,
+                    "compression": compression,
+                }
+            )
+            if self._counter == 1:
+                return init_df.copy()
+            if self._counter == 2:
+                return rebased_df.copy()
+            return incremental_df.copy()
+
+    monkeypatch.setattr(config, "ANNUAL_FACTOR", 5)
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, RefreshDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "timeframe": "Minutes",
+        "compression": 5,
+        "params": {},
+    }
+
+    context = MockContext(now=datetime(2026, 2, 10, 10, 20, 0))
+    engine = LiveTrader(cfg)
+    engine.init(context)
+
+    # 当天首次 refresh：全量重基准
+    engine._refresh_live_data(context)
+    # 同日第二次 refresh：增量
+    context.now = datetime(2026, 2, 10, 10, 25, 0)
+    engine._refresh_live_data(context)
+
+    calls = engine.data_provider.history_calls
+    assert len(calls) >= 3, "初始化 + 两次刷新应至少触发 3 次 get_history。"
+    assert calls[1]["start_date"] == "2026-02-05 10:20:00", "分钟级当天首刷应使用窗口全量重基准。"
+    assert calls[2]["start_date"] == "2026-02-10 10:05:00", "同日后续刷新应回退 3*compression 分钟做增量。"
+
+    refreshed_df = engine.broker.datas[0].p.dataname
+    assert refreshed_df.index.max() == pd.Timestamp("2026-02-10 10:25:00"), "分钟级增量后应包含最新 bar。"
+    assert refreshed_df.loc[pd.Timestamp("2026-02-10 10:20:00"), "close"] == pytest.approx(30.3), (
+        "重复分钟应保留增量新值（keep='last'）。"
     )
 
 

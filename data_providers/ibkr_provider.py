@@ -203,20 +203,67 @@ class IbkrDataProvider(BaseDataProvider):
         print(f"[IBKR] Fetching {contract.symbol} ({duration_str}) [{what_to_show}]...")
 
         try:
-            # 3. 请求历史数据 (阻塞式调用)
-            bars = self.ib.reqHistoricalData(
-                contract,
-                endDateTime=req_end_date,  # 动态调整
-                durationStr=duration_str,
-                barSizeSetting=bar_size,
-                whatToShow=what_to_show,  # 动态调整
-                useRTH=True,
-                formatDate=1
-            )
+            # 3. 请求历史数据 (阻塞式调用，带超时与降级兜底)
+            try:
+                hist_timeout = float(getattr(config, 'IBKR_HIST_TIMEOUT_SEC', 8.0))
+            except Exception:
+                hist_timeout = 8.0
+            hist_timeout = max(1.0, hist_timeout)
+
+            # 外汇不使用 RTH；股票默认用 RTH，避免盘前盘后噪声。
+            default_use_rth = False if contract.secType == 'CASH' else True
+
+            request_plan = [(what_to_show, default_use_rth, hist_timeout, 1)]
+            if contract.secType == 'STK' and what_to_show == 'ADJUSTED_LAST':
+                # ADJUSTED_LAST 在部分账户/时段会超时，先短超时重试两次，再降级 TRADES。
+                fallback_timeout = max(1.0, min(hist_timeout, 5.0))
+                try:
+                    adjusted_retry_times = int(getattr(config, 'IBKR_ADJUSTED_LAST_RETRIES', 2))
+                except Exception:
+                    adjusted_retry_times = 2
+                adjusted_retry_times = max(0, adjusted_retry_times)
+
+                # attempt 编号从 2 开始，1 号已由首次请求占用。
+                for idx in range(adjusted_retry_times):
+                    request_plan.append(('ADJUSTED_LAST', default_use_rth, fallback_timeout, idx + 2))
+                request_plan.append(('TRADES', default_use_rth, fallback_timeout, 1))
+                request_plan.append(('TRADES', False, fallback_timeout, 2))
+
+            bars = None
+            request_errors = []
+            selected_mode = what_to_show
+
+            for mode, use_rth, timeout_sec, attempt in request_plan:
+                try:
+                    bars = self.ib.reqHistoricalData(
+                        contract,
+                        endDateTime=req_end_date,  # 动态调整
+                        durationStr=duration_str,
+                        barSizeSetting=bar_size,
+                        whatToShow=mode,
+                        useRTH=use_rth,
+                        formatDate=1,
+                        timeout=timeout_sec
+                    )
+                    if bars:
+                        selected_mode = mode
+                        break
+                    request_errors.append(f"{mode}#{attempt}/useRTH={use_rth}: empty")
+                except Exception as e:
+                    request_errors.append(f"{mode}#{attempt}/useRTH={use_rth}: {e}")
+                    print(
+                        f"[IBKR] Historical request failed for {contract.symbol} "
+                        f"[{mode} attempt#{attempt}, useRTH={use_rth}, timeout={timeout_sec:.1f}s]: {e}"
+                    )
 
             if not bars:
                 print(f"[IBKR] No data returned for {symbol}")
+                if request_errors:
+                    print(f"[IBKR] Historical attempts: {' | '.join(request_errors)}")
                 return None
+
+            if selected_mode != what_to_show:
+                print(f"[IBKR] Historical fallback in use for {contract.symbol}: {selected_mode}")
 
             # 4. 转换为 DataFrame
             df = util.df(bars)

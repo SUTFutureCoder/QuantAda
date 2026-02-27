@@ -1,4 +1,5 @@
 import threading
+import time
 from abc import ABC, abstractmethod
 
 import pandas as pd
@@ -86,6 +87,8 @@ class BaseLiveBroker(ABC):
         self._virtual_spent_cash = 0.0
         # 活跃买单追踪器，用于被拒单时的降级重试
         self._active_buys = {}
+        # IB 等柜台会先推 Inactive 再推 Cancelled；Rejected 重试需等待原单真正出清
+        self._buffered_rejected_retries = {}
         # 虚拟账本读写锁
         self._ledger_lock = threading.RLock()
         # 风控锁定黑名单
@@ -356,6 +359,97 @@ class BaseLiveBroker(ABC):
 
         return fallback
 
+    def _recalc_rejected_buy_shares(self, old_shares, price, lot_size):
+        """
+        买单拒绝后按当前可用资金重算可下单数量。
+        返回值会严格小于 old_shares，避免重复提交同等数量导致死循环拒单。
+        """
+        try:
+            old_int = int(abs(float(old_shares)))
+            lot_int = int(abs(float(lot_size)))
+            px = float(price)
+        except Exception:
+            return 0
+
+        if old_int <= 0 or px <= 0:
+            return 0
+
+        lot_int = max(1, lot_int)
+        try:
+            cash_now = float(self.get_cash())
+        except Exception:
+            return 0
+
+        if cash_now <= 0:
+            return 0
+
+        max_affordable = cash_now / (px * self.safety_multiplier)
+        if lot_int > 1:
+            recalc_shares = int(max_affordable // lot_int) * lot_int
+        else:
+            recalc_shares = int(max_affordable)
+
+        # 拒单后重试必须收缩到更小的数量，防止重复被拒。
+        upper_bound = old_int - lot_int
+        recalc_shares = min(recalc_shares, upper_bound)
+        return max(0, recalc_shares)
+
+    def _is_order_still_pending(self, order_id):
+        """
+        检查订单是否仍在柜台在途。
+        若在途列表不含 id 字段，则返回 False（不阻塞重试）。
+        """
+        if not order_id:
+            return False
+        try:
+            pending_orders = self.get_pending_orders()
+        except Exception:
+            return False
+
+        found_id_field = False
+        oid = str(order_id)
+        for po in pending_orders or []:
+            poid = po.get('id') if isinstance(po, dict) else None
+            if poid is None:
+                continue
+            found_id_field = True
+            if str(poid) == oid:
+                return True
+        return False if found_id_field else False
+
+    def _submit_buffered_rejected_retry(self, source_oid):
+        """
+        在原拒单进入终态后，执行缓冲的降级重试。
+        要求调用方已持有 _ledger_lock。
+        """
+        payload = self._buffered_rejected_retries.pop(str(source_oid), None)
+        if not payload:
+            return
+
+        data = payload['data']
+        symbol = payload['symbol']
+        new_shares = payload['new_shares']
+        price = payload['price']
+        lot_size = payload['lot_size']
+        next_retries = payload['next_retries']
+        queued_at = payload.get('queued_at')
+
+        wait_s = 0.0
+        if queued_at is not None:
+            wait_s = max(0.0, time.time() - float(queued_at))
+        print(f"[Broker] 🔁 原拒单已终态，执行缓冲重试: {symbol} -> {new_shares} (waited {wait_s:.2f}s)")
+
+        deduct_amount = new_shares * price * self.safety_multiplier
+        self._virtual_spent_cash += deduct_amount
+
+        new_proxy = self._finalize_and_submit(data, new_shares, price, lot_size, next_retries)
+        if not new_proxy:
+            self._virtual_spent_cash = max(
+                0.0,
+                getattr(self, '_virtual_spent_cash', 0.0) - deduct_amount
+            )
+            print(f"❌ [Broker] 缓冲重试发单失败，资金已回退。")
+
     def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):
         """通用的下单收尾逻辑：取整 + 提交"""
         raw_shares = shares
@@ -443,11 +537,12 @@ class BaseLiveBroker(ABC):
                     buy_info = self._active_buys.pop(oid, None)
                     if buy_info:
                         refund_amount = buy_info['shares'] * buy_info['price'] * self.safety_multiplier
+                        symbol = getattr(buy_info.get('data'), '_name', None) or getattr(getattr(proxy, 'data', None), '_name', 'Unknown')
                         self._virtual_spent_cash = max(
                             0.0,
                             getattr(self, '_virtual_spent_cash', 0.0) - refund_amount
                         )
-                        print(f"[Broker] ✅ 买单 {oid} 已成交。已释放虚拟扣款: {refund_amount:.2f}")
+                        print(f"[Broker] ✅ 买单 {symbol} 已成交。已释放虚拟扣款: {refund_amount:.2f}")
 
                 elif proxy.is_canceled():
                     # 撤单防御：精准回退被冻结的虚拟预扣资金（不触发降级重试）
@@ -455,11 +550,13 @@ class BaseLiveBroker(ABC):
                         buy_info = self._active_buys.pop(oid, None)
                         if buy_info:
                             refund_amount = buy_info['shares'] * buy_info['price'] * self.safety_multiplier
+                            symbol = getattr(buy_info.get('data'), '_name', None) or getattr(getattr(proxy, 'data', None), '_name', 'Unknown')
                             self._virtual_spent_cash = max(
                                 0.0,
                                 getattr(self, '_virtual_spent_cash', 0.0) - refund_amount
                             )
-                            print(f"[Broker] ⚠️ 买单 {oid} 被撤销。已回退虚拟扣款: {refund_amount:.2f}")
+                            print(f"[Broker] ⚠️ 买单 {symbol} 被撤销。已回退虚拟扣款: {refund_amount:.2f}")
+                        self._submit_buffered_rejected_retry(oid)
 
                 elif proxy.is_rejected():
                     with self._ledger_lock:
@@ -476,28 +573,54 @@ class BaseLiveBroker(ABC):
                             if retries < max_retries:
                                 lot_size = buy_info['lot_size']
                                 data = buy_info['data']
+                                symbol = getattr(data, '_name', None) or getattr(getattr(proxy, 'data', None), '_name', 'Unknown')
                                 price = buy_info['price']
 
-                                # 降级递减
-                                new_shares = buy_info['shares'] - lot_size
+                                # 优先按当前可用资金重算；失败时再走逐手降级兜底。
+                                old_shares = buy_info['shares']
+                                recalculated = self._recalc_rejected_buy_shares(old_shares, price, lot_size)
+                                if recalculated > 0:
+                                    new_shares = recalculated
+                                    downgrade_reason = "资金重算"
+                                else:
+                                    new_shares = old_shares - lot_size
+                                    downgrade_reason = "逐手降级"
 
-                                print(f"⚠️ [Broker] 买单 {oid} 被拒绝。触发自动降级 {retries + 1}/{max_retries}...")
-                                print(f"   => {data._name} 尝试数量: {buy_info['shares']} -> {new_shares}")
+                                print(f"⚠️ [Broker] 买单 {symbol} 被拒绝。触发自动降级 {retries + 1}/{max_retries}...")
+                                print(f"   => {symbol} 尝试数量: {old_shares} -> {new_shares} ({downgrade_reason})")
 
                                 if new_shares > 0:
-                                    # 再次预扣降级后的虚拟资金
-                                    deduct_amount = new_shares * price * self.safety_multiplier
-                                    self._virtual_spent_cash += deduct_amount
+                                    # 柜台订单仍在途时，先缓冲，等待 Cancelled/终态后再重试，避免“旧单+新单”叠加占资。
+                                    if self._is_order_still_pending(oid):
+                                        key = str(oid)
+                                        if key not in self._buffered_rejected_retries:
+                                            self._buffered_rejected_retries[key] = {
+                                                'data': data,
+                                                'symbol': symbol,
+                                                'new_shares': new_shares,
+                                                'price': price,
+                                                'lot_size': lot_size,
+                                                'next_retries': retries + 1,
+                                                'queued_at': time.time(),
+                                            }
+                                            print(f"[Broker] ⏳ 原单 {oid} 仍在途，缓冲降级重试，等待终态后提交。")
+                                        else:
+                                            print(f"[Broker] ⏳ 原单 {oid} 的缓冲重试已存在，忽略重复拒单回调。")
+                                    else:
+                                        # 原单已出清，可立即执行降级重试。
+                                        deduct_amount = new_shares * price * self.safety_multiplier
+                                        self._virtual_spent_cash += deduct_amount
 
-                                    # 带着新的 retries 计数再次发单，获取返回值
-                                    new_proxy = self._finalize_and_submit(data, new_shares, price, lot_size,
-                                                                          retries + 1)
+                                        new_proxy = self._finalize_and_submit(data, new_shares, price, lot_size,
+                                                                              retries + 1)
 
-                                    # 如果同步发单失败(比如断网)，必须把预扣的钱退回来
-                                    if not new_proxy:
-                                        self._virtual_spent_cash = max(0.0, getattr(self, '_virtual_spent_cash',
-                                                                                    0.0) - deduct_amount)
-                                        print(f"❌ [Broker] 降级发单同步失败，资金已回退。")
+                                        # 如果同步发单失败(比如断网)，必须把预扣的钱退回来
+                                        if not new_proxy:
+                                            self._virtual_spent_cash = max(
+                                                0.0,
+                                                getattr(self, '_virtual_spent_cash', 0.0) - deduct_amount
+                                            )
+                                            print(f"❌ [Broker] 降级发单同步失败，资金已回退。")
                                 else:
                                     print(f"❌ [Broker] 降级终止: {data._name} 数量已降至 0。")
                 return
@@ -566,6 +689,13 @@ class BaseLiveBroker(ABC):
         if self._cash_override is not None:
             return min(real_cash, self._cash_override)
         return real_cash
+
+    def get_rebalance_cash(self):
+        """
+        策略层用于“调仓计划总资金”的现金口径。
+        默认与 get_cash 一致，子类可覆盖为更保守或更贴合券商语义的实现。
+        """
+        return self.get_cash()
 
     def _has_pending_sells(self):
         return len(self._pending_sells) > 0
@@ -639,6 +769,7 @@ class BaseLiveBroker(ABC):
                     self._deferred_orders
                     or self._pending_sells
                     or self._active_buys
+                    or self._buffered_rejected_retries
                     or self._virtual_spent_cash > 0
                 )
                 if has_stale_state:
@@ -683,6 +814,8 @@ class BaseLiveBroker(ABC):
         # 3. 清理买单跟踪器
         if hasattr(self, '_active_buys'):
             self._active_buys.clear()
+        if hasattr(self, '_buffered_rejected_retries'):
+            self._buffered_rejected_retries.clear()
 
         # 4. 清理虚拟占资，避免长中断后出现幽灵冻结资金
         self._virtual_spent_cash = 0.0
@@ -700,6 +833,8 @@ class BaseLiveBroker(ABC):
         # 补丁：彻底清空买单追踪器和虚拟账本占资，防止幽灵占资残留
         if hasattr(self, '_active_buys'):
             self._active_buys.clear()
+        if hasattr(self, '_buffered_rejected_retries'):
+            self._buffered_rejected_retries.clear()
         self._virtual_spent_cash = 0.0
 
         try:
