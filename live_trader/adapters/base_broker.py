@@ -525,6 +525,11 @@ class BaseLiveBroker(ABC):
     def on_order_status(self, proxy: BaseOrderProxy):
         """由 Engine 回调，自动维护在途单状态与降级重试"""
         oid = proxy.id
+        # 禁止在持锁区访问柜台 API（get_pending_orders 可能阻塞），
+        # 先在锁外探测一次“原单是否仍在途”。
+        pending_probe_for_rejected = None
+        if proxy.is_buy() and proxy.is_rejected():
+            pending_probe_for_rejected = self._is_order_still_pending(oid)
 
         # 整个回调必须排队，防止抢占主线程刚发出的订单
         with self._ledger_lock:
@@ -591,7 +596,7 @@ class BaseLiveBroker(ABC):
 
                                 if new_shares > 0:
                                     # 柜台订单仍在途时，先缓冲，等待 Cancelled/终态后再重试，避免“旧单+新单”叠加占资。
-                                    if self._is_order_still_pending(oid):
+                                    if pending_probe_for_rejected:
                                         key = str(oid)
                                         if key not in self._buffered_rejected_retries:
                                             self._buffered_rejected_retries[key] = {
@@ -623,6 +628,14 @@ class BaseLiveBroker(ABC):
                                             print(f"❌ [Broker] 降级发单同步失败，资金已回退。")
                                 else:
                                     print(f"❌ [Broker] 降级终止: {data._name} 数量已降至 0。")
+
+                # 自愈兜底:
+                # 某些柜台(如 IB)可能只回 Inactive(Rejected)，不会再回 Cancelled。
+                # 只要原单已不在途，就立刻释放该 oid 对应的缓冲重试，避免卡死为纯现金。
+                key = str(oid)
+                if pending_probe_for_rejected is False and key in self._buffered_rejected_retries:
+                    print(f"[Broker] ♻️ 检测到原单 {oid} 已离开在途队列，触发缓冲重试自愈。")
+                    self._submit_buffered_rejected_retry(oid)
                 return
 
             # ==========================================
@@ -664,13 +677,50 @@ class BaseLiveBroker(ABC):
         print(f"[Broker] 资金回笼，重试 {len(self._deferred_orders)} 个延迟单...")
         retry_list = self._deferred_orders[:]
         self._deferred_orders.clear()
+        failed_items = []
 
         # 这里的 item 结构现在是通用的 {'func': func, 'kwargs': kwargs}
         for item in retry_list:
             func = item.get('func')
             kwargs = item.get('kwargs', {})
             if func:
-                func(**kwargs)
+                try:
+                    func(**kwargs)
+                except Exception as e:
+                    print(f"[Broker] ⚠️ 延迟单执行失败，已回队列等待下次重试: {e}")
+                    failed_items.append(item)
+
+        # 红队修复：单笔失败不应丢弃整批延迟单
+        if failed_items:
+            self._deferred_orders.extend(failed_items)
+
+    def reconcile_buffered_retries(self, max_checks=3):
+        """
+        轻量自愈：主动扫描拒单缓冲队列。
+        只要原单已离开在途列表，就释放对应的降级重试。
+        """
+        buffered = getattr(self, '_buffered_rejected_retries', None)
+        if not buffered:
+            return 0
+
+        try:
+            limit = max(1, int(max_checks))
+        except Exception:
+            limit = 3
+
+        released = 0
+        with self._ledger_lock:
+            candidates = list(buffered.keys())[:limit]
+
+        for oid in candidates:
+            if self._is_order_still_pending(oid):
+                continue
+            with self._ledger_lock:
+                if str(oid) in self._buffered_rejected_retries:
+                    print(f"[Broker] ♻️ 周期自愈触发缓冲重试: 原单 {oid} 已离场。")
+                    self._submit_buffered_rejected_retry(oid)
+                    released += 1
+        return released
 
     def _add_deferred(self, func, kwargs):        # 捕获闭包参数
         self._deferred_orders.append({

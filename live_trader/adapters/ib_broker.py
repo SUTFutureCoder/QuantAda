@@ -839,6 +839,13 @@ class IBBrokerAdapter(BaseLiveBroker):
                     # 2. 执行策略
                     ctx.now = pd.Timestamp(now)
 
+                    # 运行时自愈：主动释放可执行的缓冲拒单重试，避免因回调丢失卡死。
+                    try:
+                        if hasattr(trader, 'broker') and hasattr(trader.broker, 'reconcile_buffered_retries'):
+                            trader.broker.reconcile_buffered_retries(max_checks=3)
+                    except Exception as e:
+                        print(f"[System Warning] reconcile_buffered_retries failed: {e}")
+
 
                     # (B) 调度检查逻辑
                     if parsed_daily_schedule:

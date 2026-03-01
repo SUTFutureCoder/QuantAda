@@ -223,6 +223,96 @@ def test_rejected_buy_waits_for_cancel_before_retry(monkeypatch):
     assert broker.submitted_orders[1]["volume"] == 27, "重试应基于拒单后可用资金重算到 27 股"
 
 
+def test_rejected_buy_retry_self_heal_without_cancel_callback(monkeypatch):
+    """
+    IB 风格回调兜底:
+    若拒单后原单从在途列表消失，但没有 Canceled 回调，重复 Rejected 回调也应触发缓冲重试。
+    """
+    monkeypatch.setattr(config, "LOT_SIZE", 1)
+
+    broker = MockBroker(initial_cash=10000.0)
+    data = _make_data()
+
+    first_proxy = broker.order_target_value(data, target=290)  # 29 股
+    assert first_proxy is not None, "首笔买单应提交成功"
+    assert broker.submitted_orders[0]["volume"] == 29, "前置条件失败: 首笔应为 29 股"
+
+    # 1) 首次拒单时，原单仍在途 -> 进入缓冲，不立即重试
+    broker.mock_cash = 280.0
+    broker.submitted_orders[0]["status"] = "Submitted"
+    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
+
+    assert len(broker.submitted_orders) == 1, "首次拒单且原单在途时，不应立即提交重试单"
+    assert "ORDER_1" in broker._buffered_rejected_retries, "拒单重试应被缓冲等待原单离场"
+
+    # 2) 原单离开在途列表，但没有 Canceled 回调，仅再次收到 Rejected 回调
+    broker.submitted_orders[0]["status"] = "Inactive"
+    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
+
+    assert "ORDER_1" not in broker._buffered_rejected_retries, "原单离场后应自动释放缓冲重试"
+    assert len(broker.submitted_orders) == 2, "缺少 Canceled 回调时也应自愈触发重试"
+    assert broker.submitted_orders[1]["side"] == "BUY", "自愈重试方向应为 BUY"
+    assert broker.submitted_orders[1]["volume"] == 27, "自愈重试应按可用资金重算到 27 股"
+
+
+def test_rejected_buy_pending_probe_not_called_under_ledger_lock(monkeypatch):
+    """
+    红队回归:
+    拒单路径探测在途状态时，不应在 _ledger_lock 持有期间访问 get_pending_orders。
+    """
+    monkeypatch.setattr(config, "LOT_SIZE", 1)
+
+    class LockAwareBroker(MockBroker):
+        def __init__(self, initial_cash):
+            super().__init__(initial_cash)
+            self.pending_called_under_lock = False
+
+        def get_pending_orders(self):
+            is_owned = getattr(self._ledger_lock, "_is_owned", None)
+            if callable(is_owned) and is_owned():
+                self.pending_called_under_lock = True
+            return super().get_pending_orders()
+
+    broker = LockAwareBroker(initial_cash=10000.0)
+    if not callable(getattr(broker._ledger_lock, "_is_owned", None)):
+        pytest.skip("Current Python runtime does not expose RLock._is_owned().")
+
+    data = _make_data()
+    first_proxy = broker.order_target_value(data, target=290)  # 29 股
+    assert first_proxy is not None, "首笔买单应提交成功"
+
+    broker.mock_cash = 280.0
+    broker.submitted_orders[0]["status"] = "Submitted"  # 模拟原单仍在途
+    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
+
+    assert not broker.pending_called_under_lock, "检测到在持锁期间访问 get_pending_orders，存在卡死风险"
+    assert "ORDER_1" in broker._buffered_rejected_retries, "原单在途时仍应进入缓冲重试"
+
+
+def test_process_deferred_orders_keeps_failed_items():
+    """
+    红队回归:
+    延迟队列中单笔执行失败，不应导致整批任务丢失。
+    """
+    broker = MockBroker(initial_cash=10000.0)
+    calls = []
+
+    def bad_func(**kwargs):
+        calls.append("bad")
+        raise RuntimeError("boom")
+
+    def ok_func(**kwargs):
+        calls.append("ok")
+
+    broker._add_deferred(bad_func, {})
+    broker._add_deferred(ok_func, {})
+    broker.process_deferred_orders()
+
+    assert calls == ["bad", "ok"], "延迟队列执行顺序异常"
+    assert len(broker._deferred_orders) == 1, "单笔失败后应只回队列失败项"
+    assert broker._deferred_orders[0]["func"] is bad_func, "回队列项应为失败任务本身"
+
+
 def test_stale_state_reset_cross_day():
     """
     跨日推进时，清理陈旧状态:

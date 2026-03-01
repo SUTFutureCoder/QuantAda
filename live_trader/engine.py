@@ -256,8 +256,42 @@ class LiveTrader:
                         )
                     return
 
-            # 1. 检查策略是否有挂单
+            # 1. 先做一次轻量自愈：释放可执行的缓冲重试
+            if hasattr(self.broker, 'reconcile_buffered_retries'):
+                try:
+                    self.broker.reconcile_buffered_retries(max_checks=3)
+                except Exception as e:
+                    print(f"[Engine Warning] reconcile_buffered_retries failed: {e}")
+
+            # 2. 执行风控检查（前置，避免被 pending-order gate 吞掉）
+            if self.risk_control and self._check_risk_controls():
+                print("[Engine] 🛡️ 发现风控动作。底层已自动物理上锁，策略流水线继续向下执行...")
+
+            # 3. 检查策略是否有挂单
             strategy_order = getattr(self.strategy, 'order', None)
+
+            # 若策略层残留了“非虚拟挂单”，但柜台和 broker 内部都无在途状态，
+            # 视为僵尸单并主动清理，防止无人值守时永久锁死。
+            if strategy_order and getattr(strategy_order, 'id', None) != "DEFERRED_VIRTUAL_ID":
+                has_real_pending = True
+                if hasattr(self.broker, 'get_pending_orders'):
+                    try:
+                        has_real_pending = bool(self.broker.get_pending_orders())
+                    except Exception:
+                        has_real_pending = True
+
+                has_internal_pending = bool(
+                    getattr(self.broker, '_deferred_orders', [])
+                    or getattr(self.broker, '_pending_sells', set())
+                    or getattr(self.broker, '_active_buys', {})
+                    or getattr(self.broker, '_buffered_rejected_retries', {})
+                )
+
+                if (not has_real_pending) and (not has_internal_pending):
+                    stale_oid = getattr(strategy_order, 'id', 'UNKNOWN')
+                    print(f"[Engine Recovery] Stale strategy.order detected ({stale_oid}). Auto-clearing lock.")
+                    self.strategy.order = None
+                    strategy_order = None
 
             # 如果策略持有“虚拟延迟单”，但 Broker 的延迟队列已经被清空
             # 需要引入“宽限期”（Grace Period），防止交易所回调慢于本地队列清理导致重复下单 (Double Spend)
@@ -298,14 +332,10 @@ class LiveTrader:
                 print("--- LiveTrader Run Finished (Pending Order) ---")
                 return
 
-            # 2. 执行风控检查
-            if self.risk_control and self._check_risk_controls():
-                print("[Engine] 🛡️ 发现风控动作。底层已自动物理上锁，策略流水线继续向下执行...")
-
-            # 3. 执行策略的 'next'
+            # 4. 执行策略的 'next'
             self.strategy.next()
 
-            # 4. 通知策略的新订单
+            # 5. 通知策略的新订单
             strategy_order = getattr(self.strategy, 'order', None)  # 重新获取，策略可能已创建新订单
             if strategy_order:
                 print("[Engine] New order created by strategy. Notifying...")
@@ -890,7 +920,11 @@ def on_order_status_callback(context, raw_order):
             # 这样即使是代码其他地方写的 Bug 导致状态脏了，也能在下一次心跳前恢复
             try:
                 if hasattr(context, 'strategy_instance'):
-                    context.strategy_instance.broker.force_reset_state()
+                    strategy_instance = context.strategy_instance
+                    strategy_instance.broker.force_reset_state()
+                    if hasattr(strategy_instance, 'strategy') and getattr(strategy_instance.strategy, 'order', None):
+                        strategy_instance.strategy.order = None
+                        print("[Engine Callback Recovery] Cleared stale strategy.order after force reset.")
             except:
                 # 不抛出异常，让程序继续运行
                 # 这样下一个 Bar 到来时，Broker 会有机会再次自我修正
