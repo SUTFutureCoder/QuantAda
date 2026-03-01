@@ -211,11 +211,6 @@ class LiveTrader:
     def run(self, context):
         print(f"--- LiveTrader Running at {context.now.strftime('%Y-%m-%d %H:%M:%S')} ---")
         self.broker.set_datetime(context.now)
-        if hasattr(self.broker, 'self_heal'):
-            try:
-                self.broker.self_heal(reason="engine_run")
-            except Exception as e:
-                print(f"[Engine] Warning: broker self_heal failed before strategy run: {e}")
 
         # 顶层异常捕获，防止策略因单次错误而崩溃
         try:
@@ -230,9 +225,6 @@ class LiveTrader:
 
                 # 刷新质量门控:
                 # - 只要有任一标的刷新失败，直接跳过本轮，避免缺失数据触发错误调仓。
-                # AGENT_NOTE (Intentional Fast-Fail):
-                # 这是有意策略而非缺陷。多市场实盘场景下，宁可整轮跳过，也不接受“部分标的成功、部分标的失败”
-                # 的不完整输入来继续执行交易逻辑，防止组合层面出现数据口径撕裂。
                 if total_feeds > 0 and failed_feeds > 0:
                     warn_msg = (
                         f"[Engine Error] Live data refresh incomplete: "
@@ -247,7 +239,7 @@ class LiveTrader:
                             ),
                             level='ERROR'
                         )
-                    return True
+                    return
 
             # 初始化或临时网络故障下，可能出现 datas 为空。
             # 此时禁止继续执行策略，先尝试自愈拉数，避免“空仓/无目标”的误导性计划。
@@ -262,31 +254,41 @@ class LiveTrader:
                         self.alarm_manager.push_text(
                             "实盘跳过: 当前无可用数据源（已尝试恢复）。请检查选股器返回、IB数据权限或网络状态。"
                         )
-                    return True
+                    return
 
             # 1. 检查策略是否有挂单
             strategy_order = getattr(self.strategy, 'order', None)
 
-            # 如果策略持有“虚拟延迟单”，优先依赖 Broker 公共状态接口做主动解锁。
+            # 如果策略持有“虚拟延迟单”，但 Broker 的延迟队列已经被清空
+            # 需要引入“宽限期”（Grace Period），防止交易所回调慢于本地队列清理导致重复下单 (Double Spend)
             if strategy_order and getattr(strategy_order, 'id', None) == "DEFERRED_VIRTUAL_ID":
-                has_deferred = True
-                if hasattr(self.broker, 'has_deferred_orders'):
-                    try:
-                        has_deferred = bool(self.broker.has_deferred_orders())
-                    except Exception:
-                        has_deferred = True
+                deferred_queue = getattr(self.broker, '_deferred_orders', [])
+                if len(deferred_queue) == 0:
+                    import time
+                    current_time = time.time()
 
-                has_backlog = has_deferred
-                if hasattr(self.broker, 'has_runtime_backlog'):
-                    try:
-                        has_backlog = bool(self.broker.has_runtime_backlog())
-                    except Exception:
-                        has_backlog = has_deferred
+                    # 1. 如果这是首次发现队列为空，打上时间戳并开始等待
+                    if not hasattr(self, '_deferred_empty_time'):
+                        self._deferred_empty_time = current_time
+                        print("[Engine] ⏳ 内部延迟队列已排空。正在等待柜台真实订单回调 (进入 5 秒宽限期)...")
+                        # 强行返回，继续保持策略锁定，给网络回调一点时间
+                        return
 
-                if not has_backlog:
-                    print("[Engine] Deferred placeholder resolved by broker state. Clearing stale strategy.order.")
-                    self.strategy.order = None
-                    strategy_order = None
+                    # 2. 检查宽限期是否超时 (例如设定为 5.0 秒，可根据券商网络状况调整)
+                    grace_period = 5.0
+                    if current_time - self._deferred_empty_time > grace_period:
+                        print(f"[Engine] ⚠️ 宽限期 ({grace_period}s) 结束，未收到柜台回调。确认为僵尸单，强制复位状态！")
+                        self.strategy.order = None
+                        strategy_order = None
+                        delattr(self, '_deferred_empty_time')  # 清除计时器
+                    else:
+                        # 还在宽限期内，继续静默等待
+                        print(f"[Engine] ⏳ 宽限期等待中... (已等待 {current_time - self._deferred_empty_time:.1f}s)")
+                        return
+                else:
+                    # 防御性逻辑：如果队列里又有了新的延迟单，重置并清除可能的倒计时
+                    if hasattr(self, '_deferred_empty_time'):
+                        delattr(self, '_deferred_empty_time')
 
             if strategy_order:
                 print("[Engine] Strategy has a pending order. Notifying and skipping logic.")
@@ -294,36 +296,11 @@ class LiveTrader:
                     self.risk_control.notify_order(strategy_order)
                 self.strategy.notify_order(strategy_order)
                 print("--- LiveTrader Run Finished (Pending Order) ---")
-                return True
+                return
 
             # 2. 执行风控检查
             if self.risk_control and self._check_risk_controls():
                 print("[Engine] 🛡️ 发现风控动作。底层已自动物理上锁，策略流水线继续向下执行...")
-
-            # 2.5 资金输入健康闸门（fast-fail）
-            if hasattr(self.broker, 'pre_strategy_check'):
-                try:
-                    precheck_ok = bool(self.broker.pre_strategy_check())
-                except Exception as e:
-                    precheck_ok = False
-                    print(f"[Engine Safety] pre_strategy_check failed: {e}")
-                if not precheck_ok:
-                    reason = ""
-                    if hasattr(self.broker, 'get_cash_degraded_reason'):
-                        try:
-                            reason = self.broker.get_cash_degraded_reason()
-                        except Exception:
-                            reason = ""
-                    msg = "[Engine Safety] Skip strategy.next due to degraded cash input."
-                    if reason:
-                        msg = f"{msg} reason={reason}"
-                    print(msg)
-                    if hasattr(self, 'alarm_manager'):
-                        self.alarm_manager.push_text(
-                            "实盘跳过: 可交易资金输入异常，已进入 fast-fail 保护。",
-                            level='WARNING'
-                        )
-                    return True
 
             # 3. 执行策略的 'next'
             self.strategy.next()
@@ -373,7 +350,6 @@ class LiveTrader:
         if self.broker.is_live:
             print(
                 f"[Engine] ⏳ 实盘引擎保持运行中... 预计下一个 K线/调度时间约为: {next_expected_str} (以实际行情或定时任务时区为准)")
-        return True
 
     def notify_order(self, order):
         """
@@ -623,10 +599,6 @@ class LiveTrader:
         # 1. 初始化风控订单跟踪字典 (如果尚未存在)
         if not hasattr(self, '_pending_risk_orders'):
             self._pending_risk_orders = {}
-        if not hasattr(self, '_risk_pending_empty_snapshots'):
-            self._risk_pending_empty_snapshots = {}
-        if not hasattr(self, '_pending_risk_meta'):
-            self._pending_risk_meta = {}
 
         for data_feed in self.broker.datas:
             data_name = data_feed._name
@@ -640,8 +612,6 @@ class LiveTrader:
                 if data_name in self._pending_risk_orders:
                     self.broker.log(f"[Risk] Position is closed for {data_name}. Clearing pending risk status.")
                     del self._pending_risk_orders[data_name]
-                self._risk_pending_empty_snapshots.pop(data_name, None)
-                self._pending_risk_meta.pop(data_name, None)
 
                 # 仓位已清零，风控解除，解锁该标的，允许策略重新考察它
                 if hasattr(self.broker, 'unlock_for_risk'):
@@ -667,8 +637,6 @@ class LiveTrader:
                     # 这里先移除追踪，允许逻辑继续
                     self.broker.log(f"[Risk] Exit order for {data_name} reported Completed.")
                     del self._pending_risk_orders[data_name]
-                    self._risk_pending_empty_snapshots.pop(data_name, None)
-                    self._pending_risk_meta.pop(data_name, None)
                     # 不 return，允许本次循环继续检查（双重保险）
 
                 elif pending_order.is_rejected() or pending_order.is_canceled():
@@ -678,108 +646,13 @@ class LiveTrader:
                     self.broker.log(
                         f"[Risk] Exit order for {data_name} failed (Rejected/Canceled). Resetting to retry.")
                     del self._pending_risk_orders[data_name]
-                    self._risk_pending_empty_snapshots.pop(data_name, None)
-                    self._pending_risk_meta.pop(data_name, None)
 
                 elif pending_order.is_pending() or pending_order.is_accepted():
                     # 关键点：订单正在交易所排队或处理中。
-                    # 在 schedule/回调缺失场景下，主动询问柜台在途状态，避免永远卡死。
-                    broker_pending = None
-                    if hasattr(self.broker, 'has_pending_order'):
-                        try:
-                            broker_pending = self.broker.has_pending_order(symbol=data_name, side='SELL')
-                        except Exception:
-                            broker_pending = None
-
-                    if broker_pending is True:
-                        # 双证据原则（证据1）：柜台明确仍在途 -> 继续等待。
-                        self._risk_pending_empty_snapshots.pop(data_name, None)
-                        risk_meta = self._pending_risk_meta.setdefault(data_name, {})
-                        created_at = float(risk_meta.get('created_at', time.time()))
-                        initial_size = float(risk_meta.get('initial_size', position.size))
-                        current_size = float(position.size)
-                        last_seen_size = float(risk_meta.get('last_seen_size', initial_size))
-                        if current_size < last_seen_size - 1e-9:
-                            risk_meta['last_progress_at'] = time.time()
-                        risk_meta['created_at'] = created_at
-                        risk_meta['initial_size'] = initial_size
-                        risk_meta['last_seen_size'] = min(last_seen_size, current_size)
-                        self.broker.log(f"[Risk] Pending exit order for {data_name} is active. Waiting for execution...")
-                        triggered_action = True  # 标记为 True，告诉 engine 跳过 strategy.next()
-                        continue
-
-                    if broker_pending is None:
-                        # 快照不可用时保持保守阻断，不做“缺失计数释放”，避免重复平仓。
-                        self._risk_pending_empty_snapshots.pop(data_name, None)
-                        self.broker.log(
-                            f"[Risk] Pending exit order for {data_name} snapshot unavailable. "
-                            f"Keeping blocked and waiting..."
-                        )
-                        triggered_action = True
-                        continue
-
-                    # 双证据原则（证据2）：即使快照缺失，也要确认“无执行进展且等待足够久”才释放。
-                    # 这是有意约束：夜间无人值守时，宁可慢一拍，也不能因假空快照触发重复平仓。
-                    risk_meta = self._pending_risk_meta.setdefault(data_name, {})
-                    created_at = float(risk_meta.get('created_at', time.time()))
-                    initial_size = float(risk_meta.get('initial_size', position.size))
-                    current_size = float(position.size)
-                    last_seen_size = float(risk_meta.get('last_seen_size', initial_size))
-                    if current_size < last_seen_size - 1e-9:
-                        # 仅在“本轮新增成交”时刷新进展时间，避免历史部成把状态永久锁死。
-                        risk_meta['last_progress_at'] = time.time()
-                    risk_meta['last_seen_size'] = min(last_seen_size, current_size)
-
-                    has_progress = current_size < initial_size - 1e-9
-                    last_progress_at = float(risk_meta.get('last_progress_at', created_at))
-                    min_age_cfg = getattr(config, 'RISK_PENDING_MIN_AGE_SECONDS', 20.0)
-                    try:
-                        min_age_seconds = float(min_age_cfg)
-                    except Exception:
-                        min_age_seconds = 20.0
-                    min_age_seconds = max(0.0, min_age_seconds)
-                    waited = max(0.0, time.time() - created_at)
-                    progress_idle = max(0.0, time.time() - last_progress_at)
-
-                    if has_progress and progress_idle < min_age_seconds:
-                        self._risk_pending_empty_snapshots.pop(data_name, None)
-                        self.broker.log(
-                            f"[Risk] Exit order for {data_name} shows fill progress "
-                            f"({initial_size:.6f} -> {current_size:.6f}). "
-                            f"Recent progress {progress_idle:.1f}s ago, waiting..."
-                        )
-                        triggered_action = True
-                        continue
-
-                    if waited < min_age_seconds:
-                        self._risk_pending_empty_snapshots.pop(data_name, None)
-                        self.broker.log(
-                            f"[Risk] Pending exit order for {data_name} missing from snapshot, "
-                            f"but age {waited:.1f}s < {min_age_seconds:.1f}s. Waiting..."
-                        )
-                        triggered_action = True
-                        continue
-
-                    empty_count = int(self._risk_pending_empty_snapshots.get(data_name, 0)) + 1
-                    self._risk_pending_empty_snapshots[data_name] = empty_count
-                    clear_threshold = int(getattr(config, 'RISK_PENDING_CLEAR_EMPTY_SNAPSHOTS', 2) or 2)
-                    clear_threshold = max(1, clear_threshold)
-
-                    if empty_count < clear_threshold:
-                        self.broker.log(
-                            f"[Risk] Pending exit order for {data_name} missing from broker snapshot "
-                            f"({empty_count}/{clear_threshold}), waiting..."
-                        )
-                        triggered_action = True
-                        continue
-
-                    self.broker.log(
-                        f"[Risk] Pending exit order for {data_name} not found on broker snapshot "
-                        f"for {empty_count} checks. Resetting to retry."
-                    )
-                    del self._pending_risk_orders[data_name]
-                    self._risk_pending_empty_snapshots.pop(data_name, None)
-                    self._pending_risk_meta.pop(data_name, None)
+                    # 此时绝对不能再次发送订单，也不能清除状态。
+                    self.broker.log(f"[Risk] Pending exit order for {data_name} is active. Waiting for execution...")
+                    triggered_action = True  # 标记为 True，告诉 engine 跳过 strategy.next()
+                    continue
 
                 else:
                     # 其他未知状态，保守起见视为 Pending
@@ -844,12 +717,6 @@ class LiveTrader:
                     if order:
                         # 记录订单对象，而不是依赖价格
                         self._pending_risk_orders[data_name] = order
-                        self._risk_pending_empty_snapshots.pop(data_name, None)
-                        self._pending_risk_meta[data_name] = {
-                            'created_at': time.time(),
-                            'initial_size': float(position.size),
-                            'last_seen_size': float(position.size),
-                        }
 
                         triggered_action = True
 
@@ -906,36 +773,13 @@ def on_order_status_callback(context, raw_order):
             # 不再 import GmOrderProxy，而是让 broker 自己去“装箱”
             # 也不需要在 engine 里去遍历 datas 找 matched_data，这也应该是 broker 的责任
             order_proxy = broker.convert_order_proxy(raw_order)
-            order_id = str(getattr(order_proxy, 'id', '') or '')
-            symbol_name = "Unknown"
-            try:
-                if getattr(order_proxy, 'data', None) is not None:
-                    symbol_name = getattr(order_proxy.data, '_name', None) or symbol_name
-            except Exception:
-                pass
-            if symbol_name == "Unknown":
-                try:
-                    if hasattr(order_proxy, 'trade') and hasattr(order_proxy.trade, 'contract'):
-                        symbol_name = getattr(order_proxy.trade.contract, 'symbol', None) or symbol_name
-                except Exception:
-                    pass
-            if symbol_name == "Unknown":
-                try:
-                    if hasattr(order_proxy, 'platform_order'):
-                        symbol_name = getattr(order_proxy.platform_order, 'symbol', None) or symbol_name
-                except Exception:
-                    pass
 
             # 2. 喂给 Broker，让它去维护在途单
             if hasattr(broker, 'on_order_status'):
                 broker.on_order_status(order_proxy)
-            if hasattr(broker, 'self_heal'):
-                try:
-                    broker.self_heal(reason=f"order_callback:{symbol_name}")
-                except Exception as e:
-                    print(f"[Engine Callback] Warning: broker self_heal failed: {e}")
 
             current_status = getattr(order_proxy, 'status', 'Unknown')
+            order_id = str(getattr(order_proxy, 'id', '') or '')
             try:
                 exec_size = float(getattr(order_proxy.executed, 'size', 0) or 0.0)
             except Exception:
@@ -952,7 +796,7 @@ def on_order_status_callback(context, raw_order):
             dedupe_cache = strategy._order_callback_dedupe
             event_signature = (current_status, round(exec_size, 8), round(exec_price, 8))
             if dedupe_cache.get(dedupe_key) == event_signature:
-                print(f"[Engine Callback] Duplicate status ignored: {symbol_name} {current_status}")
+                print(f"[Engine Callback] Duplicate status ignored: {current_status} ({dedupe_key})")
                 return
             dedupe_cache[dedupe_key] = event_signature
             if len(dedupe_cache) > 5000:
@@ -1017,22 +861,19 @@ def on_order_status_callback(context, raw_order):
             if order_proxy.is_sell() and order_proxy.executed.size > 0:
                 # 再次确认不是撤单导致的 size>0 (虽然撤单通常 size=0，但为了严谨)
                 if not order_proxy.is_canceled() and not order_proxy.is_rejected():
-                    if hasattr(broker, 'on_sell_filled'):
-                        broker.on_sell_filled()
-                    else:
-                        print("[Engine] Sell filled. Waiting for cash settlement (1s)...")
+                    print("[Engine] Sell filled. Waiting for cash settlement (1s)...")
 
-                        if hasattr(broker, 'sync_balance'):
-                            broker.sync_balance()
-                            print(f"[Debug] Cash after sync: {broker.get_cash():.2f}")
+                    if hasattr(broker, 'sync_balance'):
+                        broker.sync_balance()
+                        print(f"[Debug] Cash after sync: {broker.get_cash():.2f}")
 
-                        if hasattr(broker, 'process_deferred_orders'):
-                            try:
-                                broker.process_deferred_orders()
-                            except Exception as e:
-                                print(f"[Error] Failed to process deferred orders: {e}")
-                                import traceback
-                                traceback.print_exc()
+                    if hasattr(broker, 'process_deferred_orders'):
+                        try:
+                            broker.process_deferred_orders()
+                        except Exception as e:
+                            print(f"[Error] Failed to process deferred orders: {e}")
+                            import traceback
+                            traceback.print_exc()
 
         except Exception as e:
             # 记录所有未预期的异常，并确保主循环不退出即可。
@@ -1140,3 +981,4 @@ def launch_live(broker_name: str, conn_name: str, strategy_path: str, params: di
         AlarmManager().push_exception("Launcher Crash", str(e))
         traceback.print_exc()
         sys.exit(1)
+

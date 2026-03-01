@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import math
+import time
 
 import pandas as pd
 from ib_insync import IB, Stock, MarketOrder, Trade, Forex, Contract
@@ -103,6 +104,9 @@ class IBBrokerAdapter(BaseLiveBroker):
         self._last_valid_fx_rates = {}
         # 汇率历史查询失败冷却，防止单次故障导致每次 get_cash 都阻塞。
         self._fx_rate_retry_not_before = {}
+        # 策略执行前资金输入健康检查节流
+        self._last_pre_strategy_check_ts = 0.0
+        self._last_pre_strategy_check_ok = True
         super().__init__(context, cash_override, commission_override, slippage_override)
 
     def _fetch_real_cash(self) -> float:
@@ -153,8 +157,9 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 2. 盘点所有在途买单，计算尚未物理扣款的“虚拟冻结资金”
         virtual_frozen_cash = 0.0
         covered_local_order_ids = set()
+        pending_snapshot_unavailable = False
         try:
-            pending_orders = self.get_pending_orders()
+            pending_orders = self._fetch_pending_orders_with_retry(reason="ib_get_cash")
             for po in pending_orders:
                 if po['direction'] == 'BUY':
                     poid = str(po.get('id', '')).strip()
@@ -187,6 +192,7 @@ class IBBrokerAdapter(BaseLiveBroker):
                             covered_local_order_ids.add(poid)
 
         except Exception as e:
+            pending_snapshot_unavailable = True
             print(f"[IBBroker] 计算买单虚拟冻结资金时发生异常: {e}")
 
         # 3. 与本地占资做去重合并:
@@ -206,11 +212,53 @@ class IBBrokerAdapter(BaseLiveBroker):
                 overlap_cost += cost
 
         local_virtual_total = max(getattr(self, '_virtual_spent_cash', 0.0), active_buys_total)
+        if pending_snapshot_unavailable:
+            self.mark_cash_degraded(reason="IB pending snapshot unavailable in get_cash")
+        else:
+            self.clear_cash_degraded()
+        if pending_snapshot_unavailable and local_virtual_total <= 0:
+            # 保守语义：当柜台在途快照不可用且本地无任何在途记忆时，
+            # 避免误判“可用资金充足”而新增敞口，本轮临时冻结可用资金。
+            print("[IBBroker] Pending snapshot unavailable and no local buy tracker. Freezing spendable cash this cycle.")
+            return 0.0
         local_virtual_extra = max(0.0, local_virtual_total - overlap_cost)
 
         reserved_cash = virtual_frozen_cash + local_virtual_extra
         real_available_cash = raw_cash - reserved_cash
         return max(0.0, real_available_cash)
+
+    def pre_strategy_check(self):
+        """
+        IB 专用 fast-fail 预检查：
+        策略执行前主动验证在途快照可用性，防止 get_cash 退化值污染调仓逻辑。
+        """
+        interval_cfg = getattr(config, 'IB_PRE_STRATEGY_CHECK_MIN_INTERVAL_SECONDS', 2.0)
+        try:
+            min_interval = float(interval_cfg)
+        except Exception:
+            min_interval = 2.0
+        min_interval = max(0.0, min_interval)
+
+        now_ts = time.time()
+        with self._ledger_lock:
+            last_check = float(getattr(self, '_last_pre_strategy_check_ts', 0.0) or 0.0)
+            if now_ts - last_check < min_interval:
+                if self.is_cash_degraded():
+                    return False
+                return bool(getattr(self, '_last_pre_strategy_check_ok', True))
+            self._last_pre_strategy_check_ts = now_ts
+
+        try:
+            self._fetch_pending_orders_with_retry(reason="ib_pre_strategy_check")
+            self.clear_cash_degraded()
+            ok = True
+        except Exception as e:
+            self.mark_cash_degraded(reason=f"IB pending snapshot unavailable before strategy run: {e}")
+            ok = False
+
+        with self._ledger_lock:
+            self._last_pre_strategy_check_ok = ok
+        return ok
 
     def getvalue(self):
         """
@@ -222,7 +270,7 @@ class IBBrokerAdapter(BaseLiveBroker):
     def get_pending_orders(self) -> list:
         """盈透：获取在途订单"""
         if not hasattr(self, 'ib') or not self.ib or not self.ib.isConnected():
-            return []
+            raise RuntimeError("IB pending order snapshot unavailable: connection is not ready")
 
         res = []
         try:
@@ -240,6 +288,7 @@ class IBBrokerAdapter(BaseLiveBroker):
                         })
         except Exception as e:
             print(f"[IBBroker] 获取在途订单失败: {e}")
+            raise RuntimeError(f"IB pending order snapshot unavailable: {e}") from e
         return res
 
     @staticmethod
@@ -838,6 +887,14 @@ class IBBrokerAdapter(BaseLiveBroker):
 
                     # 2. 执行策略
                     ctx.now = pd.Timestamp(now)
+
+                    # (A) 心跳自愈：不依赖告警、不依赖单一订单回调
+                    # 由 BaseLiveBroker 内部节流，正常情况下开销很小。
+                    if hasattr(trader, 'broker') and hasattr(trader.broker, 'self_heal'):
+                        try:
+                            trader.broker.self_heal(reason="ib_heartbeat")
+                        except Exception as heal_err:
+                            print(f"[System] Warning: broker self-heal failed on heartbeat: {heal_err}")
 
 
                     # (B) 调度检查逻辑

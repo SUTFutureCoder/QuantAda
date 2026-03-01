@@ -142,6 +142,7 @@ class GmBrokerAdapter(BaseLiveBroker):
             orders = get_unfinished_orders()
             for o in orders:
                 res.append({
+                    'id': getattr(o, 'cl_ord_id', None),
                     'symbol': o.symbol,
                     'direction': 'BUY' if o.side == OrderSide_Buy else 'SELL',
                     # 未成交数量 = 委托总数 - 已成交数
@@ -149,6 +150,7 @@ class GmBrokerAdapter(BaseLiveBroker):
                 })
         except Exception as e:
             print(f"[GmBroker] 获取在途订单失败: {e}")
+            raise RuntimeError(f"GM pending order snapshot unavailable: {e}") from e
         return res
 
     # 实盘引擎调用此方法设置当前时间时，我们将其转换为无时区的北京时间
@@ -445,11 +447,12 @@ class GmBrokerAdapter(BaseLiveBroker):
 
             def init(ctx):
                 print(f"[Phoenix] Initializing Strategy '{strategy_path}'...")
+                # 每次会话初始化都显式复位，防止旧 context 残留导致 on_bar 被长期短路。
+                ctx.use_schedule = False
                 engine_config = config.__dict__.copy()
                 engine_config['strategy_name'] = strategy_path
                 engine_config['params'] = params
                 engine_config['platform'] = 'gm'
-                ctx.use_schedule = False
 
                 # 将资金和费率头传到 LiveTrader 引擎
                 if kwargs.get('cash') is not None: engine_config['cash'] = initial_cash
@@ -492,7 +495,6 @@ class GmBrokerAdapter(BaseLiveBroker):
                             rule_type, rule_time = schedule_rule.split(':', 1)
                             print(f"[GmBroker] Schedule enabled (from config): {rule_type} @ {rule_time}")
                             print(f"            策略将在指定时间主动运行，忽略 on_bar 事件。")
-
                             schedule(schedule_func=trader.run, date_rule=rule_type, time_rule=rule_time)
                             ctx.use_schedule = True
                         else:
@@ -503,6 +505,15 @@ class GmBrokerAdapter(BaseLiveBroker):
 
             def on_bar(ctx, bars):
                 if getattr(ctx, 'use_schedule', False):
+                    # schedule 模式下虽然不执行策略，但仍需保活状态机自愈，
+                    # 避免“仅依赖订单回调”导致的缓冲卡死。
+                    try:
+                        if hasattr(ctx, 'strategy_instance') and getattr(ctx, 'strategy_instance'):
+                            broker = getattr(ctx.strategy_instance, 'broker', None)
+                            if broker and hasattr(broker, 'self_heal'):
+                                broker.self_heal(reason="gm_on_bar_schedule")
+                    except Exception as e:
+                        print(f"[GmBroker] Warning: self-heal failed in on_bar(schedule): {e}")
                     return
                 if hasattr(ctx, 'strategy_instance'):
                     ctx.strategy_instance.run(ctx)
@@ -604,6 +615,17 @@ class GmBrokerAdapter(BaseLiveBroker):
                     # 如果 gmi_poll 返回，说明连接断开或 shutdown 触发
                     while True:
                         gmi_poll()
+
+                        # 主动状态轮询自愈（与订单回调解耦）：
+                        # 即使 schedule 低频或回调异常，也能在交易时段内持续恢复。
+                        try:
+                            if hasattr(context, 'strategy_instance') and getattr(context, 'strategy_instance'):
+                                broker = getattr(context.strategy_instance, 'broker', None)
+                                if broker and hasattr(broker, 'self_heal'):
+                                    broker.self_heal(reason="gm_poll_heartbeat")
+                        except Exception as heal_err:
+                            print(f"[GmBroker] Warning: self-heal failed in event loop: {heal_err}")
+
                         # 稍微休眠，释放 CPU，同时检测外部中断
                         time.sleep(1)
 

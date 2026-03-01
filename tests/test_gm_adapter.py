@@ -253,3 +253,4 @@ def test_gm_secondary_downsize_updates_active_buy_and_virtual_ledger(monkeypatch
     assert broker._virtual_spent_cash == pytest.approx(expected_ledger), (
         "虚拟账本占资应基于真实受理数量计算。"
     )
+

@@ -186,6 +186,59 @@ def _force_lot_size(monkeypatch):
     monkeypatch.setattr(config, "LOT_SIZE", 100)
 
 
+def test_engine_fast_fails_when_pre_strategy_check_fails(monkeypatch):
+    """
+    fast-fail 闸门:
+    pre_strategy_check 失败时应跳过 strategy.next，但保留风控检查执行。
+    """
+    import live_trader.engine as engine_module
+
+    class PrecheckFailBroker(MockEngineBroker):
+        def pre_strategy_check(self):
+            self.mark_cash_degraded(reason="unit_test_precheck_failed", ttl_seconds=60.0)
+            return False
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (PrecheckFailBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 10, 34, 0))
+    engine.init(context)
+
+    class DummyRisk:
+        def __init__(self):
+            self.check_calls = 0
+
+        def check(self, data):
+            self.check_calls += 1
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    engine.risk_control = DummyRisk()
+    engine.run(context)
+
+    assert engine.risk_control.check_calls > 0, "fast-fail 跳过策略前仍应执行风控检查。"
+    assert engine.strategy.next_calls == 0, "pre_strategy_check 失败时必须跳过 strategy.next。"
+
+
 def test_full_day_engine_lifecycle(monkeypatch):
     """
     E2E Red Team Test:
@@ -511,6 +564,324 @@ def test_risk_pending_order_terminal_precedence(monkeypatch):
     )
 
 
+def test_risk_pending_order_released_when_missing_from_broker_snapshot(monkeypatch):
+    """
+    主动轮询兜底:
+    当风控待跟踪订单对象一直显示 pending，但柜台快照连续缺失该 SELL 在途单时，
+    引擎应自动解除卡死状态，允许下一轮重新发起风控平仓。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+    monkeypatch.setattr(config, "RISK_PENDING_CLEAR_EMPTY_SNAPSHOTS", 2, raising=False)
+    monkeypatch.setattr(config, "RISK_PENDING_MIN_AGE_SECONDS", 0.0, raising=False)
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 10, 30, 0))
+    engine.init(context)
+    engine.broker.set_datetime(context.now)
+
+    class DummyRisk:
+        def __init__(self):
+            self.exit_triggered = set()
+
+        def check(self, data):
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    class PendingOrder:
+        def is_pending(self):
+            return True
+
+        def is_accepted(self):
+            return True
+
+        def is_completed(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    engine.risk_control = DummyRisk()
+    symbol = engine.broker.datas[0]._name
+    engine._pending_risk_orders = {symbol: PendingOrder()}
+
+    # MockEngineBroker 默认无该 symbol 的 SELL 在途快照
+    triggered_first = engine._check_risk_controls()
+    assert triggered_first is True, "首次缺失快照时应继续阻断策略，避免误放开。"
+    assert symbol in engine._pending_risk_orders, "首次缺失快照时不应立即清理 pending 风控单。"
+
+    engine._check_risk_controls()
+    assert symbol not in engine._pending_risk_orders, "连续缺失快照后应清理卡死的 pending 风控单。"
+
+
+def test_risk_pending_order_kept_when_snapshot_unavailable(monkeypatch):
+    """
+    风控保守语义:
+    当 broker 在途快照不可用(None)时，pending 风控单应保持阻断等待，
+    不应进入“缺失计数释放”分支，避免重复平仓。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+    monkeypatch.setattr(config, "RISK_PENDING_CLEAR_EMPTY_SNAPSHOTS", 1, raising=False)
+    monkeypatch.setattr(config, "RISK_PENDING_MIN_AGE_SECONDS", 0.0, raising=False)
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 10, 31, 0))
+    engine.init(context)
+    engine.broker.set_datetime(context.now)
+
+    class DummyRisk:
+        def __init__(self):
+            self.exit_triggered = set()
+
+        def check(self, data):
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    class PendingOrder:
+        def is_pending(self):
+            return True
+
+        def is_accepted(self):
+            return True
+
+        def is_completed(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    engine.risk_control = DummyRisk()
+    symbol = engine.broker.datas[0]._name
+    engine._pending_risk_orders = {symbol: PendingOrder()}
+
+    # 模拟柜台快照不可用
+    engine.broker.has_pending_order = lambda symbol, side=None: None
+
+    triggered_first = engine._check_risk_controls()
+    triggered_second = engine._check_risk_controls()
+
+    assert triggered_first is True, "快照不可用时应保持阻断，防止策略继续下单。"
+    assert triggered_second is True, "快照不可用时应持续阻断，直到快照恢复。"
+    assert symbol in engine._pending_risk_orders, "快照不可用时不应释放 pending 风控单。"
+
+
+def test_risk_pending_order_released_when_partial_fill_stalled_and_snapshot_missing(monkeypatch):
+    """
+    风控解卡死:
+    若风控单曾发生部分成交，但之后长时间无新增进展且快照持续缺失在途，
+    应进入缺失计数释放分支，而不是永远停留在“有过进展”分支。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+    monkeypatch.setattr(config, "RISK_PENDING_CLEAR_EMPTY_SNAPSHOTS", 1, raising=False)
+    monkeypatch.setattr(config, "RISK_PENDING_MIN_AGE_SECONDS", 0.0, raising=False)
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 10, 32, 0))
+    engine.init(context)
+    engine.broker.set_datetime(context.now)
+
+    class DummyRisk:
+        def __init__(self):
+            self.exit_triggered = set()
+
+        def check(self, data):
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    class PendingOrder:
+        def is_pending(self):
+            return True
+
+        def is_accepted(self):
+            return True
+
+        def is_completed(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    engine.risk_control = DummyRisk()
+    symbol = engine.broker.datas[0]._name
+    old_ts = datetime(2026, 2, 17, 10, 0, 0).timestamp()
+    engine._pending_risk_orders = {symbol: PendingOrder()}
+    engine._pending_risk_meta = {
+        symbol: {
+            "created_at": old_ts,
+            "initial_size": 100.0,
+            "last_seen_size": 60.0,
+            "last_progress_at": old_ts,
+        }
+    }
+
+    class Pos:
+        size = 60.0
+
+    engine.broker.getposition = lambda _d: Pos()
+    engine.broker.has_pending_order = lambda symbol, side=None: False
+
+    engine._check_risk_controls()
+    assert symbol not in engine._pending_risk_orders, "部分成交停滞且快照缺失时应释放卡死风控单。"
+
+
+def test_risk_pending_order_keeps_waiting_when_progress_just_seen_on_broker(monkeypatch):
+    """
+    风控进展时间戳修复:
+    若柜台刚确认仍在途且仓位出现新进展，随后短暂快照缺失时不应立即释放 pending 风控单。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: DummyHeartbeatStrategy,
+    )
+    monkeypatch.setattr(config, "RISK_PENDING_CLEAR_EMPTY_SNAPSHOTS", 1, raising=False)
+    monkeypatch.setattr(config, "RISK_PENDING_MIN_AGE_SECONDS", 20.0, raising=False)
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 10, 33, 0))
+    engine.init(context)
+    engine.broker.set_datetime(context.now)
+
+    class DummyRisk:
+        def __init__(self):
+            self.exit_triggered = set()
+
+        def check(self, data):
+            return None
+
+        def notify_order(self, order):
+            pass
+
+    class PendingOrder:
+        def is_pending(self):
+            return True
+
+        def is_accepted(self):
+            return True
+
+        def is_completed(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    engine.risk_control = DummyRisk()
+    symbol = engine.broker.datas[0]._name
+    old_ts = datetime(2026, 2, 17, 10, 0, 0).timestamp()
+    engine._pending_risk_orders = {symbol: PendingOrder()}
+    engine._pending_risk_meta = {
+        symbol: {
+            "created_at": old_ts,
+            "initial_size": 100.0,
+            "last_seen_size": 100.0,
+        }
+    }
+
+    class Pos:
+        size = 60.0
+
+    engine.broker.getposition = lambda _d: Pos()
+
+    # 第一次: 柜台确认仍在途，同时观察到仓位从 100 -> 60 的新增进展
+    engine.broker.has_pending_order = lambda symbol, side=None: True
+    engine._check_risk_controls()
+    assert "last_progress_at" in engine._pending_risk_meta[symbol], "在途确认分支应记录最近进展时间。"
+
+    # 第二次: 快照短暂缺失在途，不应因为 created_at 很旧而立刻释放
+    engine.broker.has_pending_order = lambda symbol, side=None: False
+    engine._check_risk_controls()
+    assert symbol in engine._pending_risk_orders, "刚有进展时应继续等待，避免重复平仓。"
+
+
 def test_on_order_status_callback_sell_fill_triggers_balance_and_deferred(monkeypatch):
     """
     回调链路测试:
@@ -580,6 +951,75 @@ def test_on_order_status_callback_sell_fill_triggers_balance_and_deferred(monkey
     assert strategy.notify_calls == 1, "回调应通知策略 notify_order。"
     assert broker.sync_calls == 1, "卖单成交后应触发资金同步。"
     assert broker.deferred_calls == 1, "卖单成交后应触发延迟队列重放。"
+
+
+def test_on_order_status_callback_sell_fill_prefers_broker_hook(monkeypatch):
+    """
+    去耦回归:
+    若 Broker 提供 on_sell_filled 统一后处理入口，Engine 应优先调用该入口。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.status = "Filled"
+            self.data = SimpleNamespace(_name="SHSE.600000")
+            self.executed = SimpleNamespace(size=100, price=10.0, value=1000.0, comm=0.0)
+
+        def is_buy(self):
+            return False
+
+        def is_sell(self):
+            return True
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.proxy = DummyOrderProxy()
+            self.sell_filled_calls = 0
+            self.sync_calls = 0
+            self.deferred_calls = 0
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            pass
+
+        def on_sell_filled(self):
+            self.sell_filled_calls += 1
+
+        def sync_balance(self):
+            self.sync_calls += 1
+
+        def process_deferred_orders(self):
+            self.deferred_calls += 1
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def notify_order(self, order):
+            pass
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(
+        strategy_instance=strategy,
+        now=datetime(2026, 2, 17, 10, 6, 0)
+    )
+    raw_order = SimpleNamespace(statusMsg="filled")
+
+    engine_module.on_order_status_callback(context, raw_order)
+
+    assert broker.sell_filled_calls == 1, "存在 broker hook 时应调用 on_sell_filled。"
+    assert broker.sync_calls == 0, "存在 broker hook 时不应再走 engine 兜底 sync_balance。"
+    assert broker.deferred_calls == 0, "存在 broker hook 时不应再走 engine 兜底 deferred replay。"
 
 
 def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
