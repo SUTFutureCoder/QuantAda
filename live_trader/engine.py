@@ -337,23 +337,16 @@ class LiveTrader:
                         )
                     return
 
-            # 1. 先做一次轻量自愈：释放可执行的缓冲重试
-            if hasattr(self.broker, 'reconcile_buffered_retries'):
-                try:
-                    self.broker.reconcile_buffered_retries(max_checks=3)
-                except Exception as e:
-                    print(f"[Engine Warning] reconcile_buffered_retries failed: {e}")
-
-            # 2. 执行风控检查（前置，避免被 pending-order gate 吞掉）
+            # 1. 执行风控检查（前置，避免被 pending-order gate 吞掉）
             if self.risk_control and self._check_risk_controls():
                 print("[Engine] 🛡️ 发现风控动作。底层已自动物理上锁，策略流水线继续向下执行...")
 
-            # 3. 检查策略是否有挂单
+            # 2. 检查策略是否有挂单
             strategy_order = getattr(self.strategy, 'order', None)
 
-            # 若策略层残留了“非虚拟挂单”，但柜台和 broker 内部都无在途状态，
+            # 若策略层残留了挂单，但柜台和 broker 内部都无在途状态，
             # 视为僵尸单并主动清理，防止无人值守时永久锁死。
-            if strategy_order and getattr(strategy_order, 'id', None) != "DEFERRED_VIRTUAL_ID":
+            if strategy_order:
                 has_real_pending = True
                 if hasattr(self.broker, 'get_pending_orders'):
                     try:
@@ -362,10 +355,8 @@ class LiveTrader:
                         has_real_pending = True
 
                 has_internal_pending = bool(
-                    getattr(self.broker, '_deferred_orders', [])
-                    or getattr(self.broker, '_pending_sells', set())
+                    getattr(self.broker, '_pending_sells', set())
                     or getattr(self.broker, '_active_buys', {})
-                    or getattr(self.broker, '_buffered_rejected_retries', {})
                 )
 
                 if (not has_real_pending) and (not has_internal_pending):
@@ -373,37 +364,6 @@ class LiveTrader:
                     print(f"[Engine Recovery] Stale strategy.order detected ({stale_oid}). Auto-clearing lock.")
                     self.strategy.order = None
                     strategy_order = None
-
-            # 如果策略持有“虚拟延迟单”，但 Broker 的延迟队列已经被清空
-            # 需要引入“宽限期”（Grace Period），防止交易所回调慢于本地队列清理导致重复下单 (Double Spend)
-            if strategy_order and getattr(strategy_order, 'id', None) == "DEFERRED_VIRTUAL_ID":
-                deferred_queue = getattr(self.broker, '_deferred_orders', [])
-                if len(deferred_queue) == 0:
-                    import time
-                    current_time = time.time()
-
-                    # 1. 如果这是首次发现队列为空，打上时间戳并开始等待
-                    if not hasattr(self, '_deferred_empty_time'):
-                        self._deferred_empty_time = current_time
-                        print("[Engine] ⏳ 内部延迟队列已排空。正在等待柜台真实订单回调 (进入 5 秒宽限期)...")
-                        # 强行返回，继续保持策略锁定，给网络回调一点时间
-                        return
-
-                    # 2. 检查宽限期是否超时 (例如设定为 5.0 秒，可根据券商网络状况调整)
-                    grace_period = 5.0
-                    if current_time - self._deferred_empty_time > grace_period:
-                        print(f"[Engine] ⚠️ 宽限期 ({grace_period}s) 结束，未收到柜台回调。确认为僵尸单，强制复位状态！")
-                        self.strategy.order = None
-                        strategy_order = None
-                        delattr(self, '_deferred_empty_time')  # 清除计时器
-                    else:
-                        # 还在宽限期内，继续静默等待
-                        print(f"[Engine] ⏳ 宽限期等待中... (已等待 {current_time - self._deferred_empty_time:.1f}s)")
-                        return
-                else:
-                    # 防御性逻辑：如果队列里又有了新的延迟单，重置并清除可能的倒计时
-                    if hasattr(self, '_deferred_empty_time'):
-                        delattr(self, '_deferred_empty_time')
 
             if strategy_order:
                 print("[Engine] Strategy has a pending order. Notifying and skipping logic.")
@@ -413,10 +373,10 @@ class LiveTrader:
                 print("--- LiveTrader Run Finished (Pending Order) ---")
                 return
 
-            # 4. 执行策略的 'next'
+            # 3. 执行策略的 'next'
             self.strategy.next()
 
-            # 5. 通知策略的新订单
+            # 4. 通知策略的新订单
             strategy_order = getattr(self.strategy, 'order', None)  # 重新获取，策略可能已创建新订单
             if strategy_order:
                 print("[Engine] New order created by strategy. Notifying...")
@@ -1028,7 +988,8 @@ def on_order_status_callback(context, raw_order):
                 symbol = order_proxy.data._name if order_proxy.data else "Unknown"
                 alarm_manager.push_text(f"⚠️ 订单被拒绝: {symbol} - {msg}", level='WARNING')
 
-            # 3. 如果卖单成交（有钱回笼），触发重试
+            # 3. 如果卖单成交（有钱回笼），仅同步资金。
+            # 无状态模式下不执行延迟队列重放。
             if order_proxy.is_sell() and order_proxy.executed.size > 0:
                 # 再次确认不是撤单导致的 size>0 (虽然撤单通常 size=0，但为了严谨)
                 if not order_proxy.is_canceled() and not order_proxy.is_rejected():
@@ -1037,14 +998,6 @@ def on_order_status_callback(context, raw_order):
                     if hasattr(broker, 'sync_balance'):
                         broker.sync_balance()
                         print(f"[Debug] Cash after sync: {broker.get_cash():.2f}")
-
-                    if hasattr(broker, 'process_deferred_orders'):
-                        try:
-                            broker.process_deferred_orders()
-                        except Exception as e:
-                            print(f"[Error] Failed to process deferred orders: {e}")
-                            import traceback
-                            traceback.print_exc()
 
         except Exception as e:
             # 记录所有未预期的异常，并确保主循环不退出即可。

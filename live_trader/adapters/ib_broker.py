@@ -105,6 +105,13 @@ class IBBrokerAdapter(BaseLiveBroker):
         self._fx_rate_retry_not_before = {}
         super().__init__(context, cash_override, commission_override, slippage_override)
 
+    @property
+    def safety_multiplier(self):
+        """
+        IB 资金预估使用更保守口径，降低 Error 201 概率。
+        """
+        return max(super().safety_multiplier, 1.02)
+
     def _fetch_real_cash(self) -> float:
         """
         [必须实现] 基类要求的底层查钱接口
@@ -179,10 +186,9 @@ class IBBrokerAdapter(BaseLiveBroker):
                         if p and p > 0:
                             price = p
 
-                    # 如果成功获取价格，累加冻结金额
-                    # 附加 1.5% 的乘数作为防爆仓安全垫（覆盖滑点与 IBKR 佣金）
+                    # 如果成功获取价格，累加冻结金额（使用统一安全垫）
                     if price > 0:
-                        virtual_frozen_cash += size * price * 1.015
+                        virtual_frozen_cash += size * price * self.safety_multiplier
                         if poid:
                             covered_local_order_ids.add(poid)
 
@@ -845,14 +851,6 @@ class IBBrokerAdapter(BaseLiveBroker):
 
                     # 2. 执行策略
                     ctx.now = pd.Timestamp(now)
-
-                    # 运行时自愈：主动释放可执行的缓冲拒单重试，避免因回调丢失卡死。
-                    try:
-                        if hasattr(trader, 'broker') and hasattr(trader.broker, 'reconcile_buffered_retries'):
-                            trader.broker.reconcile_buffered_retries(max_checks=3)
-                    except Exception as e:
-                        print(f"[System Warning] reconcile_buffered_retries failed: {e}")
-
 
                     # (B) 调度检查逻辑
                     if parsed_daily_schedule:

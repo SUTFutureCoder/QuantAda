@@ -253,3 +253,67 @@ def test_gm_secondary_downsize_updates_active_buy_and_virtual_ledger(monkeypatch
     assert broker._virtual_spent_cash == pytest.approx(expected_ledger), (
         "虚拟账本占资应基于真实受理数量计算。"
     )
+
+
+def test_gm_sellable_position_prefers_available_now(monkeypatch):
+    """
+    持仓字段优先级:
+    有 available_now 时，应优先使用 available_now 作为可卖仓位。
+    """
+    import live_trader.adapters.gm_broker as gm_module
+
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    pos = SimpleNamespace(
+        symbol="SHSE.600000",
+        volume=1000,
+        vwap=10.0,
+        available_now=300,
+        available=900,
+        volume_today=100,
+    )
+    ctx = SimpleNamespace(account=lambda: SimpleNamespace(positions=lambda: [pos]))
+    broker = GmBrokerAdapter(context=ctx)
+
+    data = SimpleNamespace(_name="SHSE.600000")
+    got = broker.get_position(data)
+
+    assert got.size == 1000, "持仓数量读取错误。"
+    assert got.sellable == 300, "应优先使用 available_now 作为可卖仓位。"
+    assert broker.get_sellable_position(data) == 300, "get_sellable_position 应与 get_position.sellable 一致。"
+
+
+def test_gm_sellable_position_fallback_to_available_then_volume_today(monkeypatch):
+    """
+    持仓字段兜底:
+    - available_now 缺失 -> 使用 available
+    - available/available_now 都缺失 -> 使用 volume - volume_today
+    """
+    import live_trader.adapters.gm_broker as gm_module
+
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    p1 = SimpleNamespace(
+        symbol="SHSE.600001",
+        volume=1000,
+        vwap=10.0,
+        available=None,
+        available_now=None,
+        volume_today=200,
+    )
+    p2 = SimpleNamespace(
+        symbol="SHSE.600002",
+        volume=1000,
+        vwap=10.0,
+        available=650,
+        available_now=None,
+        volume_today=200,
+    )
+    ctx = SimpleNamespace(account=lambda: SimpleNamespace(positions=lambda: [p1, p2]))
+    broker = GmBrokerAdapter(context=ctx)
+
+    d1 = SimpleNamespace(_name="SHSE.600001")
+    d2 = SimpleNamespace(_name="SHSE.600002")
+
+    assert broker.get_sellable_position(d1) == 800, "回测兜底应使用 volume - volume_today。"
+    assert broker.get_sellable_position(d2) == 650, "available_now 缺失时应使用 available。"

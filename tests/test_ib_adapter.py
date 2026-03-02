@@ -258,7 +258,7 @@ def test_ib_get_cash_dedupes_open_orders_and_local_ledger():
     )
 
     expected_reserved = (
-        10 * 100.0 * 1.015  # openTrades 估算冻结 (id=1)
+        10 * 100.0 * broker.safety_multiplier  # openTrades 估算冻结 (id=1)
         + 5 * 200.0 * broker.safety_multiplier  # 本地额外订单 (id=2)
     )
     expected_cash = 10000.0 - expected_reserved

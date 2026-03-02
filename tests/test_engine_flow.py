@@ -512,10 +512,10 @@ def test_risk_pending_order_terminal_precedence(monkeypatch):
     )
 
 
-def test_on_order_status_callback_sell_fill_triggers_balance_and_deferred(monkeypatch):
+def test_on_order_status_callback_sell_fill_triggers_balance_sync_only(monkeypatch):
     """
     回调链路测试:
-    卖单成交后，必须触发 sync_balance + process_deferred_orders。
+    卖单成交后，必须触发 sync_balance。
     """
     import live_trader.engine as engine_module
 
@@ -541,7 +541,6 @@ def test_on_order_status_callback_sell_fill_triggers_balance_and_deferred(monkey
         def __init__(self):
             self.order_status_calls = 0
             self.sync_calls = 0
-            self.deferred_calls = 0
             self.proxy = DummyOrderProxy()
 
         def convert_order_proxy(self, raw_order):
@@ -552,9 +551,6 @@ def test_on_order_status_callback_sell_fill_triggers_balance_and_deferred(monkey
 
         def sync_balance(self):
             self.sync_calls += 1
-
-        def process_deferred_orders(self):
-            self.deferred_calls += 1
 
         def get_cash(self):
             return 12345.0
@@ -580,13 +576,12 @@ def test_on_order_status_callback_sell_fill_triggers_balance_and_deferred(monkey
     assert broker.order_status_calls == 1, "回调应先喂给 broker.on_order_status。"
     assert strategy.notify_calls == 1, "回调应通知策略 notify_order。"
     assert broker.sync_calls == 1, "卖单成交后应触发资金同步。"
-    assert broker.deferred_calls == 1, "卖单成交后应触发延迟队列重放。"
 
 
 def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
     """
     回调链路测试:
-    卖单被拒绝时，不应触发 sync_balance/process_deferred_orders。
+    卖单被拒绝时，不应触发 sync_balance。
     """
     import live_trader.engine as engine_module
 
@@ -612,7 +607,6 @@ def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
     class DummyBroker:
         def __init__(self):
             self.sync_calls = 0
-            self.deferred_calls = 0
             self.proxy = DummyOrderProxy()
 
         def convert_order_proxy(self, raw_order):
@@ -623,9 +617,6 @@ def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
 
         def sync_balance(self):
             self.sync_calls += 1
-
-        def process_deferred_orders(self):
-            self.deferred_calls += 1
 
         def get_cash(self):
             return 12345.0
@@ -648,7 +639,6 @@ def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
     engine_module.on_order_status_callback(context, raw_order)
 
     assert broker.sync_calls == 0, "拒单不应触发资金同步。"
-    assert broker.deferred_calls == 0, "拒单不应触发延迟队列重放。"
 
 
 def test_on_order_status_callback_dedupes_duplicate_status(monkeypatch):

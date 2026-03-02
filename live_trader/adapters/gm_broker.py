@@ -122,6 +122,48 @@ class GmBrokerAdapter(BaseLiveBroker):
         super().__init__(context, cash_override, commission_override, slippage_override)
         self.is_live = self.is_live_mode(context)  # 保存当前是否为实盘
 
+    @staticmethod
+    def _to_nonnegative_int(value, default=0):
+        try:
+            return max(0, int(float(value)))
+        except Exception:
+            return default
+
+    def _find_position(self, symbol):
+        if not hasattr(self._context, 'account'):
+            return None
+        try:
+            positions = self._context.account().positions()
+        except Exception:
+            return None
+
+        for p in positions:
+            if getattr(p, 'symbol', None) == symbol:
+                return p
+        return None
+
+    def _resolve_sellable_volume(self, p, total_size):
+        """
+        官方字段优先级:
+        1) available_now (实盘当前可用仓位)
+        2) available (非挂单冻结仓位)
+        3) volume - volume_today (available_now 在回测不可用时的兜底)
+        """
+        raw_available_now = getattr(p, 'available_now', None)
+        if raw_available_now is not None:
+            return min(total_size, self._to_nonnegative_int(raw_available_now, default=0))
+
+        raw_available = getattr(p, 'available', None)
+        if raw_available is not None:
+            return min(total_size, self._to_nonnegative_int(raw_available, default=0))
+
+        raw_volume_today = getattr(p, 'volume_today', None)
+        if raw_volume_today is not None:
+            volume_today = self._to_nonnegative_int(raw_volume_today, default=0)
+            return max(0, min(total_size, total_size - volume_today))
+
+        return total_size
+
     def getcash(self):
         """ 获取可用资金 (Backtrader 命名风格)"""
         return self._fetch_real_cash()
@@ -192,16 +234,23 @@ class GmBrokerAdapter(BaseLiveBroker):
     # 2. 查持仓
     def get_position(self, data):
         class Pos:
-            size = 0; price = 0.0
+            size = 0; price = 0.0; sellable = 0
 
-        if hasattr(self._context, 'account'):
-            for p in self._context.account().positions():
-                if p.symbol == data._name:
-                    o = Pos();
-                    o.size = p.volume;
-                    o.price = p.vwap;
-                    return o
+        p = self._find_position(data._name)
+        if p is not None:
+            o = Pos()
+            o.size = self._to_nonnegative_int(getattr(p, 'volume', 0), default=0)
+            o.price = getattr(p, 'vwap', 0.0) or 0.0
+            o.sellable = self._resolve_sellable_volume(p, o.size)
+            return o
         return Pos()
+
+    def get_sellable_position(self, data):
+        p = self._find_position(data._name)
+        if p is not None:
+            total_size = self._to_nonnegative_int(getattr(p, 'volume', 0), default=0)
+            return self._resolve_sellable_volume(p, total_size)
+        return 0
 
     # 3. 查价
     def get_current_price(self, data):
@@ -262,10 +311,15 @@ class GmBrokerAdapter(BaseLiveBroker):
 
             if estimated_cost > available_cash:
                 old_volume = volume
+                lot_size = max(1, int(getattr(config, 'LOT_SIZE', 100) or 1))
                 # 倒推最大股数
-                volume = int(available_cash / (freeze_price * buffer_rate) // 100) * 100
+                if lot_size > 1:
+                    volume = int(available_cash / (freeze_price * buffer_rate) // lot_size) * lot_size
+                else:
+                    volume = int(available_cash / (freeze_price * buffer_rate))
 
-                if volume < 100:
+                min_volume = lot_size if lot_size > 1 else 1
+                if volume < min_volume:
                     # 只有真的买不起了才打印 (避免刷屏)
                     # print(f"[GmBroker] Skip Buy ...")
                     return None

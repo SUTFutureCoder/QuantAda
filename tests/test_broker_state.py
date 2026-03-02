@@ -68,7 +68,7 @@ class MockBroker(BaseLiveBroker):
             pending.append(
                 {
                     "id": order["id"],
-                    "symbol": "SHSE.600000",
+                    "symbol": order.get("symbol", "SHSE.600000"),
                     "direction": order["side"],
                     "size": order["volume"],
                 }
@@ -81,7 +81,15 @@ class MockBroker(BaseLiveBroker):
     def _submit_order(self, data, volume, side, price):
         oid = f"ORDER_{len(self.submitted_orders) + 1}"
         proxy = MockOrderProxy(oid, is_buy_order=(side == "BUY"))
-        self.submitted_orders.append({"id": oid, "side": side, "volume": volume, "status": "Submitted"})
+        self.submitted_orders.append(
+            {
+                "id": oid,
+                "side": side,
+                "volume": volume,
+                "symbol": data._name,
+                "status": "Submitted",
+            }
+        )
         return proxy
 
     def convert_order_proxy(self, raw_order):
@@ -103,36 +111,32 @@ def _force_lot_size_100(monkeypatch):
     monkeypatch.setattr(config, "LOT_SIZE", 100)
 
 
-def test_async_order_race_condition():
+def test_stateless_buy_skips_when_cash_insufficient_even_with_pending_sell():
     """
-    核心回归:
-    卖单在途时买单先进入 deferred；卖单 Filled 回调不会自动触发 deferred 重放。
-    必须显式 sync_balance + process_deferred_orders 才会真正发出买单。
+    无状态回归:
+    卖单在途且现金不足时，买单应当场失败，不进入任何重试缓存。
+    后续若要买入，必须由下一次策略信号重新触发。
     """
     broker = MockBroker(initial_cash=100.0)
     data = _make_data()
 
     broker._pending_sells.add("SELL_1")
 
-    deferred_proxy = broker.order_target_value(data, target=1000)
-    assert deferred_proxy is not None, "在卖单在途时，买单应返回延迟代理对象"
-    assert deferred_proxy.id == "DEFERRED_VIRTUAL_ID", "延迟队列应返回虚拟订单代理"
-    assert len(broker._deferred_orders) == 1, "买单未满足资金条件时应进入 _deferred_orders"
-    assert len(broker.submitted_orders) == 0, "延迟买单阶段不应发送真实委托"
+    first_try = broker.order_target_value(data, target=1000)
+    assert first_try is None, "现金不足时应直接返回 None（无状态不入队）"
+    assert len(broker.submitted_orders) == 0, "首次尝试不应发送真实委托"
 
     broker.on_order_status(MockOrderProxy("SELL_1", is_buy_order=False, status="Filled"))
     assert "SELL_1" not in broker._pending_sells, "卖单 Filled 后应从 _pending_sells 移除"
-    assert len(broker._deferred_orders) == 1, "卖单 Filled 回调不应直接触发 deferred 队列"
-    assert len(broker.submitted_orders) == 0, "回调阶段不应偷偷发出买单"
+    assert len(broker.submitted_orders) == 0, "卖单回调不应偷偷发出买单"
 
+    # 第二次由策略再次调用时，才会按当前现金重新尝试下单
     broker.mock_cash = 5000.0
-    broker.sync_balance()
-    broker.process_deferred_orders()
-
-    assert len(broker._deferred_orders) == 0, "process_deferred_orders 后 deferred 队列应被清空"
-    assert len(broker.submitted_orders) == 1, "显式处理 deferred 后应发出真实买单"
-    assert broker.submitted_orders[0]["side"] == "BUY", "重放后的订单方向应为 BUY"
-    assert broker.submitted_orders[0]["volume"] == 100, "重放后的买单数量应为 100 股"
+    second_try = broker.order_target_value(data, target=1000)
+    assert second_try is not None, "再次触发信号后应按最新现金下单"
+    assert len(broker.submitted_orders) == 1, "第二次尝试应发出真实买单"
+    assert broker.submitted_orders[0]["side"] == "BUY", "买单方向应为 BUY"
+    assert broker.submitted_orders[0]["volume"] == 100, "买单数量应为 100 股"
 
 
 def test_auto_downgrade_and_refund():
@@ -194,10 +198,10 @@ def test_rejected_buy_recalculates_shares_by_available_cash(monkeypatch):
     )
 
 
-def test_rejected_buy_waits_for_cancel_before_retry(monkeypatch):
+def test_rejected_buy_retries_immediately_without_buffer(monkeypatch):
     """
-    竞态修复:
-    若拒单时原单仍在途，不应立即重提；应等待该单进入 Canceled 终态后再重试。
+    无状态回归:
+    拒单后应当场降级重提，不等待 Cancel 回调，也不缓存跨回调意图。
     """
     monkeypatch.setattr(config, "LOT_SIZE", 1)
 
@@ -209,129 +213,57 @@ def test_rejected_buy_waits_for_cancel_before_retry(monkeypatch):
     assert broker.submitted_orders[0]["volume"] == 29, "前置条件失败: 首笔应为 29 股"
     assert broker.submitted_orders[0]["status"] == "Submitted", "前置条件失败: 首笔应仍在途"
 
-    # 1) 先收到 Rejected(Inactive)，此时仍在途，应进入缓冲，不立即重试。
     broker.mock_cash = 280.0
     broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
-    assert len(broker.submitted_orders) == 1, "拒单但原单在途时，不应立即提交重试单"
-    assert "ORDER_1" in broker._buffered_rejected_retries, "拒单重试应被缓冲等待终态"
 
-    # 2) 原单进入 Canceled 终态，才执行缓冲重试。
-    broker.submitted_orders[0]["status"] = "Canceled"
-    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Canceled"))
-    assert len(broker.submitted_orders) == 2, "Canceled 终态到达后应执行缓冲重试"
-    assert broker.submitted_orders[1]["side"] == "BUY", "缓冲重试后的方向应为 BUY"
-    assert broker.submitted_orders[1]["volume"] == 27, "重试应基于拒单后可用资金重算到 27 股"
+    assert len(broker.submitted_orders) == 2, "拒单后应立即提交降级重试单"
+    assert broker.submitted_orders[1]["side"] == "BUY", "降级重试方向应为 BUY"
+    assert broker.submitted_orders[1]["volume"] == 27, "应按可用资金重算后降级到 27 股"
+    assert not hasattr(broker, "_buffered_rejected_retries"), "无状态实现不应再维护拒单缓冲队列"
 
 
-def test_rejected_buy_retry_self_heal_without_cancel_callback(monkeypatch):
+def test_rejected_buy_multi_symbols_retry_independently(monkeypatch):
     """
-    IB 风格回调兜底:
-    若拒单后原单从在途列表消失，但没有 Canceled 回调，重复 Rejected 回调也应触发缓冲重试。
+    多标的回归:
+    同一根 K 线内多个买单各自拒单时，应分别降级并重提，互不依赖。
     """
     monkeypatch.setattr(config, "LOT_SIZE", 1)
 
     broker = MockBroker(initial_cash=10000.0)
-    data = _make_data()
+    data_a = _make_data("AAA.TEST")
+    data_b = _make_data("BBB.TEST")
 
-    first_proxy = broker.order_target_value(data, target=290)  # 29 股
-    assert first_proxy is not None, "首笔买单应提交成功"
-    assert broker.submitted_orders[0]["volume"] == 29, "前置条件失败: 首笔应为 29 股"
-
-    # 1) 首次拒单时，原单仍在途 -> 进入缓冲，不立即重试
-    broker.mock_cash = 280.0
-    broker.submitted_orders[0]["status"] = "Submitted"
-    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
-
-    assert len(broker.submitted_orders) == 1, "首次拒单且原单在途时，不应立即提交重试单"
-    assert "ORDER_1" in broker._buffered_rejected_retries, "拒单重试应被缓冲等待原单离场"
-
-    # 2) 原单离开在途列表，但没有 Canceled 回调，仅再次收到 Rejected 回调
-    broker.submitted_orders[0]["status"] = "Inactive"
-    broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
-
-    assert "ORDER_1" not in broker._buffered_rejected_retries, "原单离场后应自动释放缓冲重试"
-    assert len(broker.submitted_orders) == 2, "缺少 Canceled 回调时也应自愈触发重试"
-    assert broker.submitted_orders[1]["side"] == "BUY", "自愈重试方向应为 BUY"
-    assert broker.submitted_orders[1]["volume"] == 27, "自愈重试应按可用资金重算到 27 股"
-
-
-def test_rejected_buy_pending_probe_not_called_under_ledger_lock(monkeypatch):
-    """
-    红队回归:
-    拒单路径探测在途状态时，不应在 _ledger_lock 持有期间访问 get_pending_orders。
-    """
-    monkeypatch.setattr(config, "LOT_SIZE", 1)
-
-    class LockAwareBroker(MockBroker):
-        def __init__(self, initial_cash):
-            super().__init__(initial_cash)
-            self.pending_called_under_lock = False
-
-        def get_pending_orders(self):
-            is_owned = getattr(self._ledger_lock, "_is_owned", None)
-            if callable(is_owned) and is_owned():
-                self.pending_called_under_lock = True
-            return super().get_pending_orders()
-
-    broker = LockAwareBroker(initial_cash=10000.0)
-    if not callable(getattr(broker._ledger_lock, "_is_owned", None)):
-        pytest.skip("Current Python runtime does not expose RLock._is_owned().")
-
-    data = _make_data()
-    first_proxy = broker.order_target_value(data, target=290)  # 29 股
-    assert first_proxy is not None, "首笔买单应提交成功"
+    p1 = broker.order_target_value(data_a, target=290)  # ORDER_1: 29
+    p2 = broker.order_target_value(data_b, target=290)  # ORDER_2: 29
+    assert p1 is not None and p2 is not None, "前置失败：两个标的的首单都应成功发出"
+    assert len(broker.submitted_orders) == 2, "前置失败：应先有 2 笔初始买单"
 
     broker.mock_cash = 280.0
-    broker.submitted_orders[0]["status"] = "Submitted"  # 模拟原单仍在途
     broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
 
-    assert not broker.pending_called_under_lock, "检测到在持锁期间访问 get_pending_orders，存在卡死风险"
-    assert "ORDER_1" in broker._buffered_rejected_retries, "原单在途时仍应进入缓冲重试"
+    broker.mock_cash = 200.0
+    broker.on_order_status(MockOrderProxy("ORDER_2", is_buy_order=True, status="Rejected"))
 
-
-def test_process_deferred_orders_keeps_failed_items():
-    """
-    红队回归:
-    延迟队列中单笔执行失败，不应导致整批任务丢失。
-    """
-    broker = MockBroker(initial_cash=10000.0)
-    calls = []
-
-    def bad_func(**kwargs):
-        calls.append("bad")
-        raise RuntimeError("boom")
-
-    def ok_func(**kwargs):
-        calls.append("ok")
-
-    broker._add_deferred(bad_func, {})
-    broker._add_deferred(ok_func, {})
-    broker.process_deferred_orders()
-
-    assert calls == ["bad", "ok"], "延迟队列执行顺序异常"
-    assert len(broker._deferred_orders) == 1, "单笔失败后应只回队列失败项"
-    assert broker._deferred_orders[0]["func"] is bad_func, "回队列项应为失败任务本身"
+    assert len(broker.submitted_orders) == 4, "两个标的拒单后都应产生各自的降级重试单"
+    assert broker.submitted_orders[2]["symbol"] == "AAA.TEST", "第一个标的的重试单 symbol 错误"
+    assert broker.submitted_orders[3]["symbol"] == "BBB.TEST", "第二个标的的重试单 symbol 错误"
+    assert broker.submitted_orders[2]["volume"] < 29, "第一个标的重试单必须低于原始下单量"
+    assert broker.submitted_orders[3]["volume"] < 29, "第二个标的重试单必须低于原始下单量"
 
 
 def test_stale_state_reset_cross_day():
     """
     跨日推进时，清理陈旧状态:
-    - _deferred_orders
     - _pending_sells
     """
     broker = MockBroker(initial_cash=10000.0)
-    data = _make_data()
 
     broker.set_datetime(datetime(2026, 2, 16, 14, 55, 0))
-    broker._deferred_orders.append({"func": broker.order_target_value, "kwargs": {"data": data, "target": 1000}})
     broker._pending_sells.add("SELL_STALE_1")
-
-    assert len(broker._deferred_orders) == 1, "预置的脏 deferred 状态注入失败"
     assert len(broker._pending_sells) == 1, "预置的脏 pending_sells 状态注入失败"
 
     broker.set_datetime(datetime(2026, 2, 17, 9, 31, 0))
 
-    assert len(broker._deferred_orders) == 0, "跨日后 _deferred_orders 必须被清空"
     assert len(broker._pending_sells) == 0, "跨日后 _pending_sells 必须被清空"
 
 
@@ -348,7 +280,6 @@ def test_risk_block_buy():
 
     assert ret is None, "风控锁命中时应直接返回 None"
     assert len(broker.submitted_orders) == 0, "风控拦截后不应发出真实订单"
-    assert len(broker._deferred_orders) == 0, "风控拦截后不应写入延迟队列"
 
 
 def test_risk_block_buy_target_percent():
@@ -365,7 +296,6 @@ def test_risk_block_buy_target_percent():
 
     assert ret is None, "风控锁命中时 order_target_percent 应直接返回 None"
     assert len(broker.submitted_orders) == 0, "风控拦截后不应发出真实订单"
-    assert len(broker._deferred_orders) == 0, "风控拦截后不应写入延迟队列"
 
 
 def test_lot_size_truncation():
@@ -420,6 +350,30 @@ def test_smart_sell_anti_shorting():
     assert broker.submitted_orders[0]["volume"] == 5000, "卖空拦截失败: 卖出量必须被截断到真实持仓 5000"
 
 
+def test_smart_sell_respects_sellable_position_t1():
+    """
+    T+1 可卖仓位约束:
+    即使真实持仓>0，只要可卖仓位=0，也必须跳过卖单，避免反复触发“仓位不足”拒单。
+    """
+    class T1AwareMockBroker(MockBroker):
+        def __init__(self, initial_cash):
+            super().__init__(initial_cash)
+            self.mock_sellable = 0
+
+        def get_sellable_position(self, data):
+            return self.mock_sellable
+
+    broker = T1AwareMockBroker(initial_cash=100000.0)
+    data = _make_data()
+    broker.mock_position = 5000
+    broker.mock_sellable = 0
+
+    ret = broker._smart_sell(data, shares=5000, price=10.0)
+
+    assert ret is None, "可卖仓位为 0 时应直接跳过卖单"
+    assert len(broker.submitted_orders) == 0, "T+1 拦截后不应发出任何 SELL 委托"
+
+
 def test_smart_sell_odd_lot_release():
     """
     清仓碎股放行:
@@ -435,6 +389,24 @@ def test_smart_sell_odd_lot_release():
     assert len(broker.submitted_orders) == 1, "清仓场景应只发出 1 笔卖单"
     assert broker.submitted_orders[0]["side"] == "SELL", "清仓提交方向应为 SELL"
     assert broker.submitted_orders[0]["volume"] == 150, "清仓碎股应放行 150 股，不应被截断为 100"
+
+
+def test_sell_rejected_does_not_replay_or_enqueue_buy():
+    """
+    无状态回归:
+    卖单拒绝后仅清理 pending_sells，不做任何历史意图重放或补下单。
+    """
+    broker = MockBroker(initial_cash=100.0)
+    data = _make_data()
+
+    broker._pending_sells.add("SELL_1")
+    ret = broker.order_target_value(data, target=1000)
+    assert ret is None, "前置失败：现金不足时应直接失败"
+
+    broker.on_order_status(MockOrderProxy("SELL_1", is_buy_order=False, status="Rejected"))
+
+    assert "SELL_1" not in broker._pending_sells, "卖单拒绝后应移除 pending sell 监控"
+    assert len(broker.submitted_orders) == 0, "拒单回调阶段不应补发买单"
 
 
 def test_expected_size_with_pending_orders():
@@ -465,18 +437,27 @@ def test_expected_size_with_pending_orders():
 def test_intraday_long_gap_reset():
     """
     日内长中断(>600s)防御:
-    虽未跨日，但 10:00 -> 10:15 的长间隔应触发 stale state reset，清空 deferred。
+    虽未跨日，但 10:00 -> 10:15 的长间隔应触发 stale state reset。
     """
     broker = MockBroker(initial_cash=10000.0)
     data = _make_data()
 
-    broker._deferred_orders.append({"func": broker.order_target_value, "kwargs": {"data": data, "target": 1000}})
-    assert len(broker._deferred_orders) == 1, "长中断测试前置失败: deferred 注入失败"
+    broker._pending_sells.add("SELL_STALE_1")
+    broker._active_buys["BUY_STALE_1"] = {
+        "data": data,
+        "shares": 100,
+        "price": 10.0,
+        "lot_size": 100,
+        "retries": 0,
+    }
+    broker._virtual_spent_cash = 1000.0
 
     broker.set_datetime(datetime(2026, 2, 17, 10, 0, 0))
     broker.set_datetime(datetime(2026, 2, 17, 10, 15, 0))
 
-    assert len(broker._deferred_orders) == 0, "日内长中断后 _deferred_orders 必须被强制清空"
+    assert len(broker._pending_sells) == 0, "日内长中断后 _pending_sells 必须被强制清空"
+    assert len(broker._active_buys) == 0, "日内长中断后 _active_buys 必须被强制清空"
+    assert broker._virtual_spent_cash == pytest.approx(0.0), "日内长中断后虚拟占资必须清空"
 
 
 def test_virtual_ledger_not_cleared_by_intraday_bar_progress():
@@ -502,10 +483,10 @@ def test_virtual_ledger_not_cleared_by_intraday_bar_progress():
     )
 
 
-def test_cross_day_reset_without_deferred_still_cleans_pending_and_active():
+def test_cross_day_reset_still_cleans_pending_and_active():
     """
     跨日恢复兜底:
-    即使 _deferred_orders 为空，只要存在 _pending_sells/_active_buys 脏状态，也必须触发 reset。
+    只要存在 _pending_sells/_active_buys 脏状态，就必须触发 reset。
     """
     broker = MockBroker(initial_cash=10000.0)
     data = _make_data()
@@ -521,7 +502,6 @@ def test_cross_day_reset_without_deferred_still_cleans_pending_and_active():
     }
     broker._virtual_spent_cash = 1000.0
 
-    assert len(broker._deferred_orders) == 0, "前置失败：该用例要求 deferred 为空。"
     assert len(broker._pending_sells) == 1, "前置失败：pending_sells 注入失败。"
     assert len(broker._active_buys) == 1, "前置失败：active_buys 注入失败。"
 
@@ -628,24 +608,20 @@ def test_manual_force_reset_recovery():
     极端灾难恢复 - 在内部状态机乱套后，force_reset_state 应兜底清理并恢复可用资金。
     """
     broker = MockBroker(initial_cash=100000.0)
-    data = _make_data()
 
-    # 构造“乱套状态”：虚拟占资异常 + 延迟队列脏单 + 卖单监控残留
+    # 构造“乱套状态”：虚拟占资异常 + 卖单监控残留
     broker._virtual_spent_cash = 43210.0
-    broker._deferred_orders.append({"func": broker.order_target_value, "kwargs": {"data": data, "target": 2000}})
     broker._pending_sells.add("SELL_STUCK_1")
 
     # 前置校验，确保脏状态确实存在
     assert broker._virtual_spent_cash > 0, "前置失败：虚拟占资注入失败"
-    assert len(broker._deferred_orders) == 1, "前置失败：_deferred_orders 注入失败"
     assert len(broker._pending_sells) == 1, "前置失败：_pending_sells 注入失败"
 
     # 执行灾备重置，并立即同步余额
     broker.force_reset_state()
     broker.sync_balance()
 
-    # 队列清空断言
-    assert len(broker._deferred_orders) == 0, "强制重置失败：_deferred_orders 未被清空，可能导致重复下单！"
+    # 状态清空断言
     assert len(broker._pending_sells) == 0, "强制重置失败：_pending_sells 未被清空，可能导致买单永久阻塞！"
 
     # 现金恢复断言（核心）：可用现金必须回到真实资金水平
