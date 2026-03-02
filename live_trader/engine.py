@@ -794,18 +794,76 @@ class LiveTrader:
                     continue
 
                 bar = df.iloc[pos]
+                history_window = df.iloc[:pos + 1]
 
                 class BtFeedProxy:
-                    def __init__(self, name, bar_data):
-                        self._name = name
-                        self.close = {0: bar_data['close']}
-                        self.open = {0: bar_data['open']}
-                        self.high = {0: bar_data['high']}
-                        self.low = {0: bar_data['low']}
-                        # 补充 datetime，部分风控指标可能需要时间
-                        self.datetime = {0: pd.Timestamp(bar_data.name)}
+                    class _LineProxy:
+                        def __init__(self, values):
+                            self._values = list(values)
 
-                feed_proxy = BtFeedProxy(data_feed._name, bar)
+                        def __len__(self):
+                            return len(self._values)
+
+                        def __getitem__(self, idx):
+                            if not isinstance(idx, int):
+                                raise TypeError("Line index must be int.")
+                            total = len(self._values)
+                            if total <= 0:
+                                raise IndexError("Line is empty.")
+
+                            # 兼容 data.close[0] 当前值；并容忍正/负方向取历史值
+                            if idx >= 0:
+                                target = total - 1 - idx
+                            else:
+                                target = total - 1 + idx
+
+                            if target < 0 or target >= total:
+                                raise IndexError("Line index out of range.")
+                            return self._values[target]
+
+                        def get(self, ago=0, size=None):
+                            total = len(self._values)
+                            if total <= 0:
+                                return []
+
+                            try:
+                                ago_int = int(ago)
+                            except Exception:
+                                ago_int = 0
+                            ago_int = max(0, ago_int)
+
+                            end = total - ago_int
+                            if end <= 0:
+                                return []
+
+                            if size is None:
+                                start = 0
+                            else:
+                                try:
+                                    size_int = int(size)
+                                except Exception:
+                                    size_int = end
+                                size_int = max(0, size_int)
+                                start = max(0, end - size_int)
+
+                            return self._values[start:end]
+
+                    def __init__(self, name, bar_data, window_df):
+                        self._name = name
+                        # 单点访问（[0]）与序列访问（get）同时可用
+                        self.close = self._LineProxy(window_df['close'].tolist())
+                        self.open = self._LineProxy(window_df['open'].tolist())
+                        self.high = self._LineProxy(window_df['high'].tolist())
+                        self.low = self._LineProxy(window_df['low'].tolist())
+                        # 保持当前bar时间一致，同时允许历史读取
+                        dt_values = [pd.Timestamp(ts) for ts in window_df.index.tolist()]
+                        self.datetime = self._LineProxy(dt_values)
+                        self._bar = bar_data
+
+                    def __len__(self):
+                        return len(self.close)
+
+                feed_proxy = BtFeedProxy(data_feed._name, bar, history_window)
 
             except Exception as e:
                 self.broker.log(f"[Risk] Error creating bar proxy for {data_feed._name}: {e}")
