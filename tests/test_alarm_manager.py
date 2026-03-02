@@ -41,18 +41,11 @@ def fresh_alarm_manager(monkeypatch):
     monkeypatch.setattr(manager_module.config, "ALARMS_ENABLED", False)
 
     mgr = AlarmManager()
-    # 生产默认 60 秒窗口，单测缩短到 1 秒以避免等待过久
-    mgr._text_aggregation_window_seconds = 1
+    # 生产默认 60 秒窗口，异常单测缩短到 1 秒以避免等待过久
     mgr._exception_aggregation_window_seconds = 1
     yield mgr
 
-    timer = getattr(mgr, "_text_flush_timer", None)
-    if timer:
-        timer.cancel()
     timer = getattr(mgr, "_exception_flush_timer", None)
-    if timer:
-        timer.cancel()
-    timer = getattr(mgr, "_text_cooldown_timer", None)
     if timer:
         timer.cancel()
     timer = getattr(mgr, "_exception_cooldown_timer", None)
@@ -61,21 +54,18 @@ def fresh_alarm_manager(monkeypatch):
     AlarmManager._instance = None
 
 
-def test_push_text_aggregates_same_alarm_with_count(fresh_alarm_manager):
+def test_push_text_dispatches_immediately(fresh_alarm_manager):
     mgr = fresh_alarm_manager
     fake = FakeAlarmChannel()
     mgr.alarms = [fake]
 
     mgr.push_text("订单被拒绝: SHSE.600000", level="WARNING")
-    mgr.push_text("订单被拒绝: SHSE.600000", level="WARNING")
-
-    assert fake.text_calls == [], "聚合窗口内不应立即发送重复文本报警。"
-    assert _wait_until(lambda: len(fake.text_calls) == 1), "聚合窗口到期后应触发一次合并推送。"
+    assert _wait_until(lambda: len(fake.text_calls) == 1), "push_text 应立即异步发送。"
 
     content, level = fake.text_calls[0]
     assert level == "WARNING", "合并推送应保留原始报警级别。"
     assert "订单被拒绝: SHSE.600000" in content, "合并推送应保留原始报警内容。"
-    assert "重复次数: 2" in content, "相同报警应附带聚合数量。"
+    assert "重复次数" not in content, "push_text 不应再做文本聚合去重。"
 
 
 def test_runtime_context_status_detail_contains_market_scope(fresh_alarm_manager):
@@ -116,28 +106,20 @@ def test_push_exception_aggregates_same_error_with_count(fresh_alarm_manager):
     assert "重复次数: 2" in error_text, "相同异常应附带聚合数量。"
 
 
-def test_text_log_cooldown_merges_counts_across_windows(fresh_alarm_manager):
+def test_push_text_duplicate_messages_are_not_buffered(fresh_alarm_manager):
     mgr = fresh_alarm_manager
     fake = FakeAlarmChannel()
     mgr.alarms = [fake]
-    mgr._text_aggregation_window_seconds = 0.2
-    mgr._cooldown_base_delay_seconds = 0.2
-    mgr._cooldown_max_delay_seconds = 0.4
-    mgr._cooldown_reset_window_seconds = 5
-
-    mgr.push_text("风控告警: 持仓超限", level="WARNING")
-    assert _wait_until(lambda: len(fake.text_calls) == 1, timeout_sec=1.0), "首轮窗口到期后应立即推送。"
 
     mgr.push_text("风控告警: 持仓超限", level="WARNING")
     mgr.push_text("风控告警: 持仓超限", level="WARNING")
-    time.sleep(0.25)
-    assert len(fake.text_calls) == 1, "冷却期内不应立即推送第二轮重复告警。"
-    assert _wait_until(lambda: len(fake.text_calls) == 2, timeout_sec=1.5), "冷却到期后应推送累计数量。"
 
-    content, level = fake.text_calls[1]
+    assert _wait_until(lambda: len(fake.text_calls) == 2, timeout_sec=1.0), "重复 text 应逐条立即发送。"
+
+    content, level = fake.text_calls[0]
     assert level == "WARNING", "冷却后推送应保留原始级别。"
     assert "风控告警: 持仓超限" in content, "冷却后推送应保留原始内容。"
-    assert "重复次数: 2" in content, "冷却期间应累计重复数量后再推送。"
+    assert "重复次数" not in content, "text 不应附带聚合计数。"
 
 
 def test_exception_log_cooldown_merges_counts_across_windows(fresh_alarm_manager):
@@ -163,24 +145,6 @@ def test_exception_log_cooldown_merges_counts_across_windows(fresh_alarm_manager
     assert "GM Kernel Error" in context, "冷却后异常推送应保留原始模块上下文。"
     assert error_text in merged_error, "冷却后异常推送应保留原始错误内容。"
     assert "重复次数: 2" in merged_error, "异常冷却期间应累计重复数量后再推送。"
-
-
-def test_critical_text_bypasses_log_cooldown(fresh_alarm_manager):
-    mgr = fresh_alarm_manager
-    fake = FakeAlarmChannel()
-    mgr.alarms = [fake]
-    mgr._text_aggregation_window_seconds = 0.2
-    mgr._cooldown_base_delay_seconds = 0.3
-    mgr._cooldown_max_delay_seconds = 1.0
-    mgr._cooldown_reset_window_seconds = 5
-
-    mgr.push_text("交易通道全断开", level="CRITICAL")
-    assert _wait_until(lambda: len(fake.text_calls) == 1, timeout_sec=1.0), "CRITICAL 首次窗口到期后应推送。"
-    assert mgr._text_cooldown_state == {}, "CRITICAL 不应进入冷却状态。"
-
-    mgr.push_text("交易通道全断开", level="CRITICAL")
-    assert _wait_until(lambda: len(fake.text_calls) == 2, timeout_sec=0.5), "CRITICAL 不应被冷却延迟。"
-    assert mgr._text_cooldown_state == {}, "CRITICAL 重复推送也不应进入冷却状态。"
 
 
 def test_format_market_scope_prefers_selector_only():
