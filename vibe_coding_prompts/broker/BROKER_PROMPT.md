@@ -15,8 +15,9 @@
 ## 🏛️ 核心架构约束 (Architecture Constraints)
 
 1. **继承基类**: 你的主类必须命名为 `[BrokerName]Broker`，并且严格继承自 `live_trader.adapters.base_broker.BaseLiveBroker`。
-2. **绝对无状态 (Stateless)**: QuantAda 引擎层会自动处理资金安全垫、在途订单降级重试和虚拟账本预扣款。适配器内部**严禁**维护任何类似 `self.local_cash` 或 `self.local_positions` 的缓存变量。所有状态查询必须实时通过 API 向物理柜台发起。
+2. **绝对无状态 (Stateless)**: QuantAda 已移除 `deferred/buffered` 买单队列。适配器内部**严禁**维护任何类似 `self.local_cash` 或 `self.local_positions` 的缓存变量，也**严禁**自行实现跨回调重试队列。所有状态查询必须实时通过 API 向物理柜台发起。
 3. **数据对象解包**: 框架传入的 `data` 参数是一个代理对象（DataFeedProxy）。获取标的代码时，必须使用 `data._name`，并在与券商 API 交互前，根据需要进行格式化（例如截取基础代码 `data._name.split('.')[0].upper()`）。
+4. **卖出可用仓位约束**: 对存在 T+1 或可卖冻结语义的市场，必须提供准确可卖仓位（建议实现/覆盖 `get_sellable_position`），不要仅用总仓位代替可卖仓位。
 
 ---
 
@@ -26,8 +27,9 @@
 
 ### 1. 资产与持仓查询
 - `getvalue(self) -> float`: 获取当前账户总权益（Net Liquidation Value）。可调用父类的 `self._get_portfolio_nav()` 或直接调用券商 API 获取。
-- `_fetch_real_cash(self) -> float`: 实时向柜台请求当前可用于开新仓的真实购买力（现金）。如果券商的可用现金包含了未成交买单的冻结资金，必须在此处主动盘点并扣除。
-- `get_position(self, data)`: 获取指定标的持仓。必须返回一个拥有 `.size` (持仓数量) 和 `.price` (成本价) 属性的对象（可使用 `SimpleNamespace` 模拟）。
+- `_fetch_real_cash(self) -> float`: 实时向柜台请求当前可用于开新仓的真实购买力（现金）。如券商口径不含在途冻结，需在适配器层补充扣减逻辑。
+- `get_position(self, data)`: 获取指定标的持仓。必须返回一个拥有 `.size` (持仓数量) 和 `.price` (成本价) 属性的对象（可使用 `SimpleNamespace` 模拟）。若市场有可卖限制，建议同时暴露 `.sellable`。
+- `get_sellable_position(self, data)`（建议覆盖）: 返回当前真实可卖仓位；若不覆盖，基类会退化为 `size`。
 - `get_current_price(self, data) -> float`: 获取指定标的实时盘口价或最新快照价。若获取失败、断流或停牌，必须安全返回 `0.0`，严禁抛出异常。
 
 ### 2. 订单系统
@@ -42,6 +44,13 @@
 ### 4. 运行环境适配
 - `@staticmethod` `is_live_mode(context) -> bool`: 判断当前上下文是否为实盘模式。
 - `@classmethod` `launch(cls, conn_cfg: dict, strategy_path: str, params: dict, **kwargs)`: [可选实现] 命令行实盘启动入口，负责初始化券商 SDK、建立连接并挂载事件循环。
+
+---
+
+## ⚙️ 与当前框架一致的执行语义 (必须遵守)
+1. 买单拒绝后的降级重提由 `BaseLiveBroker.on_order_status` 统一处理（默认最多 5 次）；适配器不要额外叠加自己的“拒单队列”。
+2. 禁止实现或依赖以下旧机制: `process_deferred_orders`、`reconcile_buffered_retries`、`_deferred_orders`、`_buffered_rejected_retries`。
+3. 若券商返回 `Inactive/Cancelled/Rejected` 语义有差异，必须在 `BaseOrderProxy` 中准确映射，否则会破坏统一降级流程。
 
 ---
 
