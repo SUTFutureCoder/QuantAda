@@ -341,6 +341,8 @@ class GmBrokerAdapter(BaseLiveBroker):
         symbols = kwargs.get('symbols')
         timeframe = kwargs.get('timeframe')
         compression = kwargs.get('compression')
+        risk_name = kwargs.get('risk')
+        risk_params = kwargs.get('risk_params')
 
         def _pick_probe_symbol(raw_symbols):
             if isinstance(raw_symbols, (list, tuple)):
@@ -463,6 +465,10 @@ class GmBrokerAdapter(BaseLiveBroker):
                     engine_config['selection_name'] = selection_name
                 if symbols:
                     engine_config['symbols'] = symbols
+                if risk_name:
+                    engine_config['risk'] = risk_name
+                if risk_params is not None:
+                    engine_config['risk_params'] = risk_params
 
                 if mode == MODE_BACKTEST:
                     engine_config['start_date'] = start_date

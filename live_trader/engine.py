@@ -26,6 +26,55 @@ def _format_market_scope(selection=None, symbols=None):
     return "symbols=N/A"
 
 
+class _RiskControlChain:
+    """
+    将多个风控模块串联为一个统一对象，兼容现有单风控调用路径。
+    任一子风控触发 SELL 即返回 SELL。
+    """
+
+    def __init__(self, controls):
+        self.controls = list(controls or [])
+        self.exit_triggered = set()
+
+    def check(self, data):
+        for control in self.controls:
+            try:
+                if control.check(data) == 'SELL':
+                    return 'SELL'
+            except Exception as e:
+                broker = getattr(control, 'broker', None)
+                msg = f"[Risk Chain] {control.__class__.__name__}.check failed: {e}"
+                if broker and hasattr(broker, 'log'):
+                    broker.log(msg)
+                else:
+                    print(msg)
+        return None
+
+    def notify_order(self, order):
+        for control in self.controls:
+            try:
+                control.notify_order(order)
+            except Exception as e:
+                broker = getattr(control, 'broker', None)
+                msg = f"[Risk Chain] {control.__class__.__name__}.notify_order failed: {e}"
+                if broker and hasattr(broker, 'log'):
+                    broker.log(msg)
+                else:
+                    print(msg)
+
+    def mark_exit_trigger(self, symbol: str):
+        self.exit_triggered.add(symbol)
+        for control in self.controls:
+            if hasattr(control, 'exit_triggered') and isinstance(control.exit_triggered, set):
+                control.exit_triggered.add(symbol)
+
+    def clear_exit_trigger(self, symbol: str):
+        self.exit_triggered.discard(symbol)
+        for control in self.controls:
+            if hasattr(control, 'exit_triggered') and isinstance(control.exit_triggered, set):
+                control.exit_triggered.discard(symbol)
+
+
 class LiveTrader:
     """实盘交易引擎"""
 
@@ -97,6 +146,20 @@ class LiveTrader:
 
         print(f"[Engine] Adapter loaded: Broker={broker_cls.__name__}, Provider={provider_cls.__name__}")
         return broker_cls, provider_cls
+
+    @staticmethod
+    def _resolve_risk_params(raw_risk_params, risk_name: str):
+        """
+        风控参数兼容:
+        - 单风控: risk_params 直接是 dict
+        - 多风控: risk_params 可为 {risk_name: {...}} 结构
+        """
+        if not isinstance(raw_risk_params, dict):
+            return {}
+        scoped = raw_risk_params.get(risk_name)
+        if isinstance(scoped, dict):
+            return scoped
+        return raw_risk_params
 
     def init(self, context):
         print("--- LiveTrader Engine Initializing ---")
@@ -195,15 +258,33 @@ class LiveTrader:
         risk_params = self.config.get('risk_params', {})  # 对应 --risk_params
 
         if risk_name:
-            try:
-                print(f"[Engine] Loading Risk Control: {risk_name}")
-                # 确保搜索 'risk_controls' 目录
-                risk_control_class = get_class_from_name(risk_name, ['risk_controls', 'strategies'])
-                self.risk_control = risk_control_class(broker=self.broker, params=risk_params)
-                print("[Engine] Risk Control loaded successfully.")
-            except Exception as e:
-                print(f"Warning: Failed to load risk control '{risk_name}'. Error: {e}")
+            risk_names = [name.strip() for name in str(risk_name).split(',') if name.strip()]
+            loaded_controls = []
+            failed_controls = []
+
+            for single_name in risk_names:
+                try:
+                    print(f"[Engine] Loading Risk Control: {single_name}")
+                    risk_control_class = get_class_from_name(single_name, ['risk_controls', 'strategies'])
+                    module_params = self._resolve_risk_params(risk_params, single_name)
+                    loaded_controls.append(risk_control_class(broker=self.broker, params=module_params))
+                except Exception as e:
+                    failed_controls.append((single_name, e))
+                    print(f"Warning: Failed to load risk control '{single_name}'. Error: {e}")
+
+            if len(loaded_controls) == 1:
+                self.risk_control = loaded_controls[0]
+                print(f"[Engine] Risk Control loaded successfully: {loaded_controls[0].__class__.__name__}")
+            elif len(loaded_controls) > 1:
+                self.risk_control = _RiskControlChain(loaded_controls)
+                loaded_names = [ctrl.__class__.__name__ for ctrl in loaded_controls]
+                print(f"[Engine] Risk Control chain loaded successfully: {', '.join(loaded_names)}")
+            else:
                 self.risk_control = None
+
+            if failed_controls and self.risk_control:
+                failed_names = [name for name, _ in failed_controls]
+                print(f"[Engine Warning] Some risk controls failed to load: {failed_names}")
 
         print("--- LiveTrader Engine Initialized Successfully ---")
 
@@ -648,9 +729,10 @@ class LiveTrader:
                     self.broker.unlock_for_risk(data_name)
 
                 # 同步清理 risk_control 内部可能存在的标记 (兼容旧有的 exit_triggered 逻辑)
-                if hasattr(self.risk_control, 'exit_triggered') and isinstance(self.risk_control.exit_triggered, set):
-                    if data_name in self.risk_control.exit_triggered:
-                        self.risk_control.exit_triggered.remove(data_name)
+                if hasattr(self.risk_control, 'clear_exit_trigger'):
+                    self.risk_control.clear_exit_trigger(data_name)
+                elif hasattr(self.risk_control, 'exit_triggered') and isinstance(self.risk_control.exit_triggered, set):
+                    self.risk_control.exit_triggered.discard(data_name)
                 continue
 
             # --- B. 检查是否存在正在进行的风控订单 (异步处理核心) ---
@@ -751,8 +833,9 @@ class LiveTrader:
                         triggered_action = True
 
                         # 记录到 risk_control 内部 (兼容)
-                        if hasattr(self.risk_control, 'exit_triggered') and isinstance(self.risk_control.exit_triggered,
-                                                                                       set):
+                        if hasattr(self.risk_control, 'mark_exit_trigger'):
+                            self.risk_control.mark_exit_trigger(data_name)
+                        elif hasattr(self.risk_control, 'exit_triggered') and isinstance(self.risk_control.exit_triggered, set):
                             self.risk_control.exit_triggered.add(data_name)
                     else:
                         self.broker.log(f"[Risk] Error: Failed to submit sell order for {data_name}")

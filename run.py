@@ -237,6 +237,9 @@ if __name__ == '__main__':
             'slippage': args.slippage,
             'timeframe': args.timeframe,
             'compression': args.compression,
+            # 实盘风控配置透传
+            'risk': args.risk,
+            'risk_params': r_params,
             # 透传选股器和标的参数
             'selection': args.selection,
             # 同时也处理 symbols (转为列表)，以防没有选股器时使用

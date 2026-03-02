@@ -697,6 +697,8 @@ class IBBrokerAdapter(BaseLiveBroker):
 
         symbols = kwargs.get('symbols', [])
         selection_name = kwargs.get('selection')
+        risk_name = kwargs.get('risk')
+        risk_params = kwargs.get('risk_params')
 
         print(f"\n>>> 🛡️ Launching IBKR Phoenix Mode (Host: {host}:{port}) <<<")
         runtime_marker = getattr(config, 'RUNTIME_MARKER', 'ib-live-2026-02-27-riskfix-v1')
@@ -741,7 +743,12 @@ class IBBrokerAdapter(BaseLiveBroker):
             engine_config['timeframe'] = kwargs.get('timeframe')
         if kwargs.get('compression') is not None:
             engine_config['compression'] = kwargs.get('compression')
-        if selection_name: engine_config['selection_name'] = selection_name
+        if selection_name:
+            engine_config['selection_name'] = selection_name
+        if risk_name:
+            engine_config['risk'] = risk_name
+        if risk_params is not None:
+            engine_config['risk_params'] = risk_params
 
         trader = LiveTrader(engine_config)
         # 注入 IB 实例到 data_provider (如果有)

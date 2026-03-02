@@ -9,6 +9,7 @@ import pytest
 import config
 from data_providers.base_provider import BaseDataProvider
 from live_trader.engine import LiveTrader
+from risk_controls.base_risk_control import BaseRiskControl
 from strategies.base_strategy import BaseStrategy
 
 
@@ -1158,3 +1159,71 @@ def test_risk_unknown_status_blocks_but_not_crash(monkeypatch):
     assert triggered is True, "未知订单状态应触发阻断，避免策略继续下单。"
     assert symbol in engine._pending_risk_orders, "未知状态下不应误删待跟踪风险订单。"
     assert engine.risk_control.check_calls == 0, "未知状态时应先阻断，不应继续执行风险 check。"
+
+
+def test_live_engine_supports_multi_risk_chain_without_fail_open(monkeypatch):
+    """
+    实盘多风控回归:
+    risk='A,B' 时应加载为链式风控，不得因为逗号字符串导致整体失效(None)。
+    """
+    import live_trader.engine as engine_module
+
+    class NoopRisk(BaseRiskControl):
+        def __init__(self, broker, params=None):
+            super().__init__(broker, params)
+            self.check_calls = 0
+
+        def check(self, data):
+            self.check_calls += 1
+            return None
+
+    class SellRisk(BaseRiskControl):
+        def __init__(self, broker, params=None):
+            super().__init__(broker, params)
+            self.check_calls = 0
+
+        def check(self, data):
+            self.check_calls += 1
+            return "SELL"
+
+    def _resolver(class_name, paths):
+        mapping = {
+            "DummyHeartbeatStrategy": DummyHeartbeatStrategy,
+            "NoopRisk": NoopRisk,
+            "SellRisk": SellRisk,
+        }
+        return mapping[class_name]
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(engine_module, "get_class_from_name", _resolver)
+
+    cfg = {
+        "strategy_name": "DummyHeartbeatStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+        "risk": "NoopRisk,SellRisk",
+        "risk_params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 10, 30, 0))
+    engine.init(context)
+    engine.broker.set_datetime(context.now)
+
+    assert engine.risk_control is not None, "多风控配置不应退化为无风控。"
+    controls = getattr(engine.risk_control, "controls", None)
+    assert controls is not None and len(controls) == 2, "多风控应构建链式对象并加载全部模块。"
+
+    triggered = engine._check_risk_controls()
+
+    assert triggered is True, "链式风控中任一模块触发 SELL 时应阻断策略并执行风控动作。"
+    assert controls[0].check_calls >= 1, "链式风控第1个模块未被执行。"
+    assert controls[1].check_calls >= 1, "链式风控第2个模块未被执行。"
+    sell_orders = [o for o in engine.broker.submitted_orders if o["side"] == "SELL"]
+    assert sell_orders, "风控触发后应实际发出 SELL 平仓单。"
