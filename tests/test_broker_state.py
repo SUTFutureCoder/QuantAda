@@ -173,7 +173,7 @@ def test_auto_downgrade_and_refund():
 def test_rejected_buy_recalculates_shares_by_available_cash(monkeypatch):
     """
     拒单后重算:
-    LOT_SIZE=1 时，应按当前可用资金一次重算到可承受股数，而非仅减 1 股。
+    LOT_SIZE=1 时，应按当前可用资金一次重算到可承受股数（含 0.98 安全收缩），而非仅减 1 股。
     """
     monkeypatch.setattr(config, "LOT_SIZE", 1)
 
@@ -189,12 +189,14 @@ def test_rejected_buy_recalculates_shares_by_available_cash(monkeypatch):
     broker.submitted_orders[0]["status"] = "Inactive"
     broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
 
+    expected_recalc = int(29 * (271.0 / (29 * 10.0 * broker.safety_multiplier)) * 0.98)
     assert len(broker.submitted_orders) == 2, "拒单后应触发重试订单"
     assert broker.submitted_orders[1]["side"] == "BUY", "重算后应继续提交 BUY 订单"
-    assert broker.submitted_orders[1]["volume"] == 27, "拒单后应按可用资金直接重算为 27 股"
+    assert broker.submitted_orders[1]["volume"] == expected_recalc, "拒单后应按自适应重算股数提交"
+    assert broker.submitted_orders[1]["volume"] == 26, "当前参数下应重算为 26 股（含 0.98 安全收缩）"
     assert "ORDER_2" in broker._active_buys, "重算重试后的订单应进入 _active_buys"
-    assert broker._virtual_spent_cash == pytest.approx(27 * 10.0 * broker.safety_multiplier), (
-        "重算后的虚拟占资应与 27 股一致。"
+    assert broker._virtual_spent_cash == pytest.approx(26 * 10.0 * broker.safety_multiplier), (
+        "重算后的虚拟占资应与 26 股一致。"
     )
 
 

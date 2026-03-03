@@ -317,3 +317,68 @@ def test_gm_sellable_position_fallback_to_available_then_volume_today(monkeypatc
 
     assert broker.get_sellable_position(d1) == 800, "回测兜底应使用 volume - volume_today。"
     assert broker.get_sellable_position(d2) == 650, "available_now 缺失时应使用 available。"
+
+
+def test_gm_pending_order_contract_includes_id(monkeypatch):
+    """
+    最小契约:
+    get_pending_orders 返回项必须包含 id，供基础层隔夜清理协议使用。
+    """
+    import live_trader.adapters.gm_broker as gm_module
+
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    pending = SimpleNamespace(
+        cl_ord_id="GM_OID_001",
+        symbol="SHSE.600000",
+        side=mock_gm_api.OrderSide_Buy,
+        volume=1000,
+        filled_volume=200,
+    )
+    monkeypatch.setattr(mock_gm_api, "get_unfinished_orders", lambda: [pending], raising=False)
+
+    broker = GmBrokerAdapter(context=MagicMock())
+    broker.is_live = True
+
+    got = broker.get_pending_orders()
+    assert len(got) == 1, "应返回 1 笔在途单。"
+    assert got[0]["id"] == "GM_OID_001", "在途单契约缺失 id。"
+    assert got[0]["symbol"] == "SHSE.600000"
+    assert got[0]["direction"] == "BUY"
+    assert got[0]["size"] == 800
+
+
+def test_gm_cancel_pending_order_by_id(monkeypatch):
+    """
+    最小契约:
+    cancel_pending_order(order_id) 应能根据 id 定位并发起撤单。
+    """
+    import live_trader.adapters.gm_broker as gm_module
+
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    pending = SimpleNamespace(
+        cl_ord_id="GM_OID_002",
+        symbol="SHSE.600000",
+        side=mock_gm_api.OrderSide_Buy,
+        volume=1000,
+        filled_volume=0,
+    )
+    monkeypatch.setattr(mock_gm_api, "get_unfinished_orders", lambda: [pending], raising=False)
+    # 兼容 `import gm.api as gm_api` 的导入路径，确保拿到同一 mock 对象
+    mock_gm.api = mock_gm_api
+
+    cancel_calls = []
+
+    def _fake_order_cancel(arg):
+        cancel_calls.append(arg)
+
+    monkeypatch.setattr(mock_gm_api, "order_cancel", _fake_order_cancel, raising=False)
+    monkeypatch.setattr(mock_gm_api, "cancel_order", None, raising=False)
+
+    broker = GmBrokerAdapter(context=MagicMock())
+    broker.is_live = True
+
+    ok = broker.cancel_pending_order("GM_OID_002")
+    assert ok is True, "按 id 撤单应返回 True。"
+    assert len(cancel_calls) == 1, "应至少发起一次撤单调用。"

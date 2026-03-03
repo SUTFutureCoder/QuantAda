@@ -20,6 +20,11 @@ PRINT_PLAN = False
 # 保护标的不参与策略计算，优先级低于策略参数。适用于压舱石；尊重客户主观选择实现虚拟多租户分仓；跨越法币-券商通道摩擦，券商内部转换标的，避免银行无法打款。
 IGNORED_SYMBOLS = ['SGOV', 'BIL', 'USFR', 'SHY']
 
+# 是否跨日保留委托：
+# - False: 每个交易日首次运行前自动清理所有在途委托（无状态推荐）
+# - True : 保留隔日委托，不做自动清理
+KEEP_OVERNIGHT_ORDERS = False
+
 
 # --- 数据源配置 ---
 # Tushare API Token

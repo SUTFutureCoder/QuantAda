@@ -184,6 +184,7 @@ class GmBrokerAdapter(BaseLiveBroker):
             orders = get_unfinished_orders()
             for o in orders:
                 res.append({
+                    'id': str(getattr(o, 'cl_ord_id', '') or ''),
                     'symbol': o.symbol,
                     'direction': 'BUY' if o.side == OrderSide_Buy else 'SELL',
                     # 未成交数量 = 委托总数 - 已成交数
@@ -192,6 +193,50 @@ class GmBrokerAdapter(BaseLiveBroker):
         except Exception as e:
             print(f"[GmBroker] 获取在途订单失败: {e}")
         return res
+
+    def cancel_pending_order(self, order_id: str) -> bool:
+        """掘金：按委托ID取消在途单（最小兼容实现）"""
+        if not self.is_live:
+            return False
+        oid = str(order_id or '').strip()
+        if not oid:
+            return False
+
+        try:
+            import gm.api as gm_api
+            get_unfinished_orders = getattr(gm_api, 'get_unfinished_orders', None)
+            if not callable(get_unfinished_orders):
+                return False
+
+            target = None
+            for o in get_unfinished_orders() or []:
+                if str(getattr(o, 'cl_ord_id', '') or '') == oid:
+                    target = o
+                    break
+            if target is None:
+                return False
+
+            cancel_funcs = [
+                getattr(gm_api, 'order_cancel', None),
+                getattr(gm_api, 'cancel_order', None),
+            ]
+            for fn in cancel_funcs:
+                if not callable(fn):
+                    continue
+                for arg in (target, oid):
+                    try:
+                        fn(arg)
+                        return True
+                    except TypeError:
+                        continue
+                    except Exception:
+                        continue
+
+            print(f"[GmBroker] No compatible cancel API found for order {oid}.")
+            return False
+        except Exception as e:
+            print(f"[GmBroker] cancel_pending_order failed ({oid}): {e}")
+            return False
 
     # 实盘引擎调用此方法设置当前时间时，我们将其转换为无时区的北京时间
     # 这样 engine.py 中对比 df.index (无时区) 和 current_dt (无时区) 就不会报错了

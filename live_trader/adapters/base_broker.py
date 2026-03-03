@@ -136,9 +136,54 @@ class BaseLiveBroker(ABC):
     def get_pending_orders(self) -> list:
         """
         [实盘防爆仓] 子类必须实现。获取所有未完成的在途订单。
-        返回统一格式: [{'symbol': 'SHSE.510300', 'direction': 'BUY', 'size': 1000}, ...]
+        返回统一格式: [{'id': '123', 'symbol': 'SHSE.510300', 'direction': 'BUY', 'size': 1000}, ...]
         """
         pass
+
+    # --- 隔日委托清理协议（默认无操作，子类按需覆盖） ---
+    def cancel_pending_order(self, order_id: str) -> bool:
+        """
+        取消单笔在途委托。
+        子类应返回是否发起了取消请求（True/False）。
+        """
+        return False
+
+    def cleanup_overnight_orders(self) -> dict:
+        """
+        清理当前在途委托（用于交易日首次运行前的无状态自愈）。
+        约定:
+        - 依赖 get_pending_orders 返回的 'id' 字段
+        - 无 'id' 时跳过，不抛异常
+        """
+        summary = {'total': 0, 'canceled': 0, 'failed': 0, 'skipped': 0}
+        try:
+            pending_orders = self.get_pending_orders() or []
+        except Exception as e:
+            print(f"[Broker] cleanup_overnight_orders skipped: failed to fetch pending orders ({e})")
+            return summary
+
+        summary['total'] = len(pending_orders)
+        if not pending_orders:
+            return summary
+
+        for po in pending_orders:
+            oid = ''
+            if isinstance(po, dict):
+                oid = str(po.get('id', '') or '').strip()
+            if not oid:
+                summary['skipped'] += 1
+                continue
+
+            try:
+                if self.cancel_pending_order(oid):
+                    summary['canceled'] += 1
+                else:
+                    summary['failed'] += 1
+            except Exception as e:
+                summary['failed'] += 1
+                print(f"[Broker] cleanup_overnight_orders cancel failed ({oid}): {e}")
+
+        return summary
 
     @abstractmethod
     def _submit_order(self, data, volume, side, price):
@@ -344,16 +389,53 @@ class BaseLiveBroker(ABC):
         if cash_now <= 0:
             return 0
 
-        max_affordable = cash_now / (px * self.safety_multiplier)
+        # 自适应重算: 以"旧单所需资金"为基准按比例收缩，并额外打 98 折，
+        # 避免与券商(含汇率/占资缓冲)边界贴得过紧而再次触发拒单。
+        cash_needed_old = old_int * px * self.safety_multiplier
+        if cash_needed_old <= 0:
+            return 0
+        adaptive_shares = old_int * (cash_now / cash_needed_old) * 0.98
+
         if lot_int > 1:
-            recalc_shares = int(max_affordable // lot_int) * lot_int
+            recalc_shares = int(adaptive_shares // lot_int) * lot_int
         else:
-            recalc_shares = int(max_affordable)
+            recalc_shares = int(adaptive_shares)
 
         # 拒单后重试必须收缩到更小的数量，防止重复被拒。
         upper_bound = old_int - lot_int
         recalc_shares = min(recalc_shares, upper_bound)
         return max(0, recalc_shares)
+
+    def _geometric_downgrade_shares(self, old_shares, lot_size, retries):
+        """
+        当资金重算不可用时，按倍数（几何）降级股数。
+        采用“先缓后急”曲线：早期尽量保持组合一致性，后期加速收敛。
+        """
+        try:
+            old_int = int(abs(float(old_shares)))
+            lot_int = int(abs(float(lot_size)))
+            retries_int = int(retries)
+        except Exception:
+            return 0
+
+        if old_int <= 0:
+            return 0
+
+        lot_int = max(1, lot_int)
+        factors = (0.95, 0.90, 0.82, 0.72, 0.60)
+        idx = min(max(0, retries_int), len(factors) - 1)
+        factor = factors[idx]
+
+        raw_new = old_int * factor
+        if lot_int > 1:
+            new_shares = int(raw_new // lot_int) * lot_int
+        else:
+            new_shares = int(raw_new)
+
+        # 保证比原单更小，防止无效重复提交
+        upper_bound = old_int - lot_int
+        new_shares = min(new_shares, upper_bound)
+        return max(0, new_shares)
 
     def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):
         """通用的下单收尾逻辑：取整 + 提交"""
@@ -504,15 +586,15 @@ class BaseLiveBroker(ABC):
                             symbol = getattr(data, '_name', None) or getattr(getattr(proxy, 'data', None), '_name', 'Unknown')
                             price = buy_info['price']
 
-                            # 优先按当前可用资金重算；失败时再走逐手降级兜底。
+                            # 优先按当前可用资金重算；失败时再走倍数降级兜底。
                             old_shares = buy_info['shares']
                             recalculated = self._recalc_rejected_buy_shares(old_shares, price, lot_size)
                             if recalculated > 0:
                                 new_shares = recalculated
                                 downgrade_reason = "资金重算"
                             else:
-                                new_shares = old_shares - lot_size
-                                downgrade_reason = "逐手降级"
+                                new_shares = self._geometric_downgrade_shares(old_shares, lot_size, retries)
+                                downgrade_reason = "倍数降级"
 
                             print(f"⚠️ [Broker] 买单 {symbol} 被拒绝。触发自动降级 {retries + 1}/{max_retries}...")
                             print(f"   => {symbol} 尝试数量: {old_shares} -> {new_shares} ({downgrade_reason})")

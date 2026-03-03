@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import random
 import time
 import urllib.parse
 
@@ -28,14 +29,40 @@ class DingTalkAlarm(BaseAlarm):
         sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
         return f"{self.webhook}&timestamp={timestamp}&sign={sign}"
 
-    def _send(self, payload):
-        if not self.enabled: return
+    def _send_once(self, payload) -> bool:
         try:
             url = self._get_signed_url()
             resp = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
-            # print(f"[DingTalk] Response: {resp.text}")
+            if resp.status_code != 200:
+                print(f"[DingTalk Error] HTTP {resp.status_code}: {resp.text}")
+                return False
+
+            # 钉钉通常返回 {"errcode":0, "errmsg":"ok"}
+            try:
+                body = resp.json()
+                errcode = body.get("errcode", 0)
+                if errcode != 0:
+                    errmsg = body.get("errmsg", "")
+                    print(f"[DingTalk Error] API errcode={errcode}, errmsg={errmsg}")
+                    return False
+            except ValueError:
+                # 非 JSON 的 200 响应按成功处理，避免误判。
+                pass
+            return True
         except Exception as e:
             print(f"[DingTalk Error] Failed to send alarm: {e}")
+            return False
+
+    def _send(self, payload):
+        if not self.enabled:
+            return
+
+        if self._send_once(payload):
+            return
+
+        # 失败后随机退避一次，降低多实例同秒重试碰撞概率。
+        time.sleep(float(random.randint(1, 10)))
+        self._send_once(payload)
 
     def push_text(self, content: str, level: str = 'INFO'):
         # 简单文本

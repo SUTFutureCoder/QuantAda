@@ -1,3 +1,4 @@
+import random
 import time
 
 import requests
@@ -8,29 +9,42 @@ from .base_alarm import BaseAlarm
 
 class WeComAlarm(BaseAlarm):
     def __init__(self):
-        self.webhook = config.WECOM_WEBHOOK
+        self.webhook = getattr(config, "WECOM_WEBHOOK", "")
         self.enabled = bool(self.webhook)
 
-    def _send(self, payload):
-        if not self.enabled: return
+    def _send_once(self, payload) -> bool:
         try:
             resp = requests.post(self.webhook, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
             if resp.status_code != 200:
                 print(f"[WeCom Error] HTTP {resp.status_code}: {resp.text}")
-                return
+                return False
 
             try:
                 body = resp.json()
             except ValueError:
                 print(f"[WeCom Error] Non-JSON response: {resp.text}")
-                return
+                return False
 
             errcode = body.get("errcode", 0)
             if errcode != 0:
                 errmsg = body.get("errmsg", "")
                 print(f"[WeCom Error] API errcode={errcode}, errmsg={errmsg}")
+                return False
+            return True
         except Exception as e:
             print(f"[WeCom Error] Failed to send alarm: {e}")
+            return False
+
+    def _send(self, payload):
+        if not self.enabled:
+            return
+
+        if self._send_once(payload):
+            return
+
+        # 失败后随机退避一次，降低多实例同秒重试碰撞概率。
+        time.sleep(float(random.randint(1, 10)))
+        self._send_once(payload)
 
     def push_text(self, content: str, level: str = 'INFO'):
         payload = {

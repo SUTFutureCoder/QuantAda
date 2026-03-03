@@ -99,6 +99,8 @@ class LiveTrader:
         self._resolved_symbols = None
         # 分钟级数据的“每日全量重基准”执行记录（按 symbol 维度）
         self._intraday_rebase_done_on = {}
+        # 每日隔日委托清理执行记录（按自然日）
+        self._overnight_cleanup_done_on = None
 
     def _load_adapter_classes(self, platform: str):
         """
@@ -292,6 +294,20 @@ class LiveTrader:
     def run(self, context):
         print(f"--- LiveTrader Running at {context.now.strftime('%Y-%m-%d %H:%M:%S')} ---")
         self.broker.set_datetime(context.now)
+        if self.broker.is_live:
+            try:
+                self._cleanup_overnight_orders_before_refresh(context)
+            except Exception as e:
+                warn_msg = (
+                    f"Unexpected error in overnight cleanup hook: {e}. "
+                    "Continue this run."
+                )
+                print(f"[Engine Warning] {warn_msg}")
+                if hasattr(self, 'alarm_manager') and self.alarm_manager:
+                    try:
+                        self.alarm_manager.push_text(f"[Engine Warning] {warn_msg}", level='ERROR')
+                    except Exception as alarm_err:
+                        print(f"[Engine Warning] failed to push overnight cleanup hook alarm: {alarm_err}")
 
         # 顶层异常捕获，防止策略因单次错误而崩溃
         try:
@@ -421,6 +437,128 @@ class LiveTrader:
         if self.broker.is_live:
             print(
                 f"[Engine] ⏳ 实盘引擎保持运行中... 预计下一个 K线/调度时间约为: {next_expected_str} (以实际行情或定时任务时区为准)")
+
+    def _cleanup_overnight_orders_before_refresh(self, context):
+        """
+        在拉取当轮数据前清理隔日遗留委托，缩短“算信号 -> 下单”间的流程噪声。
+        仅在每个自然日首次 run 执行一次，保持无状态且避免误杀日内新单。
+        """
+        keep_overnight = bool(
+            self.config.get('KEEP_OVERNIGHT_ORDERS', getattr(config, 'KEEP_OVERNIGHT_ORDERS', False))
+        )
+        if keep_overnight:
+            return
+
+        try:
+            run_date = pd.Timestamp(context.now).date()
+        except Exception:
+            run_date = getattr(context, 'now', None)
+            if hasattr(run_date, 'date'):
+                run_date = run_date.date()
+
+        if run_date is None:
+            return
+        if self._overnight_cleanup_done_on == run_date:
+            return
+        if not hasattr(self.broker, 'cleanup_overnight_orders'):
+            self._overnight_cleanup_done_on = run_date
+            return
+
+        max_attempts = 5
+        pending_cleared = False
+        last_pending_snapshot = []
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                summary = self.broker.cleanup_overnight_orders() or {}
+            except Exception as e:
+                print(f"[Engine Warning] overnight order cleanup failed (attempt {attempt}/{max_attempts}): {e}")
+                summary = {'total': 0, 'canceled': 0, 'failed': 1, 'skipped': 0}
+
+            total = int(summary.get('total', 0) or 0)
+            canceled = int(summary.get('canceled', 0) or 0)
+            failed = int(summary.get('failed', 0) or 0)
+            skipped = int(summary.get('skipped', 0) or 0)
+
+            print(
+                "[Engine] Overnight order cleanup before refresh "
+                f"(attempt {attempt}/{max_attempts}): "
+                f"total={total}, canceled={canceled}, failed={failed}, skipped={skipped}"
+            )
+
+            if canceled > 0 and hasattr(self.broker, 'sync_balance'):
+                try:
+                    self.broker.sync_balance()
+                except Exception as e:
+                    print(f"[Engine Warning] sync_balance after overnight cleanup failed: {e}")
+
+            # 短确认仍不通过则继续重试，但不中断本轮策略执行。
+            pending_cleared = self._confirm_pending_orders_cleared(max_checks=2, sleep_seconds=0.5)
+            if pending_cleared:
+                break
+            try:
+                last_pending_snapshot = self.broker.get_pending_orders() or []
+            except Exception:
+                last_pending_snapshot = []
+
+            if attempt < max_attempts:
+                print("[Engine] Overnight cleanup barrier not cleared, retrying...")
+
+        if not pending_cleared:
+            pending_count = len(last_pending_snapshot)
+            pending_preview = []
+            for po in last_pending_snapshot[:5]:
+                if not isinstance(po, dict):
+                    continue
+                oid = str(po.get('id', '') or '').strip()
+                sym = str(po.get('symbol', '') or '').strip()
+                direction = str(po.get('direction', '') or '').strip()
+                size = po.get('size', '')
+                pending_preview.append(f"{oid}:{sym}:{direction}:{size}")
+            pending_preview_text = ", ".join(pending_preview) if pending_preview else "N/A"
+
+            warn_msg = (
+                f"Overnight cleanup not fully cleared after {max_attempts} attempts. "
+                f"pending_count={pending_count}, pending_preview={pending_preview_text}. Continue this run."
+            )
+            print(f"[Engine Warning] {warn_msg}")
+            if hasattr(self, 'alarm_manager') and self.alarm_manager:
+                try:
+                    self.alarm_manager.push_text(f"[Engine Warning] {warn_msg}", level='ERROR')
+                except Exception as e:
+                    print(f"[Engine Warning] failed to push overnight cleanup alarm: {e}")
+
+        # 无状态优先：同一自然日只清理一次，避免分钟级重复干扰。
+        self._overnight_cleanup_done_on = run_date
+        return
+
+    def _confirm_pending_orders_cleared(self, max_checks=6, sleep_seconds=0.5):
+        if not hasattr(self.broker, 'get_pending_orders'):
+            return True
+
+        try:
+            checks = max(1, int(max_checks))
+        except Exception:
+            checks = 1
+        try:
+            wait_s = max(0.0, float(sleep_seconds))
+        except Exception:
+            wait_s = 0.0
+
+        for idx in range(checks):
+            try:
+                pending = self.broker.get_pending_orders() or []
+            except Exception as e:
+                print(f"[Engine Warning] pending-order barrier check failed: {e}")
+                return False
+
+            if len(pending) == 0:
+                return True
+
+            if idx < checks - 1 and wait_s > 0:
+                time.sleep(wait_s)
+
+        return False
 
     def notify_order(self, order):
         """
@@ -948,24 +1086,33 @@ def on_order_status_callback(context, raw_order):
                 # 为了防止刷屏，只有当成交量为0时才推送这个"提交确认"
                 # (如果成交量>0，下面的成交逻辑会接管)
                 if order_proxy.executed.size == 0:
+                    # 对外部遗留单（非本引擎本轮/本地状态跟踪）不推送“已提交”，避免误导。
+                    is_tracked = True
+                    if hasattr(broker, '_active_buys') and hasattr(broker, '_pending_sells'):
+                        active_buys = getattr(broker, '_active_buys', {})
+                        pending_sells = getattr(broker, '_pending_sells', set())
+                        is_tracked = bool(order_id and (order_id in active_buys or order_id in pending_sells))
+                    if not is_tracked:
+                        print(f"[Engine Callback] Skip submitted alarm for untracked order ({order_id or 'UNKNOWN'}).")
+                    else:
                     # 尝试获取目标下单数量
-                    total_qty = 0
-                    # 针对 IB: trade.order.totalQuantity
-                    if hasattr(order_proxy, 'trade') and hasattr(order_proxy.trade, 'order'):
-                        total_qty = order_proxy.trade.order.totalQuantity
-                    # 针对其他 Broker (通用回退)
-                    elif hasattr(order_proxy, 'raw_order') and hasattr(order_proxy.raw_order, 'volume'):
-                        total_qty = order_proxy.raw_order.volume
-                    elif hasattr(order_proxy, 'platform_order') and hasattr(order_proxy.platform_order, 'volume'):
-                        total_qty = order_proxy.platform_order.volume
+                        total_qty = 0
+                        # 针对 IB: trade.order.totalQuantity
+                        if hasattr(order_proxy, 'trade') and hasattr(order_proxy.trade, 'order'):
+                            total_qty = order_proxy.trade.order.totalQuantity
+                        # 针对其他 Broker (通用回退)
+                        elif hasattr(order_proxy, 'raw_order') and hasattr(order_proxy.raw_order, 'volume'):
+                            total_qty = order_proxy.raw_order.volume
+                        elif hasattr(order_proxy, 'platform_order') and hasattr(order_proxy.platform_order, 'volume'):
+                            total_qty = order_proxy.platform_order.volume
 
-                    action = "BUY" if order_proxy.is_buy() else "SELL"
-                    symbol = order_proxy.data._name if order_proxy.data else "Unknown"
+                        action = "BUY" if order_proxy.is_buy() else "SELL"
+                        symbol = order_proxy.data._name if order_proxy.data else "Unknown"
 
-                    # 构造消息: ⏳ 代表等待/进行中
-                    alarm_msg = f"⏳ 订单已提交 ({current_status}): {action} {total_qty} {symbol}"
-                    # 使用 push_text 发送普通文本通知
-                    alarm_manager.push_text(alarm_msg)
+                        # 构造消息: ⏳ 代表等待/进行中
+                        alarm_msg = f"⏳ 订单已提交 ({current_status}): {action} {total_qty} {symbol}"
+                        # 使用 push_text 发送普通文本通知
+                        alarm_manager.push_text(alarm_msg)
 
 
             # 报警通知
@@ -987,6 +1134,20 @@ def on_order_status_callback(context, raw_order):
             if order_proxy.is_rejected():
                 symbol = order_proxy.data._name if order_proxy.data else "Unknown"
                 alarm_manager.push_text(f"⚠️ 订单被拒绝: {symbol} - {msg}", level='WARNING')
+
+            # C. 撤单状态推送（含手动单/隔夜清理单）
+            if order_proxy.is_canceled():
+                total_qty = 0
+                if hasattr(order_proxy, 'trade') and hasattr(order_proxy.trade, 'order'):
+                    total_qty = order_proxy.trade.order.totalQuantity
+                elif hasattr(order_proxy, 'raw_order') and hasattr(order_proxy.raw_order, 'volume'):
+                    total_qty = order_proxy.raw_order.volume
+                elif hasattr(order_proxy, 'platform_order') and hasattr(order_proxy.platform_order, 'volume'):
+                    total_qty = order_proxy.platform_order.volume
+
+                action = "BUY" if order_proxy.is_buy() else "SELL"
+                symbol = order_proxy.data._name if order_proxy.data else "Unknown"
+                alarm_manager.push_text(f"🛑 订单已撤销 ({current_status}): {action} {total_qty} {symbol}")
 
             # 3. 如果卖单成交（有钱回笼），仅同步资金。
             # 无状态模式下不执行延迟队列重放。

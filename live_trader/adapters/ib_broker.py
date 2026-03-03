@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import math
+import time
 
 import pandas as pd
 from ib_insync import IB, Stock, MarketOrder, Trade, Forex, Contract
@@ -9,6 +10,7 @@ try:
 except ImportError:
     Crypto = None
 
+from alarms.manager import AlarmManager
 from common.ib_symbol_parser import resolve_ib_contract_spec
 import config
 from data_providers.ibkr_provider import IbkrDataProvider
@@ -93,6 +95,19 @@ class IBDataProvider(IbkrDataProvider):
 
 class IBBrokerAdapter(BaseLiveBroker):
     """Interactive Brokers 适配器"""
+    _PENDING_STATUSES = {
+        'PENDINGSUBMIT',
+        'APIPENDING',
+        'PENDINGCANCEL',
+        'PRESUBMITTED',
+        'SUBMITTED',
+    }
+    _TERMINAL_STATUSES = {
+        'FILLED',
+        'CANCELLED',
+        'APICANCELLED',
+        'INACTIVE',
+    }
 
     def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
         # 从 context 中获取由 launch 注入的 ib 实例
@@ -103,6 +118,11 @@ class IBBrokerAdapter(BaseLiveBroker):
         self._last_valid_fx_rates = {}
         # 汇率历史查询失败冷却，防止单次故障导致每次 get_cash 都阻塞。
         self._fx_rate_retry_not_before = {}
+        # 跨 client 的 open orders 拉取节流，避免高频路径反复 reqAllOpenOrders。
+        self._req_all_open_orders_last_ts = 0.0
+        self._req_all_open_orders_interval_s = 2.0
+        # “手工单需 clientId=0 才可撤”告警去重，避免 cleanup 重试阶段刷屏。
+        self._manual_bind_alarm_keys = set()
         super().__init__(context, cash_override, commission_override, slippage_override)
 
     @property
@@ -225,28 +245,360 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 明确获取净清算价值
         return self._fetch_smart_value(['NetLiquidation'])
 
+    @staticmethod
+    def _safe_order_id(trade) -> str:
+        try:
+            oid_raw = getattr(getattr(trade, 'order', None), 'orderId', '')
+            oid = str(oid_raw or '').strip()
+            if not oid:
+                return ''
+            try:
+                # IB 绑定手工单时可能分配负数 orderId（clientId=0 场景），
+                # 只应把 0 视为无效。
+                if int(float(oid)) == 0:
+                    return ''
+            except Exception:
+                pass
+            return oid
+        except Exception:
+            return ''
+
+    @staticmethod
+    def _safe_perm_id(trade) -> str:
+        try:
+            order_perm = getattr(getattr(trade, 'order', None), 'permId', '')
+            status_perm = getattr(getattr(trade, 'orderStatus', None), 'permId', '')
+            perm_raw = order_perm if order_perm not in (None, '') else status_perm
+            perm = str(perm_raw or '').strip()
+            if not perm:
+                return ''
+            try:
+                if int(float(perm)) <= 0:
+                    return ''
+            except Exception:
+                pass
+            return perm
+        except Exception:
+            return ''
+
+    @staticmethod
+    def _in_async_task() -> bool:
+        try:
+            loop = asyncio.get_running_loop()
+            return asyncio.current_task(loop=loop) is not None
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+
+    def _safe_pending_id(self, trade) -> str:
+        oid = self._safe_order_id(trade)
+        if oid:
+            return oid
+        perm = self._safe_perm_id(trade)
+        if perm:
+            return f"perm:{perm}"
+        return ''
+
+    def _match_pending_id(self, trade, pending_id: str) -> bool:
+        target = str(pending_id or '').strip()
+        if not target:
+            return False
+
+        oid = self._safe_order_id(trade)
+        perm = self._safe_perm_id(trade)
+
+        if target.lower().startswith('perm:'):
+            return bool(perm and target.split(':', 1)[1] == perm)
+        if oid and target == oid:
+            return True
+        if perm and target == perm:
+            return True
+        return False
+
+    def _connected_client_id(self):
+        try:
+            return int(getattr(getattr(self.ib, 'client', None), 'clientId', -1))
+        except Exception:
+            return -1
+
+    def _try_bind_manual_order_and_resolve(self, perm_id: str):
+        """
+        尝试将手工单绑定到当前 API 视角并获取可撤的有效 orderId。
+        说明:
+        - clientId=0 时，reqAutoOpenOrders/reqOpenOrders 可帮助绑定手工单。
+        - 非 0 clientId 下通常无法绑定，调用后返回 None。
+        """
+        pid = str(perm_id or '').strip()
+        if not pid:
+            return None
+
+        try:
+            if hasattr(self.ib, 'reqOpenOrders'):
+                self.ib.reqOpenOrders()
+        except Exception as e:
+            print(f"[IBBroker] reqOpenOrders bind attempt failed: {e}")
+
+        for t in self._collect_open_trades(force_refresh_all=True):
+            if self._safe_perm_id(t) != pid:
+                continue
+            if self._safe_order_id(t):
+                return t
+        return None
+
+    def _push_manual_bind_alarm_once(self, pending_id: str, perm_id: str, client_id: int, reason: str):
+        key = f"{client_id}:{perm_id or pending_id}"
+        if key in self._manual_bind_alarm_keys:
+            return
+        self._manual_bind_alarm_keys.add(key)
+
+        if client_id != 0:
+            hint = "Manual TWS order cleanup may require IBKR_CLIENT_ID=0."
+        else:
+            hint = (
+                "clientId is already 0. Please verify TWS API manual-order binding settings "
+                "(for example, auto-bind/negative order-id mapping)."
+            )
+
+        warn_msg = (
+            f"[IBBroker Warning] cancel_pending_order {reason} "
+            f"(pending_id={pending_id}, permId={perm_id}, clientId={client_id}). "
+            f"{hint}"
+        )
+        print(warn_msg)
+        try:
+            AlarmManager().push_text(warn_msg, level='ERROR')
+        except Exception as e:
+            print(f"[IBBroker Warning] failed to push manual-bind alarm: {e}")
+
+    def _sleep_ib(self, seconds: float):
+        wait_s = 0.0
+        try:
+            wait_s = max(0.0, float(seconds))
+        except Exception:
+            wait_s = 0.0
+        if wait_s <= 0:
+            return
+
+        if hasattr(self, 'ib') and self.ib and hasattr(self.ib, 'sleep') and not self._in_async_task():
+            try:
+                self.ib.sleep(wait_s)
+                return
+            except Exception:
+                pass
+        time.sleep(wait_s)
+
+    def _find_trade_by_pending_id(self, pending_id: str):
+        for t in self._collect_open_trades(force_refresh_all=True, include_trade_cache=False):
+            if self._match_pending_id(t, pending_id):
+                return t
+        return None
+
+    def _is_trade_still_pending(self, trade) -> bool:
+        status = getattr(trade, 'orderStatus', None)
+        if not status:
+            return False
+
+        raw_status = str(getattr(status, 'status', '') or '').strip().upper()
+        try:
+            rem = float(getattr(status, 'remaining', 0) or 0)
+        except Exception:
+            rem = 0.0
+
+        if raw_status in self._TERMINAL_STATUSES:
+            return False
+        if raw_status:
+            if raw_status not in self._PENDING_STATUSES:
+                return False
+            return rem > 0
+        return rem > 0
+
+    def _confirm_cancel_effective(self, pending_id: str, max_checks=3, sleep_seconds=0.15) -> bool:
+        try:
+            checks = max(1, int(max_checks))
+        except Exception:
+            checks = 1
+        for idx in range(checks):
+            trade = self._find_trade_by_pending_id(pending_id)
+            if trade is None:
+                return True
+            if not self._is_trade_still_pending(trade):
+                return True
+            if idx < checks - 1:
+                self._sleep_ib(sleep_seconds)
+        return False
+
+    def _collect_open_trades(self, force_refresh_all=False, include_trade_cache=False):
+        """
+        汇总当前可见的 open trades:
+        - openTrades(): 当前客户端视角
+        - reqAllOpenOrders(): 跨 client 快照（节流）
+        - trades(): 本地缓存兜底（默认关闭，避免引入终态陈旧单）
+        """
+        if not hasattr(self, 'ib') or not self.ib or not self.ib.isConnected():
+            return []
+
+        collected = []
+        seen = set()
+
+        def _append(items):
+            for t in items or []:
+                oid = self._safe_order_id(t)
+                key = oid if oid else str(id(t))
+                if key in seen:
+                    continue
+                seen.add(key)
+                collected.append(t)
+
+        try:
+            _append(self.ib.openTrades())
+        except Exception as e:
+            print(f"[IBBroker] openTrades 拉取失败: {e}")
+
+        can_refresh_all = hasattr(self.ib, 'reqAllOpenOrders')
+        if can_refresh_all:
+            # ib_insync 在异步回调任务中直接 reqAllOpenOrders 可能触发
+            # "This event loop is already running"，该场景退化为用本地可见缓存。
+            if self._in_async_task():
+                can_refresh_all = False
+        if can_refresh_all:
+            now_ts = time.monotonic()
+            should_refresh = force_refresh_all or (
+                now_ts - self._req_all_open_orders_last_ts >= self._req_all_open_orders_interval_s
+            )
+            if should_refresh:
+                self._req_all_open_orders_last_ts = now_ts
+                try:
+                    _append(self.ib.reqAllOpenOrders())
+                except Exception as e:
+                    print(f"[IBBroker] reqAllOpenOrders 拉取失败: {e}")
+
+        if include_trade_cache and hasattr(self.ib, 'trades'):
+            try:
+                _append(self.ib.trades())
+            except Exception as e:
+                print(f"[IBBroker] trades 缓存读取失败: {e}")
+
+        return collected
+
     def get_pending_orders(self) -> list:
-        """盈透：获取在途订单"""
+        """盈透：获取在途订单（含跨 client 兜底视角）"""
         if not hasattr(self, 'ib') or not self.ib or not self.ib.isConnected():
             return []
 
         res = []
         try:
-            open_trades = self.ib.openTrades()
+            open_trades = self._collect_open_trades(force_refresh_all=False, include_trade_cache=False)
             for t in open_trades:
-                if t.orderStatus:
-                    rem = t.orderStatus.remaining
-                    if rem > 0:
-                        res.append({
-                            'id': str(t.order.orderId),
-                            # 从 Trade 对象中提取 contract 和 order 信息
-                            'symbol': t.contract.symbol,
-                            'direction': 'BUY' if t.order.action == 'BUY' else 'SELL',
-                            'size': rem
-                        })
+                order = getattr(t, 'order', None)
+                status = getattr(t, 'orderStatus', None)
+                contract = getattr(t, 'contract', None)
+                if not order or not status:
+                    continue
+
+                try:
+                    rem = float(getattr(status, 'remaining', 0) or 0)
+                except Exception:
+                    rem = 0.0
+                raw_status = str(getattr(status, 'status', '') or '').strip()
+                norm_status = raw_status.upper()
+
+                # 优先按 IB 状态机判定：
+                # - 终态直接排除，避免“已撤单但 remaining 未及时归零”导致误判在途。
+                # - 有状态且非 pending 态时保守排除。
+                # - 无状态才回退到 remaining>0 规则。
+                if norm_status in self._TERMINAL_STATUSES:
+                    continue
+                if norm_status:
+                    if norm_status not in self._PENDING_STATUSES:
+                        continue
+                    if rem <= 0:
+                        continue
+                else:
+                    if rem <= 0:
+                        continue
+
+                symbol = str(getattr(contract, 'symbol', '') or '').strip()
+                oid = self._safe_pending_id(t)
+                action = str(getattr(order, 'action', '') or '').strip().upper()
+                res.append({
+                    'id': oid,
+                    'symbol': symbol,
+                    'direction': 'BUY' if action == 'BUY' else 'SELL',
+                    'size': rem
+                })
         except Exception as e:
             print(f"[IBBroker] 获取在途订单失败: {e}")
         return res
+
+    def cancel_pending_order(self, order_id: str) -> bool:
+        """盈透：按委托ID取消在途单"""
+        if not hasattr(self, 'ib') or not self.ib or not self.ib.isConnected():
+            return False
+
+        oid = str(order_id or '').strip()
+        if not oid:
+            return False
+
+        try:
+            for t in self._collect_open_trades(force_refresh_all=True, include_trade_cache=False):
+                if not self._match_pending_id(t, oid):
+                    continue
+                remaining = float(getattr(getattr(t, 'orderStatus', None), 'remaining', 0) or 0)
+                if remaining <= 0:
+                    return False
+                raw_status = str(getattr(getattr(t, 'orderStatus', None), 'status', '') or '').strip().upper()
+                if raw_status in self._TERMINAL_STATUSES:
+                    return False
+                if raw_status == 'PENDINGCANCEL':
+                    return False
+                order = getattr(t, 'order', None)
+                if not order:
+                    return False
+                order_id = self._safe_order_id(t)
+                if not order_id:
+                    perm_id = self._safe_perm_id(t)
+                    rebound = self._try_bind_manual_order_and_resolve(perm_id)
+                    if rebound is None:
+                        cid = self._connected_client_id()
+                        print(
+                            f"[IBBroker] cancel_pending_order skipped ({oid}): "
+                            f"unresolved api orderId (permId={perm_id}, clientId={cid})."
+                        )
+                        self._push_manual_bind_alarm_once(
+                            oid, perm_id, cid, reason='unresolved api orderId'
+                        )
+                        return False
+                    t = rebound
+                    order = getattr(t, 'order', None)
+                    if not order or not self._safe_order_id(t):
+                        cid = self._connected_client_id()
+                        print(
+                            f"[IBBroker] cancel_pending_order skipped ({oid}): "
+                            f"bind retry still has invalid orderId (clientId={cid})."
+                        )
+                        self._push_manual_bind_alarm_once(
+                            oid, perm_id, cid, reason='bind retry still has invalid orderId'
+                        )
+                        return False
+                self.ib.cancelOrder(order)
+                if self._confirm_cancel_effective(oid, max_checks=3, sleep_seconds=0.15):
+                    return True
+
+                cid = self._connected_client_id()
+                perm_id = self._safe_perm_id(t)
+                print(
+                    f"[IBBroker] cancel_pending_order failed ({oid}): "
+                    f"cancel not confirmed (permId={perm_id}, clientId={cid})."
+                )
+                self._push_manual_bind_alarm_once(
+                    oid, perm_id, cid, reason='cancel not confirmed by IB'
+                )
+                return False
+            return False
+        except Exception as e:
+            print(f"[IBBroker] cancel_pending_order failed ({oid}): {e}")
+            return False
 
     @staticmethod
     def is_live_mode(context) -> bool:
@@ -795,6 +1147,19 @@ class IBBrokerAdapter(BaseLiveBroker):
                     try:
                         ib.connect(host, port, clientId=client_id)
                         print("[System] ✅ Connected successfully.")
+                        try:
+                            if client_id == 0 and hasattr(ib, 'reqAutoOpenOrders'):
+                                ib.reqAutoOpenOrders(True)
+                                if hasattr(ib, 'reqOpenOrders'):
+                                    ib.reqOpenOrders()
+                                print("[System] 🔗 Manual order binding enabled (clientId=0).")
+                            elif client_id != 0:
+                                print(
+                                    "[System] ℹ️ clientId != 0: manual TWS orders may keep orderId=0 "
+                                    "and cannot be canceled individually."
+                                )
+                        except Exception as bind_err:
+                            print(f"[System Warning] manual-order bind setup failed: {bind_err}")
                     except Exception as e:
                         # 🔴 关键修复：使用 repr(e) 捕获空字面量异常
                         err_msg = repr(e)

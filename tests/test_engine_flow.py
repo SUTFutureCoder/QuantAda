@@ -701,6 +701,141 @@ def test_on_order_status_callback_dedupes_duplicate_status(monkeypatch):
     assert strategy.notify_calls == 1, "重复状态回调应被去重，避免重复通知策略。"
 
 
+def test_on_order_status_callback_skips_submitted_alarm_for_untracked_external_order(monkeypatch):
+    """
+    回调告警回归:
+    对未被 broker 本地跟踪的外部遗留单，不应推送“订单已提交”告警。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.id = "-8"
+            self.status = "Submitted"
+            self.data = SimpleNamespace(_name="PSQ.ARCA")
+            self.executed = SimpleNamespace(size=0.0, price=0.0, value=0.0, comm=0.0)
+
+        def is_buy(self):
+            return True
+
+        def is_sell(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.proxy = DummyOrderProxy()
+            self._active_buys = {}
+            self._pending_sells = set()
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            pass
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def notify_order(self, order):
+            pass
+
+    pushed = []
+
+    class DummyAlarmManager:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+        def push_trade(self, trade_info):
+            pass
+
+    monkeypatch.setattr(engine_module, "AlarmManager", lambda: DummyAlarmManager())
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(strategy_instance=strategy, now=datetime(2026, 2, 17, 10, 15, 0))
+    raw_order = SimpleNamespace(statusMsg="submitted")
+
+    engine_module.on_order_status_callback(context, raw_order)
+
+    submitted_msgs = [x for x in pushed if "订单已提交" in x["content"]]
+    assert submitted_msgs == [], "外部未跟踪订单不应触发“订单已提交”告警。"
+
+
+def test_on_order_status_callback_pushes_cancelled_alarm(monkeypatch):
+    """
+    回调告警回归:
+    订单进入 Cancelled/ApiCancelled 终态时，应推送撤单通知。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.id = "-8"
+            self.status = "Cancelled"
+            self.data = SimpleNamespace(_name="PSQ.ARCA")
+            self.executed = SimpleNamespace(size=0.0, price=0.0, value=0.0, comm=0.0)
+            self.trade = SimpleNamespace(order=SimpleNamespace(totalQuantity=100.0))
+
+        def is_buy(self):
+            return True
+
+        def is_sell(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return True
+
+    class DummyBroker:
+        def __init__(self):
+            self.proxy = DummyOrderProxy()
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            pass
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def notify_order(self, order):
+            pass
+
+    pushed = []
+
+    class DummyAlarmManager:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+        def push_trade(self, trade_info):
+            pass
+
+    monkeypatch.setattr(engine_module, "AlarmManager", lambda: DummyAlarmManager())
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(strategy_instance=strategy, now=datetime(2026, 2, 17, 10, 18, 0))
+    raw_order = SimpleNamespace(statusMsg="cancelled")
+
+    engine_module.on_order_status_callback(context, raw_order)
+
+    cancel_msgs = [x for x in pushed if "订单已撤销" in x["content"]]
+    assert len(cancel_msgs) == 1, "撤单终态应推送一次撤单通知。"
+    assert "Cancelled" in cancel_msgs[0]["content"]
+    assert "PSQ.ARCA" in cancel_msgs[0]["content"]
+
+
 def test_refresh_live_data_rebases_window_for_daily(monkeypatch):
     """
     实盘日线刷新:
@@ -1079,6 +1214,349 @@ def test_live_run_skips_when_recovery_still_has_no_data(monkeypatch):
     engine.run(context)
 
     assert engine.strategy.next_calls == 0, "无数据时应跳过策略执行，防止误报空仓计划。"
+
+
+def test_live_run_continues_when_overnight_cleanup_barrier_not_cleared_after_retries(monkeypatch):
+    """
+    隔夜撤单短确认屏障:
+    若撤单后在途单始终未清空，应重试 5 次后继续本轮（不跳过）。
+    """
+    import live_trader.engine as engine_module
+
+    class StickyPendingBroker(MockEngineBroker):
+        def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
+            super().__init__(context, cash_override, commission_override, slippage_override)
+            self.cancel_calls = []
+
+        def get_pending_orders(self):
+            return [
+                {"id": "OVN_1", "symbol": "SHSE.600000", "direction": "BUY", "size": 100}
+            ]
+
+        def cancel_pending_order(self, order_id: str) -> bool:
+            self.cancel_calls.append(order_id)
+            return True
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (StickyPendingBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+    monkeypatch.setattr(engine_module.time, "sleep", lambda _: None)
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 3, 3, 9, 30, 0))
+    engine.init(context)
+
+    class DummyAlarmManager:
+        def __init__(self):
+            self.text_calls = []
+
+        def push_text(self, content, level='INFO'):
+            self.text_calls.append({"content": content, "level": level})
+
+    dummy_alarm = DummyAlarmManager()
+    engine.alarm_manager = dummy_alarm
+
+    refresh_calls = {"count": 0}
+
+    def _fake_refresh(_ctx):
+        refresh_calls["count"] += 1
+        return {"total_feeds": 1, "updated_feeds": 1, "failed_feeds": 0}
+
+    engine._refresh_live_data = _fake_refresh
+
+    engine.run(context)
+
+    assert refresh_calls["count"] == 1, "即使隔夜在途未清空，重试后也应继续拉数流程。"
+    assert engine.strategy.next_calls == 1, "即使隔夜在途未清空，重试后也应执行策略 next。"
+    assert engine._overnight_cleanup_done_on == context.now.date(), "重试结束后应标记当日 cleanup 已完成。"
+    assert len(engine.broker.cancel_calls) == 5, "在途未清空时应重试撤单 5 次。"
+    assert len(dummy_alarm.text_calls) == 1, "5 次后仍未清空应触发一次失败报警。"
+    assert dummy_alarm.text_calls[0]["level"] == "ERROR", "失败报警级别应为 ERROR。"
+    assert "Overnight cleanup not fully cleared" in dummy_alarm.text_calls[0]["content"], (
+        "失败报警内容应包含 cleanup 未完成信息。"
+    )
+
+
+def test_live_run_continues_after_overnight_cleanup_barrier_clears(monkeypatch):
+    """
+    隔夜撤单短确认屏障:
+    若短确认窗口内在途单已清空，run() 应继续拉数并执行策略，且同日不重复清理。
+    """
+    import live_trader.engine as engine_module
+
+    class ClearingPendingBroker(MockEngineBroker):
+        def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
+            super().__init__(context, cash_override, commission_override, slippage_override)
+            self.cancel_calls = []
+            self.sync_calls = 0
+            self._pending_calls = 0
+
+        def get_pending_orders(self):
+            self._pending_calls += 1
+            if self._pending_calls <= 2:
+                return [
+                    {"id": "OVN_1", "symbol": "SHSE.600000", "direction": "BUY", "size": 100}
+                ]
+            return []
+
+        def cancel_pending_order(self, order_id: str) -> bool:
+            self.cancel_calls.append(order_id)
+            return True
+
+        def sync_balance(self):
+            self.sync_calls += 1
+            return super().sync_balance()
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (ClearingPendingBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+    monkeypatch.setattr(engine_module.time, "sleep", lambda _: None)
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 3, 3, 9, 30, 0))
+    engine.init(context)
+
+    refresh_calls = {"count": 0}
+
+    def _fake_refresh(_ctx):
+        refresh_calls["count"] += 1
+        return {"total_feeds": 1, "updated_feeds": 1, "failed_feeds": 0}
+
+    engine._refresh_live_data = _fake_refresh
+
+    engine.run(context)
+
+    assert refresh_calls["count"] == 1, "屏障通过后应继续拉数。"
+    assert engine.strategy.next_calls == 1, "屏障通过后应执行策略 next。"
+    assert engine.broker.cancel_calls == ["OVN_1"], "隔夜清理应尝试撤单。"
+    assert engine.broker.sync_calls == 1, "发起撤单后应同步一次资金。"
+    assert engine._overnight_cleanup_done_on == context.now.date(), "屏障通过后应标记当日 cleanup 完成。"
+
+    # 同一自然日再次 run 不应重复清理隔夜单。
+    context.now = datetime(2026, 3, 3, 10, 30, 0)
+    engine.run(context)
+    assert engine.broker.cancel_calls == ["OVN_1"], "同日二次 run 不应重复执行隔夜撤单。"
+
+
+def test_live_run_skips_overnight_cleanup_when_keep_overnight_orders_true(monkeypatch):
+    """
+    KEEP_OVERNIGHT_ORDERS=True:
+    应跳过隔夜清理流程，不调用 cleanup_overnight_orders。
+    """
+    import live_trader.engine as engine_module
+
+    class KeepOvernightBroker(MockEngineBroker):
+        def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
+            super().__init__(context, cash_override, commission_override, slippage_override)
+            self.cleanup_calls = 0
+
+        def cleanup_overnight_orders(self):
+            self.cleanup_calls += 1
+            return {"total": 1, "canceled": 1, "failed": 0, "skipped": 0}
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (KeepOvernightBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+        "KEEP_OVERNIGHT_ORDERS": True,
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 3, 3, 9, 30, 0))
+    engine.init(context)
+
+    refresh_calls = {"count": 0}
+
+    def _fake_refresh(_ctx):
+        refresh_calls["count"] += 1
+        return {"total_feeds": 1, "updated_feeds": 1, "failed_feeds": 0}
+
+    engine._refresh_live_data = _fake_refresh
+
+    engine.run(context)
+
+    assert refresh_calls["count"] == 1, "保留隔夜单时，本轮仍应继续拉数。"
+    assert engine.strategy.next_calls == 1, "保留隔夜单时，本轮仍应继续执行策略。"
+    assert engine.broker.cleanup_calls == 0, "KEEP_OVERNIGHT_ORDERS=True 时不应触发隔夜清理。"
+    assert engine._overnight_cleanup_done_on is None, "跳过清理时不应写入 cleanup 执行日期。"
+
+
+def test_live_run_continues_and_alarms_when_cleanup_raises(monkeypatch):
+    """
+    隔夜清理异常:
+    cleanup_overnight_orders 抛错时应重试并最终告警，但不中断本轮执行。
+    """
+    import live_trader.engine as engine_module
+
+    class CleanupErrorBroker(MockEngineBroker):
+        def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
+            super().__init__(context, cash_override, commission_override, slippage_override)
+            self.cleanup_calls = 0
+
+        def cleanup_overnight_orders(self):
+            self.cleanup_calls += 1
+            raise RuntimeError("cleanup failed")
+
+        def get_pending_orders(self):
+            return [
+                {"id": "OVN_X", "symbol": "SHSE.600000", "direction": "BUY", "size": 100}
+            ]
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (CleanupErrorBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+    monkeypatch.setattr(engine_module.time, "sleep", lambda _: None)
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 3, 3, 9, 30, 0))
+    engine.init(context)
+
+    class DummyAlarmManager:
+        def __init__(self):
+            self.text_calls = []
+
+        def push_text(self, content, level='INFO'):
+            self.text_calls.append({"content": content, "level": level})
+
+    dummy_alarm = DummyAlarmManager()
+    engine.alarm_manager = dummy_alarm
+
+    refresh_calls = {"count": 0}
+
+    def _fake_refresh(_ctx):
+        refresh_calls["count"] += 1
+        return {"total_feeds": 1, "updated_feeds": 1, "failed_feeds": 0}
+
+    engine._refresh_live_data = _fake_refresh
+
+    engine.run(context)
+
+    assert engine.broker.cleanup_calls == 5, "cleanup 异常场景应重试 5 次。"
+    assert refresh_calls["count"] == 1, "cleanup 异常不应阻断本轮拉数。"
+    assert engine.strategy.next_calls == 1, "cleanup 异常不应阻断本轮策略执行。"
+    assert engine._overnight_cleanup_done_on == context.now.date(), "异常重试结束后应标记当日 cleanup 已完成。"
+    assert len(dummy_alarm.text_calls) == 1, "5 次后仍失败应推送一次 ERROR 报警。"
+    assert dummy_alarm.text_calls[0]["level"] == "ERROR"
+    assert "Overnight cleanup not fully cleared" in dummy_alarm.text_calls[0]["content"]
+
+
+def test_live_run_continues_when_cleanup_hook_unexpectedly_raises(monkeypatch):
+    """
+    隔夜清理入口异常:
+    _cleanup_overnight_orders_before_refresh 自身抛错时应告警并继续本轮执行。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 3, 3, 9, 30, 0))
+    engine.init(context)
+
+    class DummyAlarmManager:
+        def __init__(self):
+            self.text_calls = []
+
+        def push_text(self, content, level='INFO'):
+            self.text_calls.append({"content": content, "level": level})
+
+    dummy_alarm = DummyAlarmManager()
+    engine.alarm_manager = dummy_alarm
+
+    refresh_calls = {"count": 0}
+
+    def _fake_refresh(_ctx):
+        refresh_calls["count"] += 1
+        return {"total_feeds": 1, "updated_feeds": 1, "failed_feeds": 0}
+
+    def _raise_cleanup_hook(_ctx):
+        raise RuntimeError("cleanup hook crashed")
+
+    engine._refresh_live_data = _fake_refresh
+    monkeypatch.setattr(engine, "_cleanup_overnight_orders_before_refresh", _raise_cleanup_hook)
+
+    engine.run(context)
+
+    assert refresh_calls["count"] == 1, "清理入口异常不应阻断本轮拉数。"
+    assert engine.strategy.next_calls == 1, "清理入口异常不应阻断本轮策略执行。"
+    assert len(dummy_alarm.text_calls) == 1, "清理入口异常应推送一次 ERROR 报警。"
+    assert dummy_alarm.text_calls[0]["level"] == "ERROR"
+    assert "Unexpected error in overnight cleanup hook" in dummy_alarm.text_calls[0]["content"]
 
 
 def test_risk_unknown_status_blocks_but_not_crash(monkeypatch):

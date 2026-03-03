@@ -97,6 +97,53 @@ class DummyIBForCashWithOpenTrades(DummyIBForCash):
         return self._open_trades
 
 
+class DummyIBForAllOpenOrders(DummyIBForCashWithOpenTrades):
+    def __init__(
+        self,
+        cash_usd,
+        open_trades=None,
+        all_open_trades=None,
+        on_req_open_orders=None,
+        client_id=999,
+        cancel_effective=True,
+    ):
+        super().__init__(cash_usd=cash_usd, open_trades=open_trades or [])
+        self._all_open_trades = all_open_trades or []
+        self.req_all_calls = 0
+        self.req_open_calls = 0
+        self.cancel_calls = []
+        self._on_req_open_orders = on_req_open_orders
+        self.client = SimpleNamespace(clientId=client_id)
+        self._cancel_effective = cancel_effective
+
+    def reqAllOpenOrders(self):
+        self.req_all_calls += 1
+        return self._all_open_trades
+
+    def reqOpenOrders(self):
+        self.req_open_calls += 1
+        if callable(self._on_req_open_orders):
+            self._on_req_open_orders()
+        return self._all_open_trades
+
+    def reqAutoOpenOrders(self, auto_bind):
+        return auto_bind
+
+    def trades(self):
+        return self._all_open_trades
+
+    def cancelOrder(self, order):
+        self.cancel_calls.append(order)
+        if not self._cancel_effective:
+            return
+        for t in list(self._open_trades) + list(self._all_open_trades):
+            if getattr(t, "order", None) is order:
+                status = getattr(t, "orderStatus", None)
+                if status is not None:
+                    setattr(status, "status", "Cancelled")
+                    setattr(status, "remaining", 0)
+
+
 class DummyIBForPositions(DummyIBForCash):
     def __init__(self, cash_usd, positions):
         super().__init__(cash_usd=cash_usd)
@@ -495,3 +542,441 @@ def test_ib_submit_order_fractional_sell_disabled_by_default(monkeypatch):
     assert context.ib_instance.last_order.totalQuantity == 104, (
         "禁用小数股时，SELL 数量应向下取整为整数。"
     )
+
+
+def test_ib_pending_order_contract_includes_id():
+    """
+    最小契约:
+    get_pending_orders 返回项必须包含 id，供基础层隔夜清理协议使用。
+    """
+    open_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=138, action="BUY"),
+        contract=SimpleNamespace(symbol="EWJ"),
+        orderStatus=SimpleNamespace(remaining=282),
+    )
+    context = types.SimpleNamespace(
+        ib_instance=DummyIBForCashWithOpenTrades(cash_usd=10000.0, open_trades=[open_trade])
+    )
+    broker = IBBrokerAdapter(context=context)
+
+    got = broker.get_pending_orders()
+    assert len(got) == 1, "应返回 1 笔在途单。"
+    assert got[0]["id"] == "138", "在途单契约缺失 id。"
+    assert got[0]["symbol"] == "EWJ"
+    assert got[0]["direction"] == "BUY"
+    assert got[0]["size"] == 282
+
+
+def test_ib_cancel_pending_order_by_id():
+    """
+    最小契约:
+    cancel_pending_order(order_id) 应能根据 id 定位并发起撤单。
+    """
+
+    class DummyIBForCancel(DummyIBForCashWithOpenTrades):
+        def __init__(self, cash_usd, open_trades):
+            super().__init__(cash_usd=cash_usd, open_trades=open_trades)
+            self.cancel_calls = []
+
+        def cancelOrder(self, order):
+            self.cancel_calls.append(order)
+            for t in self._open_trades:
+                if getattr(t, "order", None) is order and getattr(t, "orderStatus", None) is not None:
+                    setattr(t.orderStatus, "status", "Cancelled")
+                    setattr(t.orderStatus, "remaining", 0)
+
+    order_obj = SimpleNamespace(orderId=313, action="BUY")
+    open_trade = SimpleNamespace(
+        order=order_obj,
+        contract=SimpleNamespace(symbol="EWJ"),
+        orderStatus=SimpleNamespace(remaining=281),
+    )
+    ib = DummyIBForCancel(cash_usd=10000.0, open_trades=[open_trade])
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    ok = broker.cancel_pending_order("313")
+    assert ok is True, "按 id 撤单应返回 True。"
+    assert ib.cancel_calls == [order_obj], "应调用 IB cancelOrder 并传入原始 order 对象。"
+
+
+def test_ib_get_pending_orders_fallback_to_req_all_open_orders():
+    """
+    跨 client 视角回归:
+    openTrades 为空时，仍应通过 reqAllOpenOrders 识别手动/其他 client 的在途单。
+    """
+    manual_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=901, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=77),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[manual_trade],
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    got = broker.get_pending_orders()
+
+    assert ib.req_all_calls == 1, "openTrades 为空时应拉取 reqAllOpenOrders 快照。"
+    assert len(got) == 1, "应识别到 1 笔跨 client 在途单。"
+    assert got[0]["id"] == "901"
+    assert got[0]["symbol"] == "PSQ"
+    assert got[0]["direction"] == "BUY"
+    assert got[0]["size"] == 77
+
+
+def test_ib_cancel_pending_order_uses_req_all_open_orders_fallback():
+    """
+    撤单回归:
+    openTrades 为空时，cancel_pending_order 也应能基于 reqAllOpenOrders 定位并撤单。
+    """
+    order_obj = SimpleNamespace(orderId=902, action="BUY")
+    manual_trade = SimpleNamespace(
+        order=order_obj,
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=10),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[manual_trade],
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    ok = broker.cancel_pending_order("902")
+
+    assert ok is True, "应能通过 reqAllOpenOrders 识别并撤销在途单。"
+    assert ib.cancel_calls == [order_obj], "撤单应透传原始 order 对象。"
+
+
+def test_ib_pending_order_uses_perm_id_when_order_id_missing():
+    """
+    手动单兼容回归:
+    若 orderId 缺失/无效，get_pending_orders 应回退到 permId，避免 cleanup skipped。
+    """
+    manual_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=0, permId=456789, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=278.9289, permId=456789),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[manual_trade],
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    got = broker.get_pending_orders()
+
+    assert len(got) == 1
+    assert got[0]["id"] == "perm:456789", "缺失 orderId 时应回退使用 permId。"
+
+
+def test_ib_cancel_pending_order_supports_perm_id():
+    """
+    手动单撤单回归:
+    cleanup 传入 perm:xxx 时，cancel_pending_order 应能匹配并撤单。
+    """
+    order_obj = SimpleNamespace(orderId=905, permId=777001, action="BUY")
+    manual_trade = SimpleNamespace(
+        order=order_obj,
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=10, permId=777001),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[manual_trade],
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    ok = broker.cancel_pending_order("perm:777001")
+
+    assert ok is True, "permId 兜底 ID 也应支持撤单。"
+    assert ib.cancel_calls == [order_obj]
+
+
+def test_ib_cancel_pending_order_perm_id_returns_false_when_order_id_not_bindable():
+    """
+    手工单不可绑回归:
+    仅有 permId 且 orderId=0 时，不应误报撤单成功。
+    """
+    order_obj = SimpleNamespace(orderId=0, permId=888001, action="BUY")
+    manual_trade = SimpleNamespace(
+        order=order_obj,
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=9, permId=888001),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[manual_trade],
+        client_id=999,
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    ok = broker.cancel_pending_order("perm:888001")
+
+    assert ok is False, "orderId 无法绑定时应返回 False，避免假阳性。"
+    assert ib.cancel_calls == [], "不可绑场景不应调用 cancelOrder(orderId=0)。"
+    assert ib.req_open_calls >= 1, "应至少尝试一次 reqOpenOrders 绑定。"
+
+
+def test_ib_cancel_pending_order_perm_id_succeeds_after_bind():
+    """
+    手工单绑定回归:
+    reqOpenOrders 后若该 permId 获得有效 orderId，应继续完成撤单。
+    """
+    order_obj = SimpleNamespace(orderId=0, permId=888002, action="BUY")
+    manual_trade = SimpleNamespace(
+        order=order_obj,
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=9, permId=888002),
+    )
+
+    def _bind_order():
+        order_obj.orderId = 906
+
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[manual_trade],
+        on_req_open_orders=_bind_order,
+        client_id=0,
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    ok = broker.cancel_pending_order("perm:888002")
+
+    assert ok is True, "绑定成功后应可撤单。"
+    assert ib.cancel_calls == [order_obj]
+    assert ib.req_open_calls >= 1
+
+
+def test_ib_pending_order_accepts_negative_order_id_after_manual_bind():
+    """
+    TWS 手工单绑定回归:
+    绑定后若分配负数 orderId（IB 常见行为），应视为有效可撤单 ID。
+    """
+    manual_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=-42, permId=901001, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=3, permId=901001),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[manual_trade],
+        all_open_trades=[manual_trade],
+        client_id=0,
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    got = broker.get_pending_orders()
+    ok = broker.cancel_pending_order("-42")
+
+    assert len(got) == 1
+    assert got[0]["id"] == "-42", "负数 orderId 应保留，不应误判为空。"
+    assert ok is True, "负数 orderId 也应可正常撤单。"
+    assert ib.cancel_calls == [manual_trade.order]
+
+
+def test_ib_get_pending_orders_ignores_cancelled_even_if_remaining_positive():
+    """
+    终态过滤回归:
+    即便 remaining 尚未归零，Cancelled 也不应再被识别为 pending。
+    """
+    cancelled_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=-2, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(status="Cancelled", remaining=278.9289),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[cancelled_trade],
+        all_open_trades=[cancelled_trade],
+        client_id=0,
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    got = broker.get_pending_orders()
+    ok = broker.cancel_pending_order("-2")
+
+    assert got == [], "Cancelled 不应继续出现在 pending 列表。"
+    assert ok is False, "Cancelled 终态不应重复发起撤单。"
+    assert ib.cancel_calls == []
+
+
+def test_ib_get_pending_orders_does_not_use_trade_cache_by_default():
+    """
+    陈旧缓存防回归:
+    trades() 里的历史终态单不应污染 pending 识别。
+    """
+    stale_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=-3, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(status="Cancelled", remaining=88),
+    )
+
+    class DummyIBWithStaleTradeCache(DummyIBForAllOpenOrders):
+        def trades(self):
+            return [stale_trade]
+
+    ib = DummyIBWithStaleTradeCache(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[],
+        client_id=0,
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    got = broker.get_pending_orders()
+    assert got == [], "默认不应使用 trades() 作为 pending 来源。"
+
+
+def test_ib_cancel_pending_order_unresolved_manual_order_pushes_clientid_hint_alarm_once(monkeypatch):
+    """
+    告警回归:
+    当手工单仅有 permId 且 clientId!=0 无法撤单时，应提示改为 IBKR_CLIENT_ID=0，
+    且同一订单键仅告警一次，避免重试刷屏。
+    """
+    order_obj = SimpleNamespace(orderId=0, permId=990001, action="BUY")
+    manual_trade = SimpleNamespace(
+        order=order_obj,
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=9, permId=990001),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[],
+        all_open_trades=[manual_trade],
+        client_id=999,
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+
+    ok1 = broker.cancel_pending_order("perm:990001")
+    ok2 = broker.cancel_pending_order("perm:990001")
+
+    assert ok1 is False and ok2 is False
+    assert len(pushed) == 1, "同一 unresolved 手工单应只告警一次。"
+    assert pushed[0]["level"] == "ERROR"
+    assert "IBKR_CLIENT_ID=0" in pushed[0]["content"], "告警应给出 clientId 修复建议。"
+
+
+def test_ib_cancel_pending_order_not_confirmed_pushes_clientid_hint_when_nonzero(monkeypatch):
+    """
+    撤单确认回归:
+    cancelOrder 调用后若短确认仍未离开 pending，应返回 False 并提示 clientId=0 风险。
+    """
+    trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=-8, permId=990101, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(status="Submitted", remaining=100),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[trade],
+        all_open_trades=[trade],
+        client_id=999,
+        cancel_effective=False,  # 模拟 IB 侧未真正撤掉
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+    monkeypatch.setattr(broker, "_sleep_ib", lambda _s: None)
+
+    ok = broker.cancel_pending_order("-8")
+
+    assert ok is False, "撤单短确认失败时不应记为成功。"
+    assert ib.cancel_calls == [trade.order], "仍应发起一次 cancelOrder 请求。"
+    assert len(pushed) == 1, "clientId!=0 且撤单未确认时应推送一次提示告警。"
+    assert "IBKR_CLIENT_ID=0" in pushed[0]["content"]
+
+
+def test_ib_cancel_pending_order_not_confirmed_pushes_bind_hint_when_clientid_zero(monkeypatch):
+    """
+    撤单确认回归:
+    clientId=0 下若撤单仍未确认，也应推送“检查 TWS 绑定设置”的撤单失败告警。
+    """
+    trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=-9, permId=990102, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(status="Submitted", remaining=50),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[trade],
+        all_open_trades=[trade],
+        client_id=0,
+        cancel_effective=False,
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+    monkeypatch.setattr(broker, "_sleep_ib", lambda _s: None)
+
+    ok = broker.cancel_pending_order("-9")
+
+    assert ok is False
+    assert len(pushed) == 1
+    assert "clientId is already 0" in pushed[0]["content"]
+
+
+def test_ib_collect_open_trades_skip_req_all_open_orders_in_async_task(monkeypatch):
+    """
+    回调线程安全回归:
+    在异步任务上下文中应跳过 reqAllOpenOrders，避免 event-loop reentry 异常。
+    """
+    manual_trade = SimpleNamespace(
+        order=SimpleNamespace(orderId=903, action="BUY"),
+        contract=SimpleNamespace(symbol="PSQ"),
+        orderStatus=SimpleNamespace(remaining=1),
+    )
+    ib = DummyIBForAllOpenOrders(
+        cash_usd=10000.0,
+        open_trades=[manual_trade],
+        all_open_trades=[manual_trade],
+    )
+    context = types.SimpleNamespace(ib_instance=ib)
+    broker = IBBrokerAdapter(context=context)
+
+    monkeypatch.setattr(IBBrokerAdapter, "_in_async_task", staticmethod(lambda: True))
+    _ = broker.get_pending_orders()
+
+    assert ib.req_all_calls == 0, "异步任务中不应触发 reqAllOpenOrders。"
