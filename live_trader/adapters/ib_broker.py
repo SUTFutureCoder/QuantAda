@@ -130,16 +130,87 @@ class IBBrokerAdapter(BaseLiveBroker):
         """
         IB 资金预估使用更保守口径，降低 Error 201 概率。
         """
-        return max(super().safety_multiplier, 1.02)
+        return max(super().safety_multiplier, 1.05)
+
+    def _load_account_snapshot(self):
+        """
+        拉取账户摘要快照；优先 accountSummary，失败时回退 accountValues。
+        在异步回调任务中避免阻塞式等待。
+        """
+        if not hasattr(self, 'ib') or not self.ib:
+            return []
+
+        in_loop = self._in_async_task()
+        source_data = []
+
+        if not in_loop:
+            try:
+                source_data = self.ib.accountSummary()
+                if not source_data and hasattr(self.ib, 'sleep'):
+                    self.ib.sleep(0.5)
+                    source_data = self.ib.accountSummary()
+            except Exception:
+                pass
+
+        if not source_data:
+            try:
+                source_data = self.ib.accountValues()
+            except Exception:
+                pass
+
+        return source_data or []
+
+    @staticmethod
+    def _extract_base_tag_value(source_data, tag):
+        for v in source_data:
+            if getattr(v, 'tag', None) != tag or getattr(v, 'currency', None) != 'BASE':
+                continue
+            try:
+                return float(v.value)
+            except Exception:
+                continue
+        return None
+
+    def _fetch_order_available_cash(self) -> float:
+        """
+        下单可用现金口径（保守）：
+        1) AvailableFunds BASE（IB 端已换汇口径）
+        2) AvailableFunds FX 聚合（本地换汇口径）
+        两者取更保守值；若无 AvailableFunds，则回退 TotalCashValue。
+        """
+        source_data = self._load_account_snapshot()
+        if not source_data:
+            return 0.0
+
+        has_available_funds = any(
+            getattr(v, 'tag', None) == 'AvailableFunds' for v in source_data
+        )
+        if has_available_funds:
+            base_available = self._extract_base_tag_value(source_data, 'AvailableFunds')
+            fx_available = self._fetch_smart_value(['AvailableFunds'], source_data=source_data)
+
+            candidates = []
+            if base_available is not None and math.isfinite(base_available):
+                candidates.append(float(base_available))
+            try:
+                fx_available = float(fx_available)
+                if math.isfinite(fx_available):
+                    candidates.append(fx_available)
+            except Exception:
+                pass
+
+            if candidates:
+                return min(candidates)
+
+        return self._fetch_smart_value(['TotalCashValue'], source_data=source_data)
 
     def _fetch_real_cash(self) -> float:
         """
         [必须实现] 基类要求的底层查钱接口
         用于初始化(_init_cash)和资金同步(sync_balance)
         """
-        # 下单可用资金必须优先使用 AvailableFunds；
-        # TotalCashValue 在部分账户类型中会高估“可立即交易资金”。
-        return self._fetch_smart_value(['AvailableFunds', 'TotalCashValue'])
+        # 下单可用资金优先以 AvailableFunds 双口径取保守值。
+        return self._fetch_order_available_cash()
 
     def getcash(self):
         """兼容 Backtrader 标准接口: 获取可用资金 (Buying Power)"""
@@ -174,8 +245,8 @@ class IBBrokerAdapter(BaseLiveBroker):
         此处必须手动减去在途买单(Pending BUY)的预期消耗，防止产生无限杠杆幻觉。
         """
         # 1. 获取物理账面现金
-        # 明确获取可用资金 (优先 AvailableFunds，其次 TotalCashValue)，而非总资产
-        raw_cash = self._fetch_smart_value(['AvailableFunds', 'TotalCashValue'])
+        # 使用 AvailableFunds BASE/FX 双口径后的保守值，降低换汇边界导致的拒单。
+        raw_cash = self._fetch_order_available_cash()
 
         # 2. 盘点所有在途买单，计算尚未物理扣款的“虚拟冻结资金”
         virtual_frozen_cash = 0.0
@@ -646,43 +717,22 @@ class IBBrokerAdapter(BaseLiveBroker):
         return Stock(spec['symbol'], spec['exchange'], spec['currency'])
 
     # 1. 查钱 (重构为通用方法，支持指定 Tag)
-    def _fetch_smart_value(self, target_tags=None) -> float:
+    def _fetch_smart_value(self, target_tags=None, source_data=None) -> float:
         """
         获取账户特定价值（如现金或净值），支持多币种自动加总并统一转换为 USD。
         修复了因单一币种（如USD）为负债时，忽略其他币种正资产的问题。
         """
         if not hasattr(self, 'ib') or not self.ib: return 0.0
 
-        in_loop = False
-        try:
-            loop = asyncio.get_running_loop()
-            # 只有当程序真实处于 async task (例如回调函数) 内部时，才被判定为 in_loop
-            # 这允许主线程首次 run() 时能成功阻塞并预订阅 HKD 等外汇汇率
-            if asyncio.current_task(loop=loop) is not None:
-                in_loop = True
-        except RuntimeError:
-            pass
+        in_loop = self._in_async_task()
 
         tags_priority = target_tags if target_tags else ['NetLiquidation', 'TotalCashValue', 'AvailableFunds']
 
         # 尝试获取账户数据源
-        source_data = []
-        if not in_loop:
-            try:
-                source_data = self.ib.accountSummary()
-                if not source_data:
-                    self.ib.sleep(0.5)
-                    source_data = self.ib.accountSummary()
-            except Exception:
-                pass
-
-        # 兜底到 accountValues
+        if source_data is None:
+            source_data = self._load_account_snapshot()
         if not source_data:
-            try:
-                source_data = self.ib.accountValues()
-            except:
-                pass
-            if not source_data: return 0.0
+            return 0.0
 
         for tag in tags_priority:
             base_value = None

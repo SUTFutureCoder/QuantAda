@@ -77,7 +77,7 @@ OPTUNA_DASHBOARD_PORT = 8090
 IBKR_HOST = '127.0.0.1'
 # 文件-全局配置-API-设置-启用套接字客户端&关闭只读API, 实盘与模拟端口不一样，IB Gateway默认4001
 IBKR_PORT = 7497
-IBKR_CLIENT_ID = 999
+IBKR_CLIENT_ID = 0
 
 
 # --- 框架 → 实盘/仿真连接通道配置 ---

@@ -170,10 +170,10 @@ def test_auto_downgrade_and_refund():
     assert "ORDER_2" in broker._active_buys, "降级重试后的新订单应进入 _active_buys"
 
 
-def test_rejected_buy_recalculates_shares_by_available_cash(monkeypatch):
+def test_rejected_buy_downgrades_by_lot_step_first(monkeypatch):
     """
-    拒单后重算:
-    LOT_SIZE=1 时，应按当前可用资金一次重算到可承受股数（含 0.98 安全收缩），而非仅减 1 股。
+    拒单后降级:
+    可解释性优先语义下，前 5 次应按 LOT_SIZE 线性递减，而不是按资金比例重算。
     """
     monkeypatch.setattr(config, "LOT_SIZE", 1)
 
@@ -184,19 +184,17 @@ def test_rejected_buy_recalculates_shares_by_available_cash(monkeypatch):
     assert first_proxy is not None, "首笔买单应提交成功"
     assert broker.submitted_orders[0]["volume"] == 29, "前置条件失败: 首笔应为 29 股"
 
-    # 模拟柜台返回更紧的可用资金窗口，触发重算。
+    # 即使现金窗口收紧，首轮拒单仍优先执行 LOT_SIZE 阶梯降级。
     broker.mock_cash = 271.0
     broker.submitted_orders[0]["status"] = "Inactive"
     broker.on_order_status(MockOrderProxy("ORDER_1", is_buy_order=True, status="Rejected"))
 
-    expected_recalc = int(29 * (271.0 / (29 * 10.0 * broker.safety_multiplier)) * 0.98)
     assert len(broker.submitted_orders) == 2, "拒单后应触发重试订单"
-    assert broker.submitted_orders[1]["side"] == "BUY", "重算后应继续提交 BUY 订单"
-    assert broker.submitted_orders[1]["volume"] == expected_recalc, "拒单后应按自适应重算股数提交"
-    assert broker.submitted_orders[1]["volume"] == 26, "当前参数下应重算为 26 股（含 0.98 安全收缩）"
-    assert "ORDER_2" in broker._active_buys, "重算重试后的订单应进入 _active_buys"
-    assert broker._virtual_spent_cash == pytest.approx(26 * 10.0 * broker.safety_multiplier), (
-        "重算后的虚拟占资应与 26 股一致。"
+    assert broker.submitted_orders[1]["side"] == "BUY", "降级后应继续提交 BUY 订单"
+    assert broker.submitted_orders[1]["volume"] == 28, "LOT_SIZE=1 时首轮拒单应从 29 降到 28。"
+    assert "ORDER_2" in broker._active_buys, "降级重试后的订单应进入 _active_buys"
+    assert broker._virtual_spent_cash == pytest.approx(28 * 10.0 * broker.safety_multiplier), (
+        "降级后的虚拟占资应与 28 股一致。"
     )
 
 
@@ -220,8 +218,33 @@ def test_rejected_buy_retries_immediately_without_buffer(monkeypatch):
 
     assert len(broker.submitted_orders) == 2, "拒单后应立即提交降级重试单"
     assert broker.submitted_orders[1]["side"] == "BUY", "降级重试方向应为 BUY"
-    assert broker.submitted_orders[1]["volume"] == 27, "应按可用资金重算后降级到 27 股"
+    assert broker.submitted_orders[1]["volume"] == 28, "首轮拒单应先按 LOT_SIZE 线性降级到 28 股"
     assert not hasattr(broker, "_buffered_rejected_retries"), "无状态实现不应再维护拒单缓冲队列"
+
+
+def test_rejected_buy_uses_geometric_after_five_lot_steps(monkeypatch):
+    """
+    阶段化降级回归:
+    前 5 次按 LOT_SIZE 线性降级，第 6 次起进入几何降级。
+    """
+    monkeypatch.setattr(config, "LOT_SIZE", 1)
+
+    broker = MockBroker(initial_cash=10000.0)
+    data = _make_data()
+
+    first_proxy = broker.order_target_value(data, target=300)  # 30 股
+    assert first_proxy is not None, "首笔买单应提交成功"
+    assert broker.submitted_orders[0]["volume"] == 30, "前置条件失败: 首笔应为 30 股"
+
+    # 连续触发 6 次拒单，观察降级路径:
+    # 30 -> 29 -> 28 -> 27 -> 26 -> 25 -> 23(几何: 25*0.95 向下取整)
+    for oid_num in range(1, 7):
+        broker.on_order_status(MockOrderProxy(f"ORDER_{oid_num}", is_buy_order=True, status="Rejected"))
+
+    volumes = [o["volume"] for o in broker.submitted_orders]
+    assert volumes[:7] == [30, 29, 28, 27, 26, 25, 23], (
+        "降级路径应为前 5 次线性减 1，第 6 次切到几何降级。"
+    )
 
 
 def test_rejected_buy_multi_symbols_retry_independently(monkeypatch):

@@ -365,47 +365,6 @@ class BaseLiveBroker(ABC):
 
         return fallback
 
-    def _recalc_rejected_buy_shares(self, old_shares, price, lot_size):
-        """
-        买单拒绝后按当前可用资金重算可下单数量。
-        返回值会严格小于 old_shares，避免重复提交同等数量导致死循环拒单。
-        """
-        try:
-            old_int = int(abs(float(old_shares)))
-            lot_int = int(abs(float(lot_size)))
-            px = float(price)
-        except Exception:
-            return 0
-
-        if old_int <= 0 or px <= 0:
-            return 0
-
-        lot_int = max(1, lot_int)
-        try:
-            cash_now = float(self.get_cash())
-        except Exception:
-            return 0
-
-        if cash_now <= 0:
-            return 0
-
-        # 自适应重算: 以"旧单所需资金"为基准按比例收缩，并额外打 98 折，
-        # 避免与券商(含汇率/占资缓冲)边界贴得过紧而再次触发拒单。
-        cash_needed_old = old_int * px * self.safety_multiplier
-        if cash_needed_old <= 0:
-            return 0
-        adaptive_shares = old_int * (cash_now / cash_needed_old) * 0.98
-
-        if lot_int > 1:
-            recalc_shares = int(adaptive_shares // lot_int) * lot_int
-        else:
-            recalc_shares = int(adaptive_shares)
-
-        # 拒单后重试必须收缩到更小的数量，防止重复被拒。
-        upper_bound = old_int - lot_int
-        recalc_shares = min(recalc_shares, upper_bound)
-        return max(0, recalc_shares)
-
     def _geometric_downgrade_shares(self, old_shares, lot_size, retries):
         """
         当资金重算不可用时，按倍数（几何）降级股数。
@@ -436,6 +395,22 @@ class BaseLiveBroker(ABC):
         upper_bound = old_int - lot_int
         new_shares = min(new_shares, upper_bound)
         return max(0, new_shares)
+
+    def _lot_step_downgrade_shares(self, old_shares, lot_size):
+        """
+        线性降级：每次仅减少一个 lot，便于实盘排查和复盘解释。
+        """
+        try:
+            old_int = int(abs(float(old_shares)))
+            lot_int = int(abs(float(lot_size)))
+        except Exception:
+            return 0
+
+        if old_int <= 0:
+            return 0
+
+        lot_int = max(1, lot_int)
+        return max(0, old_int - lot_int)
 
     def _finalize_and_submit(self, data, shares, price, lot_size, retries=0):
         """通用的下单收尾逻辑：取整 + 提交"""
@@ -573,7 +548,9 @@ class BaseLiveBroker(ABC):
                     buy_info = self._active_buys.pop(oid, None)
                     if buy_info:
                         retries = buy_info['retries']
-                        max_retries = 5  # 默认允许尝试降级 5 次
+                        lot_step_retries = 5
+                        geometric_retries = 5
+                        max_retries = lot_step_retries + geometric_retries
 
                         # A. 退回上一笔订单预扣的虚拟资金 (使用动态滑点)
                         refund_amount = buy_info['shares'] * buy_info['price'] * self.safety_multiplier
@@ -586,15 +563,17 @@ class BaseLiveBroker(ABC):
                             symbol = getattr(data, '_name', None) or getattr(getattr(proxy, 'data', None), '_name', 'Unknown')
                             price = buy_info['price']
 
-                            # 优先按当前可用资金重算；失败时再走倍数降级兜底。
+                            # 可解释性优先:
+                            # - 前 5 次按 lot 线性降级
+                            # - 后 5 次按几何倍数降级
                             old_shares = buy_info['shares']
-                            recalculated = self._recalc_rejected_buy_shares(old_shares, price, lot_size)
-                            if recalculated > 0:
-                                new_shares = recalculated
-                                downgrade_reason = "资金重算"
+                            if retries < lot_step_retries:
+                                new_shares = self._lot_step_downgrade_shares(old_shares, lot_size)
+                                downgrade_reason = "LOT_SIZE阶梯降级"
                             else:
-                                new_shares = self._geometric_downgrade_shares(old_shares, lot_size, retries)
-                                downgrade_reason = "倍数降级"
+                                geo_retry_idx = retries - lot_step_retries
+                                new_shares = self._geometric_downgrade_shares(old_shares, lot_size, geo_retry_idx)
+                                downgrade_reason = "几何倍数降级"
 
                             print(f"⚠️ [Broker] 买单 {symbol} 被拒绝。触发自动降级 {retries + 1}/{max_retries}...")
                             print(f"   => {symbol} 尝试数量: {old_shares} -> {new_shares} ({downgrade_reason})")
@@ -687,14 +666,6 @@ class BaseLiveBroker(ABC):
         if self._cash_override is not None:
             return min(real_cash, self._cash_override)
         return real_cash
-
-    def _init_commission(self):
-        """初始化：使用费率"""
-        if self._commission_override is not None:
-            print(f"[Live Broker] Using custom commission override: {self._commission_override:,.5f}")
-            return self._commission_override
-        return 0.0
-
 
     def getposition(self, data):
         """

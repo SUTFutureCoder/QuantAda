@@ -177,6 +177,23 @@ class DummyIBForMissingFx(DummyIBForCash):
         ]
 
 
+class DummyIBForAvailableFundsDual(DummyIBForCash):
+    def __init__(self):
+        super().__init__(cash_usd=0.0)
+
+    def accountSummary(self):
+        return [
+            DummyAccountValue(tag="AvailableFunds", currency="USD", value="9200"),
+            DummyAccountValue(tag="AvailableFunds", currency="HKD", value="780"),
+            DummyAccountValue(tag="AvailableFunds", currency="BASE", value="9000"),
+            DummyAccountValue(tag="TotalCashValue", currency="USD", value="10000"),
+            DummyAccountValue(tag="TotalCashValue", currency="BASE", value="10000"),
+        ]
+
+    def reqMktData(self, contract, genericTickList="", snapshot=False, regulatorySnapshot=False):
+        return DummyTicker(7.8)
+
+
 class DummyIBForSubmit(DummyIBForCash):
     def __init__(self):
         super().__init__(cash_usd=10000.0)
@@ -278,6 +295,33 @@ def test_ib_get_cash_respects_virtual_ledger():
 
     assert broker.get_cash() == pytest.approx(7500.0), (
         "IB get_cash 未扣减虚拟账本，占资保护失效。"
+    )
+
+
+def test_ib_safety_multiplier_floor_is_1_05():
+    """
+    安全垫回归:
+    IB 适配器买入估算安全垫应至少为 1.05，降低 Error 201 概率。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=10000.0))
+    broker = IBBrokerAdapter(context=context)
+
+    assert broker.safety_multiplier == pytest.approx(1.05), (
+        "IB safety_multiplier 下限应为 1.05。"
+    )
+
+
+def test_ib_fetch_real_cash_uses_conservative_available_funds_dual_view():
+    """
+    资金口径回归:
+    _fetch_real_cash 应使用 AvailableFunds 的 BASE/FX 双口径并取更保守值。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForAvailableFundsDual())
+    broker = IBBrokerAdapter(context=context)
+
+    # FX 聚合: 9200 + 780/7.8 = 9300；BASE=9000 => 应取 9000
+    assert broker._fetch_real_cash() == pytest.approx(9000.0), (
+        "_fetch_real_cash 应取 AvailableFunds 双口径中的更保守值。"
     )
 
 

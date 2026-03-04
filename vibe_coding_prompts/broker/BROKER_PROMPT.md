@@ -49,13 +49,13 @@
 ---
 
 ## ⚙️ 与当前框架一致的执行语义 (必须遵守)
-1. 买单拒绝后的降级重提由 `BaseLiveBroker.on_order_status` 统一处理（默认最多 5 次）；适配器不要额外叠加自己的“拒单队列”。
+1. 买单拒绝后的降级重提由 `BaseLiveBroker.on_order_status` 统一处理（默认最多 10 次：前 5 次 `LOT_SIZE` 阶梯降级 + 后 5 次几何降级）；适配器不要额外叠加自己的“拒单队列”。
 2. 禁止实现或依赖以下旧机制: `process_deferred_orders`、`reconcile_buffered_retries`、`_deferred_orders`、`_buffered_rejected_retries`。
 3. 若券商返回 `Inactive/Cancelled/Rejected` 语义有差异，必须在 `BaseOrderProxy` 中准确映射，否则会破坏统一降级流程。
 4. 引擎会在实盘每个自然日首次 `run`、拉数据前尝试清理隔夜在途单（由 `config.KEEP_OVERNIGHT_ORDERS` 控制）。适配器必须保证:
 - `get_pending_orders` 中 `id` 可用于撤单
 - `cancel_pending_order` 幂等、异常安全（失败返回 False，不抛出致命异常）
-5. 当前拒单重试语义为“无状态 + 当场重提”: 优先按当前可用资金自适应重算股数，不可用时走倍数降级；适配器侧必须提供真实现金口径，避免重试阶段出现系统性偏差。
+5. 当前拒单重试语义为“无状态 + 当场重提”: 前 5 次按 `LOT_SIZE` 线性降级，后 5 次按几何倍数降级；适配器侧必须提供真实现金口径，避免重试阶段出现系统性偏差。
 
 ---
 
