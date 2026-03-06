@@ -221,8 +221,9 @@ class BacktraderStrategyWrapper(bt.Strategy):
                 shares_to_buy = int(shares_to_buy)  # 即使是美股也通常是整数股
 
             if shares_to_buy > 0:
-                # 打印日志方便调试
-                # self.log(f"ORDER TARGET: Target% {target:.2f}, Cash {cash:.0f}, Buying {shares_to_buy}")
+                # 与 order_target_value 保持一致：同 Bar 内先记账，防止多标的连续买入穿透现金。
+                estimated_cost = shares_to_buy * price * (1 + commission_ratio)
+                self.virtual_spent_cash += estimated_cost
                 return self.buy(data=data, size=shares_to_buy)
 
         elif delta_shares < 0:  # 卖出

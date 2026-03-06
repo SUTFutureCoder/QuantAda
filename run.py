@@ -17,7 +17,7 @@ from recorders.manager import RecorderManager
 
 
 def run_backtest(selection_filename, strategy_filename, symbols, cash, commission, slippage, data_source, start_date, end_date,
-                 risk_filename, risk_params, params, timeframe, compression, recorder=None, enable_plot=True):
+                 risk_filename, risk_params, params, timeframe, compression, recorder=None, enable_plot=True, refresh=False):
     """执行回测"""
     # --- 1. 自动发现并加载所有数据提供者 ---
     data_manager = DataManager()
@@ -64,7 +64,7 @@ def run_backtest(selection_filename, strategy_filename, symbols, cash, commissio
             specified_sources=data_source,
             timeframe=timeframe,
             compression=compression,
-            refresh=args.refresh
+            refresh=refresh
         )
         if df is not None and not df.empty:
             datas[symbol] = df
@@ -297,5 +297,6 @@ if __name__ == '__main__':
         compression=args.compression,
         recorder=recorder_manager,
         enable_plot=not args.no_plot,
+        refresh=args.refresh,
     )
     print("\n--- Backtest Finished ---")
