@@ -56,10 +56,11 @@ class DummyIBTrade:
 
 
 class DummyAccountValue:
-    def __init__(self, tag, currency, value):
+    def __init__(self, tag, currency, value, account=""):
         self.tag = tag
         self.currency = currency
         self.value = value
+        self.account = account
 
 
 class DummyIBForCash:
@@ -194,12 +195,94 @@ class DummyIBForAvailableFundsDual(DummyIBForCash):
         return DummyTicker(7.8)
 
 
-class DummyIBForSubmit(DummyIBForCash):
+class DummyIBForAccountScopedFunds(DummyIBForCash):
     def __init__(self):
+        super().__init__(cash_usd=0.0)
+
+    def accountSummary(self):
+        return [
+            DummyAccountValue(tag="AvailableFunds", currency="BASE", value="9000", account="U2222222"),
+            DummyAccountValue(tag="AvailableFunds", currency="USD", value="9000", account="U2222222"),
+            DummyAccountValue(tag="AvailableFunds", currency="BASE", value="2000", account="U1111111"),
+            DummyAccountValue(tag="AvailableFunds", currency="USD", value="2000", account="U1111111"),
+            DummyAccountValue(tag="TotalCashValue", currency="BASE", value="9000", account="U2222222"),
+            DummyAccountValue(tag="TotalCashValue", currency="BASE", value="2000", account="U1111111"),
+        ]
+
+    def accountValues(self):
+        return self.accountSummary()
+
+
+class DummyIBForZeroFunds(DummyIBForCash):
+    def __init__(self):
+        super().__init__(cash_usd=0.0)
+
+    def accountSummary(self):
+        return [
+            DummyAccountValue(tag="AvailableFunds", currency="BASE", value="0"),
+            DummyAccountValue(tag="AvailableFunds", currency="USD", value="0"),
+            DummyAccountValue(tag="TotalCashValue", currency="BASE", value="0"),
+        ]
+
+
+class DummyIBDisconnected(DummyIBForCash):
+    def __init__(self):
+        super().__init__(cash_usd=0.0)
+
+    def isConnected(self):
+        return False
+
+    def accountSummary(self, *args, **kwargs):
+        return []
+
+    def accountValues(self, *args, **kwargs):
+        return []
+
+
+class DummyIBForManagedAccountNoSnapshot(DummyIBForCash):
+    def __init__(self, managed_accounts):
+        super().__init__(cash_usd=0.0)
+        self._managed_accounts = managed_accounts
+
+    def managedAccounts(self):
+        return list(self._managed_accounts)
+
+    def accountSummary(self, *args, **kwargs):
+        return []
+
+    def accountValues(self, *args, **kwargs):
+        return []
+
+
+class DummyIBForAggregateAllSummary(DummyIBForCash):
+    def __init__(self, managed_accounts):
+        super().__init__(cash_usd=0.0)
+        self._managed_accounts = managed_accounts
+
+    def managedAccounts(self):
+        return list(self._managed_accounts)
+
+    def accountSummary(self, *args, **kwargs):
+        return [
+            DummyAccountValue(tag="AvailableFunds", currency="BASE", value="7777", account="All"),
+            DummyAccountValue(tag="AvailableFunds", currency="USD", value="7777", account="All"),
+            DummyAccountValue(tag="TotalCashValue", currency="BASE", value="7777", account="All"),
+        ]
+
+    def accountValues(self, *args, **kwargs):
+        return self.accountSummary()
+
+
+class DummyIBForSubmit(DummyIBForCash):
+    def __init__(self, managed_accounts=None):
         super().__init__(cash_usd=10000.0)
         self.last_contract = None
         self.last_order = None
         self._oid = 900
+        self._managed_accounts = managed_accounts or ["U1234567"]
+
+    def managedAccounts(self):
+        return list(self._managed_accounts)
 
     def placeOrder(self, contract, order):
         self._oid += 1
@@ -323,6 +406,173 @@ def test_ib_fetch_real_cash_uses_conservative_available_funds_dual_view():
     assert broker._fetch_real_cash() == pytest.approx(9000.0), (
         "_fetch_real_cash 应取 AvailableFunds 双口径中的更保守值。"
     )
+
+
+def test_ib_fetch_real_cash_filters_by_configured_order_account(monkeypatch):
+    """
+    账户隔离回归:
+    配置了 IBKR_ORDER_ACCOUNT 时，现金口径应只读取该账户。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForAccountScopedFunds())
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "U1111111",
+        raising=False,
+    )
+
+    assert broker._fetch_real_cash() == pytest.approx(2000.0), (
+        "配置子账户时，应按该账户过滤 accountSummary/accountValues。"
+    )
+
+
+def test_ib_fetch_real_cash_zero_pushes_account_hint_alarm_once(monkeypatch):
+    """
+    0 资金提示回归:
+    配置了 IBKR_ORDER_ACCOUNT 且过滤后金额为 0 时，应推送“账号可能配置错误”提示，且去重。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForAccountScopedFunds())
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "DUO936692",
+        raising=False,
+    )
+
+    got1 = broker._fetch_real_cash()
+    got2 = broker._fetch_real_cash()
+
+    assert got1 == pytest.approx(0.0)
+    assert got2 == pytest.approx(0.0)
+    assert len(pushed) == 1, "零资金提示应去重，避免高频路径刷屏。"
+    assert pushed[0]["level"] == "ERROR"
+    assert "IBKR_ORDER_ACCOUNT='DUO936692'" in pushed[0]["content"]
+    assert "账号ID很可能填写错误" in pushed[0]["content"]
+
+
+def test_ib_fetch_real_cash_zero_without_configured_account_no_alarm(monkeypatch):
+    """
+    0 资金提示回归:
+    未配置 IBKR_ORDER_ACCOUNT 时，不应推送账号ID错误提示。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForZeroFunds())
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "   ",
+        raising=False,
+    )
+
+    got = broker._fetch_real_cash()
+
+    assert got == pytest.approx(0.0)
+    assert pushed == [], "未配置账户时不应推送账号ID错误提示。"
+
+
+def test_ib_fetch_real_cash_zero_when_ib_disconnected_no_alarm(monkeypatch):
+    """
+    启动时序回归:
+    IB 未连接时，0资金不应触发账号错误告警，避免初始化误报。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBDisconnected())
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "DUO932692",
+        raising=False,
+    )
+
+    got = broker._fetch_real_cash()
+
+    assert got == pytest.approx(0.0)
+    assert pushed == [], "IB 未连接时不应推送0资金账号告警。"
+
+
+def test_ib_fetch_real_cash_zero_with_known_managed_account_no_id_error_alarm(monkeypatch):
+    """
+    0 资金提示回归:
+    当账号已在 managedAccounts 中时，不应再推送“账号ID可能错误”告警。
+    """
+    context = types.SimpleNamespace(
+        ib_instance=DummyIBForManagedAccountNoSnapshot(managed_accounts=["DUO932692"])
+    )
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "DUO932692",
+        raising=False,
+    )
+
+    got = broker._fetch_real_cash()
+
+    assert got == pytest.approx(0.0)
+    assert pushed == [], "账号已在 managedAccounts 时不应误报账号ID错误。"
+
+
+def test_ib_fetch_real_cash_uses_aggregate_all_snapshot_when_account_specific_missing(monkeypatch):
+    """
+    账户快照兼容回归:
+    accountSummary 仅返回 All 聚合账号时，不应被账户过滤误清空。
+    """
+    context = types.SimpleNamespace(
+        ib_instance=DummyIBForAggregateAllSummary(managed_accounts=["DUO932692"])
+    )
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "DUO932692",
+        raising=False,
+    )
+
+    got = broker._fetch_real_cash()
+
+    assert got == pytest.approx(7777.0), "All 聚合快照应作为可用兜底，避免误判 0 资金。"
 
 
 def test_ib_get_cash_dedupes_open_orders_and_local_ledger():
@@ -453,6 +703,43 @@ def test_ib_get_position_matches_symbol_suffix_variants():
 
     assert pos.size == pytest.approx(140), "后缀容错失效：EWJ.SMART 必须匹配到 EWJ 持仓。"
     assert pos.price == pytest.approx(92.01), "持仓成本提取异常：应返回 IB 的 avgCost。"
+
+
+def test_ib_get_position_filters_by_configured_order_account(monkeypatch):
+    """
+    账户隔离回归:
+    配置了 IBKR_ORDER_ACCOUNT 时，持仓匹配应只在该账户范围内执行。
+    """
+    ib_positions = [
+        SimpleNamespace(
+            account="U2222222",
+            contract=SimpleNamespace(symbol="EWJ", secType="STK", localSymbol="EWJ"),
+            position=999,
+            avgCost=88.01,
+        ),
+        SimpleNamespace(
+            account="U1111111",
+            contract=SimpleNamespace(symbol="EWJ", secType="STK", localSymbol="EWJ"),
+            position=140,
+            avgCost=92.01,
+        ),
+    ]
+    context = types.SimpleNamespace(ib_instance=DummyIBForPositions(cash_usd=10000.0, positions=ib_positions))
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "U1111111",
+        raising=False,
+    )
+
+    data = SimpleNamespace(_name="EWJ.SMART")
+    pos = broker.get_position(data)
+
+    assert pos.size == pytest.approx(140), "应过滤掉非目标账户持仓。"
+    assert pos.price == pytest.approx(92.01), "应返回目标账户持仓成本。"
 
 
 def test_ib_provider_parse_contract_supports_generic_exchange_suffix():
@@ -648,6 +935,34 @@ def test_ib_submit_order_uses_default_account_when_config_empty(monkeypatch):
     )
 
 
+def test_ib_submit_order_rejects_unknown_configured_order_account(monkeypatch):
+    """
+    子账户校验回归:
+    配置账户不在 managedAccounts 内时，应拒绝发单。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForSubmit(managed_accounts=["U1234567"]))
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module,
+        "MarketOrder",
+        lambda action, qty: SimpleNamespace(action=action, totalQuantity=qty, account=""),
+    )
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "DUO936692",
+        raising=False,
+    )
+
+    data = SimpleNamespace(_name="AAPL.SMART")
+    proxy = broker._submit_order(data=data, volume=10, side="BUY", price=100.0)
+
+    assert proxy is None, "未知账户应拒绝发单，避免误路由到默认账户。"
+    assert context.ib_instance.last_order is None, "拒绝发单时不应调用 placeOrder。"
+
+
 def test_ib_pending_order_contract_includes_id():
     """
     最小契约:
@@ -668,6 +983,43 @@ def test_ib_pending_order_contract_includes_id():
     assert got[0]["id"] == "138", "在途单契约缺失 id。"
     assert got[0]["symbol"] == "EWJ"
     assert got[0]["direction"] == "BUY"
+    assert got[0]["size"] == 282
+
+
+def test_ib_get_pending_orders_filters_by_configured_order_account(monkeypatch):
+    """
+    账户隔离回归:
+    配置了 IBKR_ORDER_ACCOUNT 时，应只返回该账户在途单。
+    """
+    open_trade_keep = SimpleNamespace(
+        order=SimpleNamespace(orderId=138, action="BUY", account="U1111111"),
+        contract=SimpleNamespace(symbol="EWJ"),
+        orderStatus=SimpleNamespace(status="Submitted", remaining=282),
+    )
+    open_trade_drop = SimpleNamespace(
+        order=SimpleNamespace(orderId=139, action="BUY", account="U2222222"),
+        contract=SimpleNamespace(symbol="EWJ"),
+        orderStatus=SimpleNamespace(status="Submitted", remaining=111),
+    )
+    context = types.SimpleNamespace(
+        ib_instance=DummyIBForCashWithOpenTrades(
+            cash_usd=10000.0,
+            open_trades=[open_trade_keep, open_trade_drop],
+        )
+    )
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "U1111111",
+        raising=False,
+    )
+
+    got = broker.get_pending_orders()
+    assert len(got) == 1
+    assert got[0]["id"] == "138"
     assert got[0]["size"] == 282
 
 

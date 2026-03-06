@@ -641,6 +641,72 @@ def test_on_order_status_callback_rejected_sell_should_not_retry(monkeypatch):
     assert broker.sync_calls == 0, "拒单不应触发资金同步。"
 
 
+def test_on_order_status_callback_partial_sell_should_not_sync_balance(monkeypatch):
+    """
+    回调链路测试:
+    卖单部分成交(非 Filled 终态)不应触发 sync_balance，避免日志/同步刷屏。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.id = "ORDER_PARTIAL_SELL_1"
+            self.status = "Submitted"
+            self.data = SimpleNamespace(_name="SPY.ARCA")
+            self.executed = SimpleNamespace(size=100, price=10.0, value=1000.0, comm=0.0)
+
+        def is_completed(self):
+            return False
+
+        def is_buy(self):
+            return False
+
+        def is_sell(self):
+            return True
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.sync_calls = 0
+            self.proxy = DummyOrderProxy()
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            pass
+
+        def sync_balance(self):
+            self.sync_calls += 1
+
+        def get_cash(self):
+            return 12345.0
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def notify_order(self, order):
+            pass
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(
+        strategy_instance=strategy,
+        now=datetime(2026, 2, 17, 10, 12, 0)
+    )
+    raw_order = SimpleNamespace(statusMsg="partial sell")
+
+    engine_module.on_order_status_callback(context, raw_order)
+
+    assert broker.sync_calls == 0, "卖单部分成交不应触发资金同步。"
+
+
 def test_on_order_status_callback_dedupes_duplicate_status(monkeypatch):
     """
     回调去重回归:
@@ -699,6 +765,149 @@ def test_on_order_status_callback_dedupes_duplicate_status(monkeypatch):
 
     assert broker.order_status_calls == 2, "Broker 状态维护应仍可接收重复回调。"
     assert strategy.notify_calls == 1, "重复状态回调应被去重，避免重复通知策略。"
+
+
+def test_on_order_status_callback_partial_fill_does_not_push_trade_alarm(monkeypatch):
+    """
+    成交推送降噪:
+    部分成交(在途态)不应触发 push_trade，避免被分笔成交刷屏。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.id = "ORDER_PARTIAL_1"
+            self.status = "Submitted"
+            self.data = SimpleNamespace(_name="QQQ.NASDAQ")
+            self.executed = SimpleNamespace(size=30.0, price=12.3, value=369.0, comm=0.0)
+            self.trade = SimpleNamespace(order=SimpleNamespace(totalQuantity=100.0))
+
+        def is_completed(self):
+            return False
+
+        def is_buy(self):
+            return True
+
+        def is_sell(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.proxy = DummyOrderProxy()
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            pass
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def notify_order(self, order):
+            pass
+
+    pushed_trades = []
+
+    class DummyAlarmManager:
+        def push_text(self, content, level='INFO'):
+            pass
+
+        def push_trade(self, trade_info):
+            pushed_trades.append(trade_info)
+
+    monkeypatch.setattr(engine_module, "AlarmManager", lambda: DummyAlarmManager())
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(strategy_instance=strategy, now=datetime(2026, 2, 17, 10, 16, 0))
+    raw_order = SimpleNamespace(statusMsg="partial")
+
+    engine_module.on_order_status_callback(context, raw_order)
+
+    assert pushed_trades == [], "部分成交不应触发成交推送，避免告警淹没。"
+
+
+def test_on_order_status_callback_terminal_fill_pushes_once_with_target_qty(monkeypatch):
+    """
+    成交推送语义:
+    Filled 终态仅推送一次，且数量使用最终目标下单量(totalQuantity/volume)。
+    """
+    import live_trader.engine as engine_module
+
+    class DummyOrderProxy:
+        def __init__(self):
+            self.id = "ORDER_FILLED_1"
+            self.status = "Filled"
+            self.data = SimpleNamespace(_name="SPY.ARCA")
+            self.executed = SimpleNamespace(size=40.0, price=10.0, value=400.0, comm=0.0)
+            self.trade = SimpleNamespace(order=SimpleNamespace(totalQuantity=100.0))
+
+        def is_completed(self):
+            return True
+
+        def is_buy(self):
+            return True
+
+        def is_sell(self):
+            return False
+
+        def is_rejected(self):
+            return False
+
+        def is_canceled(self):
+            return False
+
+    class DummyBroker:
+        def __init__(self):
+            self.proxy = DummyOrderProxy()
+            self._order_status_calls = 0
+
+        def convert_order_proxy(self, raw_order):
+            return self.proxy
+
+        def on_order_status(self, proxy):
+            self._order_status_calls += 1
+
+    class DummyStrategy:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def notify_order(self, order):
+            pass
+
+    pushed_trades = []
+
+    class DummyAlarmManager:
+        def push_text(self, content, level='INFO'):
+            pass
+
+        def push_trade(self, trade_info):
+            pushed_trades.append(trade_info)
+
+    monkeypatch.setattr(engine_module, "AlarmManager", lambda: DummyAlarmManager())
+
+    broker = DummyBroker()
+    strategy = DummyStrategy(broker)
+    context = SimpleNamespace(strategy_instance=strategy, now=datetime(2026, 2, 17, 10, 17, 0))
+    raw_order = SimpleNamespace(statusMsg="filled")
+
+    engine_module.on_order_status_callback(context, raw_order)
+    # 模拟同一订单终态后又回调了不同成交快照（签名变化）。
+    broker.proxy.executed.price = 10.1
+    broker.proxy.executed.value = 404.0
+    engine_module.on_order_status_callback(context, raw_order)
+
+    assert len(pushed_trades) == 1, "Filled 终态成交应只推送一次。"
+    assert pushed_trades[0]["size"] == 100, "成交推送数量应为最终目标数量(totalQuantity)。"
+    assert pushed_trades[0]["symbol"] == "SPY.ARCA"
 
 
 def test_on_order_status_callback_skips_submitted_alarm_for_untracked_external_order(monkeypatch):

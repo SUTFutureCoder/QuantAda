@@ -1050,6 +1050,31 @@ def on_order_status_callback(context, raw_order):
             current_status = getattr(order_proxy, 'status', 'Unknown')
             order_id = str(getattr(order_proxy, 'id', '') or '')
             try:
+                is_completed = bool(order_proxy.is_completed())
+            except Exception:
+                is_completed = str(current_status).strip().upper() == 'FILLED'
+
+            def _extract_target_qty(proxy, fallback=0):
+                qty = None
+                if hasattr(proxy, 'trade') and hasattr(proxy.trade, 'order'):
+                    qty = getattr(proxy.trade.order, 'totalQuantity', None)
+                elif hasattr(proxy, 'raw_order'):
+                    qty = getattr(proxy.raw_order, 'volume', None)
+                elif hasattr(proxy, 'platform_order'):
+                    qty = getattr(proxy.platform_order, 'volume', None)
+
+                if qty in (None, ''):
+                    qty = fallback
+
+                try:
+                    qty_f = float(qty)
+                    if abs(qty_f - round(qty_f)) < 1e-9:
+                        return int(round(qty_f))
+                    return qty_f
+                except Exception:
+                    return qty
+
+            try:
                 exec_size = float(getattr(order_proxy.executed, 'size', 0) or 0.0)
             except Exception:
                 exec_size = 0.0
@@ -1065,7 +1090,7 @@ def on_order_status_callback(context, raw_order):
             dedupe_cache = strategy._order_callback_dedupe
             event_signature = (current_status, round(exec_size, 8), round(exec_price, 8))
             if dedupe_cache.get(dedupe_key) == event_signature:
-                print(f"[Engine Callback] Duplicate status ignored: {current_status} ({dedupe_key})")
+                # 重复状态静默丢弃，避免高频回调刷屏。
                 return
             dedupe_cache[dedupe_key] = event_signature
             if len(dedupe_cache) > 5000:
@@ -1080,7 +1105,8 @@ def on_order_status_callback(context, raw_order):
             if not msg:
                 msg = getattr(raw_order, 'ord_rej_reason_detail', '')  # 尝试获取拒单原因
 
-            print(f"[Engine Callback] Notified strategy of order status: {current_status} ({msg})")
+            if is_completed:
+                print(f"[Engine Callback] Notified strategy of order status: {current_status} ({msg})")
             # 如果状态是 "已提交" 但还没 "成交"，且未被拒绝，则推送一条消息
             if current_status in ['PreSubmitted', 'Submitted', 'PendingSubmit']:
                 # 为了防止刷屏，只有当成交量为0时才推送这个"提交确认"
@@ -1095,16 +1121,7 @@ def on_order_status_callback(context, raw_order):
                     if not is_tracked:
                         print(f"[Engine Callback] Skip submitted alarm for untracked order ({order_id or 'UNKNOWN'}).")
                     else:
-                    # 尝试获取目标下单数量
-                        total_qty = 0
-                        # 针对 IB: trade.order.totalQuantity
-                        if hasattr(order_proxy, 'trade') and hasattr(order_proxy.trade, 'order'):
-                            total_qty = order_proxy.trade.order.totalQuantity
-                        # 针对其他 Broker (通用回退)
-                        elif hasattr(order_proxy, 'raw_order') and hasattr(order_proxy.raw_order, 'volume'):
-                            total_qty = order_proxy.raw_order.volume
-                        elif hasattr(order_proxy, 'platform_order') and hasattr(order_proxy.platform_order, 'volume'):
-                            total_qty = order_proxy.platform_order.volume
+                        total_qty = _extract_target_qty(order_proxy, fallback=0)
 
                         action = "BUY" if order_proxy.is_buy() else "SELL"
                         symbol = order_proxy.data._name if order_proxy.data else "Unknown"
@@ -1116,19 +1133,26 @@ def on_order_status_callback(context, raw_order):
 
 
             # 报警通知
-            # A. 交易成交推送 (完全成交、部分成交、以及部成后撤单)
-            if order_proxy.executed.size > 0:
+            # A. 交易成交推送 (仅终态 Filled 推送一次)
+            trade_push_key = order_id if order_id else f"raw:{id(raw_order)}"
+            if not hasattr(strategy, '_terminal_trade_push_dedupe'):
+                strategy._terminal_trade_push_dedupe = set()
+            terminal_trade_push_dedupe = strategy._terminal_trade_push_dedupe
+            if is_completed and exec_size > 0:
                 # 排除已被拒绝的废单(虽然废单size通常为0，为了严谨双重检查)
-                if not order_proxy.is_rejected():
+                if not order_proxy.is_rejected() and trade_push_key not in terminal_trade_push_dedupe:
                     trade_info = {
                         'symbol': order_proxy.data._name if order_proxy.data else "Unknown",
                         'action': 'BUY' if order_proxy.is_buy() else 'SELL',
                         'price': order_proxy.executed.price,
-                        'size': order_proxy.executed.size,
+                        'size': _extract_target_qty(order_proxy, fallback=order_proxy.executed.size),
                         'value': order_proxy.executed.value,
                         'dt': context.now.strftime('%Y-%m-%d %H:%M:%S')
                     }
                     alarm_manager.push_trade(trade_info)
+                    terminal_trade_push_dedupe.add(trade_push_key)
+                    if len(terminal_trade_push_dedupe) > 5000:
+                        terminal_trade_push_dedupe.clear()
 
             # B. 异常状态推送 (拒单)
             if order_proxy.is_rejected():
@@ -1137,13 +1161,7 @@ def on_order_status_callback(context, raw_order):
 
             # C. 撤单状态推送（含手动单/隔夜清理单）
             if order_proxy.is_canceled():
-                total_qty = 0
-                if hasattr(order_proxy, 'trade') and hasattr(order_proxy.trade, 'order'):
-                    total_qty = order_proxy.trade.order.totalQuantity
-                elif hasattr(order_proxy, 'raw_order') and hasattr(order_proxy.raw_order, 'volume'):
-                    total_qty = order_proxy.raw_order.volume
-                elif hasattr(order_proxy, 'platform_order') and hasattr(order_proxy.platform_order, 'volume'):
-                    total_qty = order_proxy.platform_order.volume
+                total_qty = _extract_target_qty(order_proxy, fallback=0)
 
                 action = "BUY" if order_proxy.is_buy() else "SELL"
                 symbol = order_proxy.data._name if order_proxy.data else "Unknown"
@@ -1151,7 +1169,7 @@ def on_order_status_callback(context, raw_order):
 
             # 3. 如果卖单成交（有钱回笼），仅同步资金。
             # 无状态模式下不执行延迟队列重放。
-            if order_proxy.is_sell() and order_proxy.executed.size > 0:
+            if order_proxy.is_sell() and is_completed and order_proxy.executed.size > 0:
                 # 再次确认不是撤单导致的 size>0 (虽然撤单通常 size=0，但为了严谨)
                 if not order_proxy.is_canceled() and not order_proxy.is_rejected():
                     print("[Engine] Sell filled. Waiting for cash settlement (1s)...")

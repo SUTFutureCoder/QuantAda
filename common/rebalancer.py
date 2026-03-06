@@ -1,4 +1,5 @@
 import config
+import time
 from alarms.manager import AlarmManager
 
 
@@ -121,6 +122,8 @@ class OrderExecutor:
     """
     专门的执行器，负责把计划变成订单。
     """
+    _SELL_SETTLE_WAIT_SECONDS = 60.0
+    _SELL_SETTLE_POLL_SECONDS = 1.0
 
     def __init__(self, broker, debug=False):
         self.broker = broker
@@ -129,18 +132,51 @@ class OrderExecutor:
     def execute_plan(self, plan):
         """执行调仓计划：利用 order_target_value 及其内部智能逻辑"""
 
+        sell_submitted = False
+        submitted_sell_ids = set()
+        has_untracked_sell = False
+
         # 第一步：处理所有卖出动作 (清仓 + 减仓)
-        # 必须先执行卖出，以注册在途资金，激活后续买单的延迟重试逻辑
+        # 必须先执行卖出，再等待卖单终态，最大化后续买单资金利用率。
         for data in plan['sell_clear']:
             self._log(f"执行清仓: {data._name}")
-            self.broker.order_target_value(data=data, target=0.0)
+            sell_order = self.broker.order_target_value(data=data, target=0.0)
+            if sell_order:
+                sell_submitted = True
+                oid = str(getattr(sell_order, 'id', '') or '').strip()
+                if oid:
+                    submitted_sell_ids.add(oid)
+                else:
+                    has_untracked_sell = True
 
         for data, target in plan['reduce']:
             self._log(f"执行减仓: {data._name} -> {target:.2f}")
-            self.broker.order_target_value(data=data, target=target)
+            sell_order = self.broker.order_target_value(data=data, target=target)
+            if sell_order:
+                sell_submitted = True
+                oid = str(getattr(sell_order, 'id', '') or '').strip()
+                if oid:
+                    submitted_sell_ids.add(oid)
+                else:
+                    has_untracked_sell = True
 
-        # 第二步：处理所有买入动作 (补仓/开仓)
-        # 如果此时现金不足，BaseLiveBroker 会检测到上面的卖单，自动进入 Deferred 队列
+        # 第二步：若本轮有卖单，最多等待 60 秒卖单终态。
+        # 超时则本轮跳过买入，等待下一次策略信号重新决策（无状态优先）。
+        if sell_submitted:
+            self._log(f"等待卖单终态，最长 {int(self._SELL_SETTLE_WAIT_SECONDS)} 秒...")
+            if not self._wait_sells_settled(submitted_sell_ids, has_untracked_sell):
+                warn_msg = (
+                    f"[Executor] 卖单在 {int(self._SELL_SETTLE_WAIT_SECONDS)} 秒内未全部终态，"
+                    f"本轮跳过买入，等待下次调仓信号。"
+                )
+                print(warn_msg)
+                try:
+                    AlarmManager().push_text(warn_msg, level='WARNING')
+                except Exception:
+                    pass
+                return
+
+        # 第三步：处理所有买入动作 (补仓/开仓)
         for data, target in plan['increase']:
             self._log(f"执行补仓/开仓: {data._name} -> {target:.2f}")
             self.broker.order_target_value(data=data, target=target)
@@ -148,6 +184,70 @@ class OrderExecutor:
     def _log(self, txt):
         if self.debug:
             print(f"[Executor] {txt}")
+
+    def _wait_sells_settled(self, submitted_sell_ids=None, has_untracked_sell=False):
+        tracked_ids = {str(x).strip() for x in (submitted_sell_ids or set()) if str(x).strip()}
+
+        deadline = time.time() + float(self._SELL_SETTLE_WAIT_SECONDS)
+        poll = max(0.1, float(self._SELL_SETTLE_POLL_SECONDS))
+
+        while True:
+            local_pending_ids = set()
+            if hasattr(self.broker, '_pending_sells'):
+                try:
+                    local_pending_ids = {
+                        str(x).strip() for x in (getattr(self.broker, '_pending_sells', set()) or set())
+                        if str(x).strip()
+                    }
+                except Exception:
+                    local_pending_ids = set()
+
+            pending_orders = []
+            if hasattr(self.broker, 'get_pending_orders'):
+                try:
+                    pending_orders = self.broker.get_pending_orders() or []
+                except Exception as e:
+                    print(f"[Executor] 获取在途订单失败，继续基于本地 pending_sells 等待: {e}")
+                    pending_orders = []
+
+            remote_pending_sell_ids = set()
+            remote_has_pending_sell = False
+            for po in pending_orders:
+                if not isinstance(po, dict):
+                    continue
+                direction = str(po.get('direction', '')).strip().upper()
+                if direction != 'SELL':
+                    continue
+                remote_has_pending_sell = True
+                poid = str(po.get('id', '') or '').strip()
+                if poid:
+                    remote_pending_sell_ids.add(poid)
+
+            combined_pending_sell_ids = local_pending_ids | remote_pending_sell_ids
+
+            # 严格模式：
+            # 1) 优先等待本轮提交的卖单 ID 全部离开 pending
+            # 2) 若存在无 ID 卖单，退化为任一卖单仍 pending 就继续等待
+            if tracked_ids:
+                unresolved = {oid for oid in tracked_ids if oid in combined_pending_sell_ids}
+                settled = not unresolved
+                if settled and has_untracked_sell and (remote_has_pending_sell or bool(local_pending_ids)):
+                    settled = False
+            else:
+                settled = not (remote_has_pending_sell or bool(local_pending_ids))
+
+            if settled:
+                if hasattr(self.broker, 'sync_balance'):
+                    try:
+                        self.broker.sync_balance()
+                    except Exception as e:
+                        print(f"[Executor] 卖单终态后资金同步失败(继续执行): {e}")
+                return True
+
+            if time.time() >= deadline:
+                return False
+
+            time.sleep(poll)
 
 
 from abc import ABC, abstractmethod

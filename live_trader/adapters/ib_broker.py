@@ -123,6 +123,11 @@ class IBBrokerAdapter(BaseLiveBroker):
         self._req_all_open_orders_interval_s = 2.0
         # “手工单需 clientId=0 才可撤”告警去重，避免 cleanup 重试阶段刷屏。
         self._manual_bind_alarm_keys = set()
+        # 账户资金为 0 的告警去重，避免高频路径重复推送。
+        self._zero_cash_alarm_accounts = set()
+        # 账户探测诊断日志去重，避免重复刷屏。
+        self._account_probe_debug_logged_accounts = set()
+        self._last_account_snapshot_debug = {}
         super().__init__(context, cash_override, commission_override, slippage_override)
 
     @property
@@ -132,33 +137,332 @@ class IBBrokerAdapter(BaseLiveBroker):
         """
         return max(super().safety_multiplier, 1.05)
 
+    @staticmethod
+    def _normalize_account(account_raw) -> str:
+        return str(account_raw or '').strip()
+
+    @classmethod
+    def _extract_account_from_obj(cls, obj, fields=('account', 'acctNumber')) -> str:
+        if obj is None:
+            return ''
+        for field in fields:
+            val = cls._normalize_account(getattr(obj, field, ''))
+            if val:
+                return val
+        return ''
+
+    def _configured_order_account(self) -> str:
+        return self._normalize_account(getattr(config, 'IBKR_ORDER_ACCOUNT', ''))
+
+    @staticmethod
+    def _is_aggregate_account_marker(account: str) -> bool:
+        return str(account or '').strip().upper() in {'ALL', 'ALLACCOUNTS', 'ALL_ACCOUNTS'}
+
+    def _filter_account_scoped_items(self, items, account_getter):
+        scoped_account = self._configured_order_account()
+        raw_items = list(items or [])
+        if not scoped_account:
+            return raw_items
+
+        paired = []
+        has_account_info = False
+        for item in raw_items:
+            account = self._normalize_account(account_getter(item))
+            if account:
+                has_account_info = True
+            paired.append((item, account))
+
+        # 若当前数据源不携带账户字段，降级为不过滤，兼容旧结构。
+        if not has_account_info:
+            return raw_items
+
+        filtered = [item for item, account in paired if account == scoped_account]
+        if filtered:
+            return filtered
+
+        # accountSummary/accountValues 在部分 IB 会话下仅返回聚合账户标记（如 All），
+        # 此时退化为不过滤，避免把有效账户误判为“快照为空”。
+        non_empty_accounts = {account for _, account in paired if account}
+        if non_empty_accounts and all(self._is_aggregate_account_marker(a) for a in non_empty_accounts):
+            return raw_items
+
+        return filtered
+
+    @staticmethod
+    def _empty_account_probe_debug(error_msg=None):
+        return {
+            'managed_accounts_raw': None,
+            'managed_accounts_error': error_msg,
+            'fallback_source': None,
+        }
+
+    @classmethod
+    def _ingest_accounts_from_raw(cls, raw, target: set):
+        if raw is None:
+            return
+        if isinstance(raw, str):
+            candidates = raw.split(',')
+        else:
+            try:
+                candidates = list(raw)
+            except Exception:
+                candidates = [raw]
+        for c in candidates:
+            acct = cls._normalize_account(c)
+            if acct:
+                target.add(acct)
+
+    def _collect_known_accounts(self, with_debug=False):
+        if not hasattr(self, 'ib') or not self.ib:
+            debug = self._empty_account_probe_debug('ib instance missing')
+            return (set(), debug) if with_debug else set()
+
+        accounts = set()
+        debug = self._empty_account_probe_debug(None)
+
+        managed_accounts_getter = getattr(self.ib, 'managedAccounts', None)
+        if callable(managed_accounts_getter):
+            try:
+                raw = managed_accounts_getter()
+                debug['managed_accounts_raw'] = raw
+                self._ingest_accounts_from_raw(raw, accounts)
+            except Exception as e:
+                debug['managed_accounts_error'] = repr(e)
+        elif managed_accounts_getter is not None:
+            debug['managed_accounts_raw'] = managed_accounts_getter
+            self._ingest_accounts_from_raw(managed_accounts_getter, accounts)
+        else:
+            debug['managed_accounts_error'] = 'managedAccounts unavailable'
+
+        # managedAccounts 为空时，回退到 accountSummary/accountValues 提取 account 字段。
+        if not accounts:
+            for getter_name in ('accountSummary', 'accountValues'):
+                getter = getattr(self.ib, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    for item in getter() or []:
+                        acct = self._extract_account_from_obj(item)
+                        if acct:
+                            accounts.add(acct)
+                except Exception:
+                    continue
+                if accounts:
+                    debug['fallback_source'] = getter_name
+                    break
+
+        return (accounts, debug) if with_debug else accounts
+
+    def _query_account_rows(self, method_name: str, configured_account: str, attempts_log: list, note: str = ''):
+        method = getattr(self.ib, method_name, None)
+        if not callable(method):
+            attempts_log.append(f"{method_name} unavailable{note}")
+            return []
+        try:
+            if configured_account:
+                try:
+                    rows = method(configured_account)
+                    attempts_log.append(
+                        f"{method_name}({configured_account}){note} -> {len(rows or [])}"
+                    )
+                    return list(rows or [])
+                except TypeError:
+                    rows = method()
+                    attempts_log.append(
+                        f"{method_name}() [fallback]{note} -> {len(rows or [])}"
+                    )
+                    return list(rows or [])
+            rows = method()
+            attempts_log.append(f"{method_name}(){note} -> {len(rows or [])}")
+            return list(rows or [])
+        except Exception as e:
+            attempts_log.append(f"{method_name} failed{note}: {repr(e)}")
+            return []
+
+    def _is_configured_order_account_valid(self, configured_account: str) -> bool:
+        account = self._normalize_account(configured_account)
+        if not account:
+            return True
+
+        known_accounts = self._collect_known_accounts()
+        if not known_accounts:
+            print(
+                f"[IBBroker] Skip order: unable to validate IBKR_ORDER_ACCOUNT='{account}' "
+                f"(no managed/visible accounts from IB session)."
+            )
+            return False
+        if account not in known_accounts:
+            print(
+                f"[IBBroker] Skip order: IBKR_ORDER_ACCOUNT='{account}' not in "
+                f"managed/visible accounts={sorted(known_accounts)}."
+            )
+            return False
+        return True
+
+    def _push_zero_cash_account_alarm_if_needed(self, cash_value: float, has_snapshot: bool):
+        account = self._configured_order_account()
+        if not account:
+            return
+
+        snapshot_debug = getattr(self, '_last_account_snapshot_debug', {}) or {}
+        if snapshot_debug.get('ib_connected') is False:
+            # 启动/重连窗口内 IB 尚未连接时，不推送“账号金额为0”告警，避免误报。
+            return
+
+        try:
+            cash_num = float(cash_value)
+        except Exception:
+            cash_num = 0.0
+
+        if cash_num > 0 and math.isfinite(cash_num):
+            self._zero_cash_alarm_accounts.discard(account)
+            return
+
+        known_accounts, accounts_debug = self._collect_known_accounts(with_debug=True)
+        # 账号已在当前会话 managedAccounts 中，说明账号ID本身大概率有效；
+        # 避免继续推送“可能填写错误”的误导性告警。
+        if known_accounts and account in known_accounts:
+            return
+
+        if account in self._zero_cash_alarm_accounts:
+            return
+        self._zero_cash_alarm_accounts.add(account)
+
+        reason = (
+            "账户快照为空（过滤后无匹配记录）"
+            if not has_snapshot else
+            "账户可用资金计算结果为 0"
+        )
+        if known_accounts:
+            account_hint = (
+                f"当前会话 managedAccounts={sorted(known_accounts)} 未包含该账号，"
+                "账号ID很可能填写错误；也可能是当前会话未启用该账号可见性。"
+            )
+        else:
+            account_hint = (
+                "当前会话未返回 managedAccounts，暂无法直接校验账号ID；"
+                "请核对 IBKR_ORDER_ACCOUNT 与 TWS/Gateway 登录账户。"
+            )
+        warn_msg = (
+            f"[IBBroker Warning] 检测到 IBKR_ORDER_ACCOUNT='{account}' 的账户资金为 0。"
+            f"原因: {reason}。"
+            f"{account_hint}"
+        )
+        print(warn_msg)
+        self._log_account_probe_debug_once(account, known_accounts, accounts_debug)
+        try:
+            AlarmManager().push_text(warn_msg, level='ERROR')
+        except Exception as e:
+            print(f"[IBBroker Warning] failed to push zero-cash alarm: {e}")
+
+    def _log_account_probe_debug_once(self, account: str, known_accounts: set, accounts_debug: dict):
+        acct = self._normalize_account(account)
+        if not acct:
+            return
+        if acct in self._account_probe_debug_logged_accounts:
+            return
+        self._account_probe_debug_logged_accounts.add(acct)
+
+        snapshot_debug = getattr(self, '_last_account_snapshot_debug', {}) or {}
+        managed_raw = accounts_debug.get('managed_accounts_raw')
+        managed_error = accounts_debug.get('managed_accounts_error')
+        fallback_source = accounts_debug.get('fallback_source')
+        msg = (
+            f"[IBBroker Debug] Account probe for '{acct}': "
+            f"managedAccounts_raw={managed_raw!r}, "
+            f"managedAccounts_error={managed_error!r}, "
+            f"fallback_source={fallback_source!r}, "
+            f"known_accounts={sorted(known_accounts)}, "
+            f"snapshot_ib_connected={snapshot_debug.get('ib_connected')}, "
+            f"snapshot_in_async={snapshot_debug.get('in_async_task')}, "
+            f"snapshot_summary_attempts={snapshot_debug.get('summary_attempts', [])}, "
+            f"snapshot_values_attempts={snapshot_debug.get('values_attempts', [])}, "
+            f"snapshot_raw_accounts={snapshot_debug.get('raw_accounts', [])}, "
+            f"snapshot_raw_rows={snapshot_debug.get('raw_rows', 0)}, "
+            f"snapshot_filtered_rows={snapshot_debug.get('filtered_rows', 0)}."
+        )
+        print(msg)
+
     def _load_account_snapshot(self):
         """
         拉取账户摘要快照；优先 accountSummary，失败时回退 accountValues。
         在异步回调任务中避免阻塞式等待。
         """
         if not hasattr(self, 'ib') or not self.ib:
+            self._last_account_snapshot_debug = {
+                'ib_connected': False,
+                'in_async_task': False,
+                'configured_account': self._configured_order_account(),
+                'summary_attempts': ['ib instance missing'],
+                'values_attempts': [],
+                'raw_accounts': [],
+                'raw_rows': 0,
+                'filtered_rows': 0,
+            }
+            return []
+
+        ib_connected = False
+        try:
+            ib_connected = bool(self.ib.isConnected())
+        except Exception:
+            ib_connected = False
+        if not ib_connected:
+            self._last_account_snapshot_debug = {
+                'ib_connected': False,
+                'in_async_task': self._in_async_task(),
+                'configured_account': self._configured_order_account(),
+                'summary_attempts': ['ib not connected'],
+                'values_attempts': [],
+                'raw_accounts': [],
+                'raw_rows': 0,
+                'filtered_rows': 0,
+            }
             return []
 
         in_loop = self._in_async_task()
         source_data = []
+        configured_account = self._configured_order_account()
+        debug_info = {
+            'ib_connected': True,
+            'in_async_task': in_loop,
+            'configured_account': configured_account,
+            'summary_attempts': [],
+            'values_attempts': [],
+            'raw_accounts': [],
+            'raw_rows': 0,
+            'filtered_rows': 0,
+        }
 
         if not in_loop:
-            try:
-                source_data = self.ib.accountSummary()
-                if not source_data and hasattr(self.ib, 'sleep'):
-                    self.ib.sleep(0.5)
-                    source_data = self.ib.accountSummary()
-            except Exception:
-                pass
+            source_data = self._query_account_rows(
+                'accountSummary', configured_account, debug_info['summary_attempts']
+            )
+            if not source_data and hasattr(self.ib, 'sleep'):
+                self.ib.sleep(0.5)
+                source_data = self._query_account_rows(
+                    'accountSummary', configured_account, debug_info['summary_attempts'], note=' [retry]'
+                )
 
         if not source_data:
-            try:
-                source_data = self.ib.accountValues()
-            except Exception:
-                pass
+            source_data = self._query_account_rows(
+                'accountValues', configured_account, debug_info['values_attempts']
+            )
 
-        return source_data or []
+        raw_source = list(source_data or [])
+        debug_info['raw_rows'] = len(raw_source)
+        raw_accounts = {
+            self._extract_account_from_obj(item)
+            for item in raw_source
+            if self._extract_account_from_obj(item)
+        }
+        debug_info['raw_accounts'] = sorted(raw_accounts)
+        filtered = self._filter_account_scoped_items(
+            raw_source,
+            lambda item: self._extract_account_from_obj(item),
+        )
+        debug_info['filtered_rows'] = len(filtered)
+        self._last_account_snapshot_debug = debug_info
+        return filtered
 
     @staticmethod
     def _extract_base_tag_value(source_data, tag):
@@ -180,6 +484,7 @@ class IBBrokerAdapter(BaseLiveBroker):
         """
         source_data = self._load_account_snapshot()
         if not source_data:
+            self._push_zero_cash_account_alarm_if_needed(0.0, has_snapshot=False)
             return 0.0
 
         has_available_funds = any(
@@ -200,9 +505,13 @@ class IBBrokerAdapter(BaseLiveBroker):
                 pass
 
             if candidates:
-                return min(candidates)
+                result = min(candidates)
+                self._push_zero_cash_account_alarm_if_needed(result, has_snapshot=True)
+                return result
 
-        return self._fetch_smart_value(['TotalCashValue'], source_data=source_data)
+        result = self._fetch_smart_value(['TotalCashValue'], source_data=source_data)
+        self._push_zero_cash_account_alarm_if_needed(result, has_snapshot=True)
+        return result
 
     def _fetch_real_cash(self) -> float:
         """
@@ -387,6 +696,13 @@ class IBBrokerAdapter(BaseLiveBroker):
             return True
         return False
 
+    def _extract_trade_account(self, trade) -> str:
+        for obj in (getattr(trade, 'order', None), getattr(trade, 'orderStatus', None), trade):
+            acct = self._extract_account_from_obj(obj)
+            if acct:
+                return acct
+        return ''
+
     def _connected_client_id(self):
         try:
             return int(getattr(getattr(self.ib, 'client', None), 'clientId', -1))
@@ -550,7 +866,10 @@ class IBBrokerAdapter(BaseLiveBroker):
             except Exception as e:
                 print(f"[IBBroker] trades 缓存读取失败: {e}")
 
-        return collected
+        return self._filter_account_scoped_items(
+            collected,
+            lambda trade: self._extract_trade_account(trade),
+        )
 
     def get_pending_orders(self) -> list:
         """盈透：获取在途订单（含跨 client 兜底视角）"""
@@ -870,7 +1189,10 @@ class IBBrokerAdapter(BaseLiveBroker):
             return Pos()
 
         # 遍历 ib.positions()；兼容 QQQ.ISLAND / QQQ.SMART 与 QQQ 的双向匹配
-        positions = self.ib.positions()
+        positions = self._filter_account_scoped_items(
+            self.ib.positions(),
+            lambda p: self._extract_account_from_obj(p),
+        )
 
         expected_symbols = {symbol.upper(), symbol.split('.')[0].upper()}
         expected_sec_type = None
@@ -996,8 +1318,10 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 使用市价单 (MarketOrder) 或 限价单 (LimitOrder)
         # 此处简单起见使用市价单
         order = MarketOrder(action, volume_final)
-        configured_account = str(getattr(config, 'IBKR_ORDER_ACCOUNT', '') or '').strip()
+        configured_account = self._configured_order_account()
         if configured_account:
+            if not self._is_configured_order_account_valid(configured_account):
+                return None
             # 透传 IB 订单 account 字段；留空时由 IB 默认使用主账户路由。
             order.account = configured_account
 
