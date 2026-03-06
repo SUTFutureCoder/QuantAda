@@ -588,6 +588,66 @@ def test_ib_submit_order_fractional_sell_disabled_by_default(monkeypatch):
     )
 
 
+def test_ib_submit_order_uses_configured_order_account(monkeypatch):
+    """
+    子账户路由回归:
+    配置了 IBKR_ORDER_ACCOUNT 时，应将其写入 MarketOrder.account。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForSubmit())
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module,
+        "MarketOrder",
+        lambda action, qty: SimpleNamespace(action=action, totalQuantity=qty, account=""),
+    )
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "U1234567",
+        raising=False,
+    )
+
+    data = SimpleNamespace(_name="AAPL.SMART")
+    proxy = broker._submit_order(data=data, volume=10, side="BUY", price=100.0)
+
+    assert proxy is not None
+    assert context.ib_instance.last_order.account == "U1234567", (
+        "配置子账户时，应透传到 MarketOrder.account。"
+    )
+
+
+def test_ib_submit_order_uses_default_account_when_config_empty(monkeypatch):
+    """
+    默认主账户回归:
+    IBKR_ORDER_ACCOUNT 留空时，不应覆盖 MarketOrder.account。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForSubmit())
+    broker = IBBrokerAdapter(context=context)
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module,
+        "MarketOrder",
+        lambda action, qty: SimpleNamespace(action=action, totalQuantity=qty, account=""),
+    )
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "   ",
+        raising=False,
+    )
+
+    data = SimpleNamespace(_name="AAPL.SMART")
+    proxy = broker._submit_order(data=data, volume=10, side="BUY", price=100.0)
+
+    assert proxy is not None
+    assert context.ib_instance.last_order.account == "", (
+        "配置留空时，应维持 IB 默认主账户路由。"
+    )
+
+
 def test_ib_pending_order_contract_includes_id():
     """
     最小契约:

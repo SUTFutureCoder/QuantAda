@@ -996,6 +996,10 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 使用市价单 (MarketOrder) 或 限价单 (LimitOrder)
         # 此处简单起见使用市价单
         order = MarketOrder(action, volume_final)
+        configured_account = str(getattr(config, 'IBKR_ORDER_ACCOUNT', '') or '').strip()
+        if configured_account:
+            # 透传 IB 订单 account 字段；留空时由 IB 默认使用主账户路由。
+            order.account = configured_account
 
         trade = self.ib.placeOrder(contract, order)
         return IBOrderProxy(trade, data=data)

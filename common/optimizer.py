@@ -35,6 +35,7 @@ import multiprocessing as mp
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -137,6 +138,135 @@ def is_port_in_use(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
+def _is_process_elevated():
+    """
+    跨平台检测是否已具备管理员权限。
+    - Windows: UAC 管理员令牌
+    - macOS/Linux: UID=0
+    """
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+
+    geteuid = getattr(os, "geteuid", None)
+    if callable(geteuid):
+        try:
+            return int(geteuid()) == 0
+        except Exception:
+            return False
+    return False
+
+
+def _should_try_auto_elevation(args):
+    """
+    仅在优化并行模式（worker > 1）下触发自动提权请求。
+    """
+    disable_flag = str(os.environ.get("QUANTADA_DISABLE_AUTO_ELEVATE", "")).strip().lower()
+    if disable_flag in {"1", "true", "yes", "on"}:
+        return False
+
+    requested_jobs = getattr(args, "n_jobs", 1)
+    try:
+        workers = OptimizationJob._resolve_worker_count(requested_jobs)
+    except Exception:
+        workers = 1
+
+    return workers > 1 and (not _is_process_elevated())
+
+
+def _print_elevation_banner(args):
+    requested_jobs = getattr(args, "n_jobs", 1)
+    try:
+        workers = OptimizationJob._resolve_worker_count(requested_jobs)
+    except Exception:
+        workers = 1
+
+    print("\n" + "=" * 72)
+    print("[Optimizer] Authorization Request for Maximum Training Performance")
+    print(
+        f"[Optimizer] Target parallel workers: {workers}. "
+        "Requesting administrator privileges before optimization."
+    )
+    print(
+        "[Optimizer] The command will relaunch with elevated rights, "
+        "then continue with the same CLI arguments."
+    )
+    print("=" * 72)
+
+
+def _relaunch_windows_as_admin():
+    try:
+        import ctypes
+    except Exception as e:
+        print(f"[Optimizer] Warning: unable to load Windows elevation API: {e}")
+        return False
+
+    try:
+        script_argv = [os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
+        params = subprocess.list2cmdline(script_argv)
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            sys.executable,
+            params,
+            None,
+            1,
+        )
+        if int(result) <= 32:
+            print(f"[Optimizer] Warning: elevation request was not granted (ShellExecute code={result}).")
+            return False
+        return True
+    except Exception as e:
+        print(f"[Optimizer] Warning: failed to request administrator relaunch on Windows: {e}")
+        return False
+
+
+def _relaunch_unix_with_sudo():
+    stdin_obj = getattr(sys, "stdin", None)
+    if stdin_obj is None or not getattr(stdin_obj, "isatty", lambda: False)():
+        print("[Optimizer] Warning: non-interactive terminal detected, skip sudo elevation request.")
+        return False
+
+    cmd = ["sudo", "-E", sys.executable] + list(sys.argv)
+    print(f"[Optimizer] Elevation command: {' '.join(cmd)}")
+    try:
+        os.execvp("sudo", cmd)
+    except FileNotFoundError:
+        print("[Optimizer] Warning: 'sudo' not found, skip automatic elevation.")
+        return False
+    except Exception as e:
+        print(f"[Optimizer] Warning: failed to request sudo relaunch: {e}")
+        return False
+    return True
+
+
+def _request_elevation_if_needed(args):
+    """
+    尝试在优化前申请管理员权限。
+    返回 True 表示已触发提权重启（当前进程应直接结束）。
+    """
+    if not _should_try_auto_elevation(args):
+        return False
+
+    _print_elevation_banner(args)
+
+    if sys.platform.startswith("win"):
+        if _relaunch_windows_as_admin():
+            print("[Optimizer] Elevation request accepted. Relaunching elevated optimizer process...")
+            return True
+        print("[Optimizer] Continuing without elevation.")
+        return False
+
+    if sys.platform == "darwin" or sys.platform.startswith("linux"):
+        return _relaunch_unix_with_sudo()
+
+    print(f"[Optimizer] Warning: unsupported platform for auto-elevation: {sys.platform}")
+    return False
+
+
 def run_optimizer_mode(args, fixed_params, risk_params, symbol_list):
     """
     运行优化模式主流程（从 run.py 下沉的编排逻辑）。
@@ -159,6 +289,9 @@ def run_optimizer_mode(args, fixed_params, risk_params, symbol_list):
         print("Error: --metric contains no valid metric after filtering empty entries.")
         return 1
 
+    if _request_elevation_if_needed(args):
+        return 0
+
     config.LOG = False
     logging.getLogger("optuna").setLevel(logging.INFO)
 
@@ -176,12 +309,55 @@ def run_optimizer_mode(args, fixed_params, risk_params, symbol_list):
         for arg in sys.argv[1:]
     )
     baseline_report = None
+    baseline_test_report = None
     baseline_elapsed_hours = None
     shared_context = None
     bootstrap_job = None
     dashboard_launcher_job = None
     shared_dashboard_log_file = None
     log_dir = None
+    test_set_requested = bool(getattr(args, "test_period", None) or getattr(args, "test_roll_period", None))
+
+    def normalize_metric_date(value):
+        if value is None:
+            return None
+        try:
+            ts = pd.to_datetime(value)
+            if pd.isna(ts):
+                raise ValueError("NaT")
+            return ts.strftime('%Y%m%d')
+        except Exception:
+            text = str(value).strip()
+            if not text:
+                return None
+            digits = re.sub(r"[^0-9]", "", text)
+            if len(digits) >= 8:
+                return digits[:8]
+            return text
+
+    def format_metric_label(report):
+        metric_name = str(report.get('metric_name', 'Unknown'))
+        score_str = str(report.get('best_score', 'N/A'))
+        return f"{metric_name} ({score_str})" if score_str != "N/A" else metric_name
+
+    def print_metric_row(metric_label, metrics_payload, elapsed_hours, params_payload, log_payload):
+        fmt = format_recent_backtest_metrics(metrics_payload or {})
+        m_str = str(metric_label)[:30]
+        ret_str = fmt['annual_return']
+        dd_str = fmt['max_drawdown']
+        calmar_str = fmt['calmar_ratio']
+        sharpe_str = fmt['sharpe_ratio']
+        trades_str = fmt['total_trades']
+        winrate_str = fmt['win_rate']
+        pf_str = fmt['profit_factor']
+        t_str = format_float(elapsed_hours, digits=1)
+        b_str = str(params_payload)
+        db_str = str(log_payload)
+        print(
+            f"| {m_str:<30} | {ret_str:<10} | {dd_str:<10} | "
+            f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
+            f"{t_str:<8} | {b_str:<22} | {db_str}"
+        )
 
     if is_multi_metric:
         log_dir = os.path.join(os.getcwd(), config.DATA_PATH, 'optuna')
@@ -240,6 +416,8 @@ def run_optimizer_mode(args, fixed_params, risk_params, symbol_list):
         baseline_start = time.time()
         try:
             if bootstrap_job is not None:
+                if test_set_requested:
+                    baseline_test_report = bootstrap_job._run_test_set_backtest(copy.deepcopy(fixed_params), verbose=False)
                 baseline_report = bootstrap_job._run_recent_3y_backtest(copy.deepcopy(fixed_params))
             else:
                 baseline_args = copy.deepcopy(args)
@@ -253,6 +431,8 @@ def run_optimizer_mode(args, fixed_params, risk_params, symbol_list):
                     opt_params_def=opt_p_def,
                     risk_params=risk_params
                 )
+                if test_set_requested:
+                    baseline_test_report = baseline_job._run_test_set_backtest(copy.deepcopy(fixed_params), verbose=False)
                 baseline_report = baseline_job._run_recent_3y_backtest(copy.deepcopy(fixed_params))
         except Exception as e:
             print(f"[警告] 当前基准回测失败: {e}")
@@ -318,51 +498,93 @@ def run_optimizer_mode(args, fixed_params, risk_params, symbol_list):
         print("-" * table_width)
 
         if explicit_params_passed:
-            baseline_recent = baseline_report or {}
-            baseline_fmt = format_recent_backtest_metrics(baseline_recent)
-            m_str = "当前基准"
-            ret_str = baseline_fmt['annual_return']
-            dd_str = baseline_fmt['max_drawdown']
-            calmar_str = baseline_fmt['calmar_ratio']
-            sharpe_str = baseline_fmt['sharpe_ratio']
-            trades_str = baseline_fmt['total_trades']
-            winrate_str = baseline_fmt['win_rate']
-            pf_str = baseline_fmt['profit_factor']
-            t_str = format_float(baseline_elapsed_hours, digits=1)
-            b_str = str(fixed_params)
-            db_str = "N/A"
-            print(
-                f"| {m_str:<30} | {ret_str:<10} | {dd_str:<10} | "
-                f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
-                f"{t_str:<8} | {b_str:<22} | {db_str}"
+            print_metric_row(
+                metric_label="当前基准",
+                metrics_payload=baseline_report or {},
+                elapsed_hours=baseline_elapsed_hours,
+                params_payload=fixed_params,
+                log_payload="N/A",
             )
             if final_reports:
                 print("-" * table_width)
 
         for r in final_reports:
-            recent = r.get('recent_backtest') or {}
-            recent_fmt = format_recent_backtest_metrics(recent)
-            metric_name = str(r.get('metric_name', 'Unknown'))
-            score_str = str(r.get('best_score', 'N/A'))
-            metric_with_score = f"{metric_name} ({score_str})" if score_str != "N/A" else metric_name
-            m_str = metric_with_score[:30]
-            ret_str = recent_fmt['annual_return']
-            dd_str = recent_fmt['max_drawdown']
-            calmar_str = recent_fmt['calmar_ratio']
-            sharpe_str = recent_fmt['sharpe_ratio']
-            trades_str = recent_fmt['total_trades']
-            winrate_str = recent_fmt['win_rate']
-            pf_str = recent_fmt['profit_factor']
-            t_str = format_float(r.get('elapsed_hours', 0), digits=1)
-            b_str = str(r.get('best_params', 'N/A'))
-            db_str = str(r.get('log_file', 'N/A'))
-            print(
-                f"| {m_str:<30} | {ret_str:<10} | {dd_str:<10} | "
-                f"{calmar_str:<8} | {sharpe_str:<8} | {trades_str:<8} | {winrate_str:<10} | {pf_str:<8} | "
-                f"{t_str:<8} | {b_str:<22} | {db_str}"
+            print_metric_row(
+                metric_label=format_metric_label(r),
+                metrics_payload=r.get('recent_backtest') or {},
+                elapsed_hours=r.get('elapsed_hours', 0),
+                params_payload=r.get('best_params', 'N/A'),
+                log_payload=r.get('log_file', 'N/A'),
             )
 
-        print("-" * table_width + "\n")
+        if test_set_requested:
+            test_section_start = None
+            test_section_end = None
+
+            for r in final_reports:
+                test_metrics = r.get('test_backtest') or {}
+                test_section_start = normalize_metric_date(test_metrics.get('start_date'))
+                test_section_end = normalize_metric_date(test_metrics.get('end_date'))
+                if test_section_start and test_section_end:
+                    break
+
+            if not (test_section_start and test_section_end):
+                test_section_start = normalize_metric_date((baseline_test_report or {}).get('start_date'))
+                test_section_end = normalize_metric_date((baseline_test_report or {}).get('end_date'))
+
+            if not (test_section_start and test_section_end) and bootstrap_job is not None:
+                try:
+                    tr = getattr(bootstrap_job, "test_range", (None, None))
+                    test_section_start = normalize_metric_date((tr or (None, None))[0])
+                    test_section_end = normalize_metric_date((tr or (None, None))[1])
+                except Exception:
+                    pass
+
+            period_text = None
+            if test_section_start and test_section_end:
+                period_text = f"{test_section_start} -> {test_section_end}"
+            elif getattr(args, "test_period", None):
+                raw = str(args.test_period)
+                if '-' in raw:
+                    s, e = raw.split('-', 1)
+                    period_text = f"{s} -> {e}"
+                else:
+                    period_text = raw
+            elif getattr(args, "test_roll_period", None):
+                period_text = f"{args.test_roll_period} Rolling Window"
+
+            test_title = "测试集回测结果 (Out-of-Sample Test Set)"
+            if period_text:
+                test_title = f"{period_text} 测试集回测结果 (Out-of-Sample Test Set)"
+
+            print("-" * table_width)
+            print(test_title)
+            print("-" * table_width)
+            print(header)
+            print("-" * table_width)
+
+            if explicit_params_passed:
+                print_metric_row(
+                    metric_label="当前基准",
+                    metrics_payload=baseline_test_report or {},
+                    elapsed_hours=baseline_elapsed_hours,
+                    params_payload=fixed_params,
+                    log_payload="N/A",
+                )
+                if final_reports:
+                    print("-" * table_width)
+
+            for r in final_reports:
+                print_metric_row(
+                    metric_label=format_metric_label(r),
+                    metrics_payload=r.get('test_backtest') or {},
+                    elapsed_hours=r.get('elapsed_hours', 0),
+                    params_payload=r.get('best_params', 'N/A'),
+                    log_payload=r.get('log_file', 'N/A'),
+                )
+
+            print("-" * table_width + "\n")
+            print("=== 请将上文提供给AI辅助分析 ===")
 
         if final_reports:
             print("请在 Dashboard 中回放并排查孤点: ")
@@ -427,7 +649,6 @@ class OptimizationJob:
 
             # 在复用数据上下文的前提下，仅重建本次 metric 对应的 study_name
             self._auto_refine_study_name()
-            self.has_debugged_data = False
             return
 
         self.strategy_class = get_class_from_name(args.strategy, ['strategies'])
@@ -473,8 +694,6 @@ class OptimizationJob:
 
         # 根据实际日期和市场类型自动精细化 study_name
         self._auto_refine_study_name()
-
-        self.has_debugged_data = False
 
     def export_shared_context(self):
         """
@@ -740,7 +959,6 @@ class OptimizationJob:
                     rc_cls = get_class_from_name(r_name, ['risk_controls', 'strategies'])
                     obj.risk_control_classes.append(rc_cls)
 
-        obj.has_debugged_data = False
         obj._reset_trial_dedupe_cache()
         return obj
 
@@ -1407,12 +1625,6 @@ class OptimizationJob:
         if not self.train_datas:
             return -9999.0
 
-        if not self.has_debugged_data:
-            print(f"\n[DEBUG] Training Data Overview (Total {len(self.train_datas)} symbols):")
-            for symbol, data in self.train_datas.items():
-                print(f"  - {symbol}: {len(data)} rows")
-            self.has_debugged_data = True
-
         try:
             bt_instance = Backtester(
                 datas=self.train_datas,
@@ -1725,6 +1937,63 @@ class OptimizationJob:
             "final_portfolio": perf.get("final_portfolio"),
         }
 
+    def _run_test_set_backtest(self, final_params, verbose=False):
+        """
+        对训练集外测试窗口执行自动回测，并返回核心指标用于多指标汇总对比。
+        """
+        if not self.test_datas:
+            return None
+
+        test_start = (self.test_range or (None, None))[0]
+        test_end = (self.test_range or (None, None))[1]
+
+        print("-" * 60)
+        print(f"Running Validation on Test Set: {test_start} to {test_end}")
+        print("-" * 60)
+
+        try:
+            bt_test = Backtester(
+                datas=self.test_datas,
+                strategy_class=self.strategy_class,
+                params=final_params,
+                start_date=test_start,
+                end_date=test_end,
+                cash=self.args.cash,
+                commission=self.args.commission,
+                slippage=self.args.slippage,
+                risk_control_classes=self.risk_control_classes,
+                risk_control_params=self.risk_params,
+                timeframe=self.args.timeframe,
+                compression=self.args.compression,
+                enable_plot=False,
+                verbose=False,
+            )
+            bt_test.run()
+            if verbose:
+                bt_test.display_results()
+
+            perf = bt_test.get_performance_metrics()
+            if not perf:
+                print("[Optimizer] Warning: Test-set backtest finished but metrics are unavailable.")
+                return None
+        except Exception as e:
+            print(f"[Optimizer] Warning: Test-set backtest failed: {e}")
+            return None
+
+        return {
+            "start_date": test_start or perf.get("start_date"),
+            "end_date": test_end or perf.get("end_date"),
+            "total_return": perf.get("total_return"),
+            "annual_return": perf.get("annual_return"),
+            "sharpe_ratio": perf.get("sharpe_ratio"),
+            "max_drawdown": perf.get("max_drawdown"),
+            "calmar_ratio": perf.get("calmar_ratio"),
+            "total_trades": perf.get("total_trades"),
+            "win_rate": perf.get("win_rate"),
+            "profit_factor": perf.get("profit_factor"),
+            "final_portfolio": perf.get("final_portfolio"),
+        }
+
     def run(self):
         # 1. 配置存储 (支持多核)
         storage = None
@@ -1907,28 +2176,9 @@ class OptimizationJob:
         print(f"Best Training Score ({self.args.metric}): {best_val_display}")
 
         if self.test_datas:
-            print("-" * 60)
-            print(f"Running Validation on Test Set: {self.test_range[0]} to {self.test_range[1]}")
-            print("-" * 60)
-
-            bt_test = Backtester(
-                datas=self.test_datas,
-                strategy_class=self.strategy_class,
-                params=final_params,
-                start_date=self.test_range[0],
-                end_date=self.test_range[1],
-                cash=self.args.cash,
-                commission=self.args.commission,
-                slippage=self.args.slippage,
-                risk_control_classes=self.risk_control_classes,
-                risk_control_params=self.risk_params,
-                timeframe=self.args.timeframe,
-                compression=self.args.compression,
-                enable_plot=False,
-                verbose=True,
-            )
-            bt_test.run()
+            test_metrics = self._run_test_set_backtest(final_params, verbose=True)
         else:
+            test_metrics = None
             print("\n(No Test Set Configured)")
 
         recent_3y_metrics = self._run_recent_3y_backtest(final_params)
@@ -1948,6 +2198,16 @@ class OptimizationJob:
             print(f" Trades:   {recent_fmt['total_trades']}")
             print(f" WinRate:  {recent_fmt['win_rate']}")
             print(f" PF:       {recent_fmt['profit_factor']}")
+        if test_metrics:
+            test_fmt = format_recent_backtest_metrics(test_metrics)
+            print(f" TestSet:  {test_metrics.get('start_date')} -> {test_metrics.get('end_date')}")
+            print(f" Annual:   {test_fmt['annual_return']}")
+            print(f" Drawdown: {test_fmt['max_drawdown']}")
+            print(f" Calmar:   {test_fmt['calmar_ratio']}")
+            print(f" Sharpe:   {test_fmt['sharpe_ratio']}")
+            print(f" Trades:   {test_fmt['total_trades']}")
+            print(f" WinRate:  {test_fmt['win_rate']}")
+            print(f" PF:       {test_fmt['profit_factor']}")
         print("=" * 60 + "\n")
 
         return {
@@ -1956,6 +2216,7 @@ class OptimizationJob:
             "trials_completed": len(study.trials),
             "log_file": log_file,
             "recent_backtest": recent_3y_metrics,
+            "test_backtest": test_metrics,
         }
 
 
@@ -2000,4 +2261,3 @@ def _optimize_worker_entry(worker_payload, study_name, log_file, n_trials, worke
         return {"worker_idx": worker_idx, "n_trials": n_trials}
     finally:
         OptimizationJob._cleanup_shared_segments(worker_shm_handles, unlink=False)
-
