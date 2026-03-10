@@ -237,6 +237,7 @@ if __name__ == '__main__':
             'slippage': args.slippage,
             'timeframe': args.timeframe,
             'compression': args.compression,
+            'data_source': args.data_source,
             # 实盘风控配置透传
             'risk': args.risk,
             'risk_params': r_params,

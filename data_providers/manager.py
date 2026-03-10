@@ -120,28 +120,18 @@ class DataManager:
         return None
 
     def _get_data_smart(self, symbol, start_date, end_date, timeframe: str, compression: int, refresh: bool):
-        csv_provider = self.provider_map.get('csv')
+        """
+        默认链路不再使用 CSV 缓存，除非显式指定 data_source=csv。
+        refresh 仅影响在线数据拉取与缓存回写行为。
+        """
         online_providers = [
             p for p in self.providers
             if p.__class__.__name__.replace('DataProvider', '').lower() != 'csv'
         ]
 
-        # 1. 如果是非日线，或者是强制刷新模式 -> 直接走网络
-        if refresh or not csv_provider:
-            if refresh:
-                print(f"Force refresh requested. Bypassing cache for {symbol}...")
+        if refresh:
+            print(f"Force refresh requested. Bypassing cache for {symbol}...")
 
-            return self._fetch_from_providers(symbol, start_date, end_date, online_providers, timeframe, compression)
-
-        # 2. 默认模式：尝试读取缓存
-        df_local = csv_provider.get_data(symbol, None, None, timeframe, compression) if csv_provider else None
-
-        if df_local is not None and not df_local.empty:
-            print("Local cache found. Using it (add --refresh to force update).")
-            return df_local
-
-        # 3. 缓存不存在 -> 走网络
-        print("Local cache not found. Attempting download...")
         return self._fetch_from_providers(symbol, start_date, end_date, online_providers, timeframe, compression)
 
     def _fetch_from_providers(self, symbol, start_date, end_date, providers,

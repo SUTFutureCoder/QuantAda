@@ -75,6 +75,59 @@ class _RiskControlChain:
                 control.exit_triggered.discard(symbol)
 
 
+class _DataManagerProvider(BaseDataProvider):
+    """
+    Live 数据源桥接器:
+    将 DataManager 的 get_data 适配成 LiveTrader 所需的 get_history 接口。"""
+
+    def __init__(self, data_manager: DataManager, specified_sources: str = None):
+        self._data_manager = data_manager
+        self._specified_sources = specified_sources
+
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                 timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
+        return self._data_manager.get_data(
+            symbol,
+            start_date=start_date,
+            end_date=end_date,
+            specified_sources=self._specified_sources,
+            timeframe=timeframe,
+            compression=compression,
+            refresh=False,
+        )
+
+    def get_history(self, symbol: str, start_date: str, end_date: str,
+                    timeframe: str = 'Days', compression: int = 1) -> pd.DataFrame:
+        return self.get_data(symbol, start_date, end_date, timeframe, compression)
+
+
+class _DataManagerProxy:
+    """
+    DataManager 代理:
+    为选股器等调用路径强制注入指定数据源。"""
+
+    def __init__(self, data_manager: DataManager, specified_sources: str):
+        self._data_manager = data_manager
+        self._specified_sources = specified_sources
+
+    def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                 specified_sources: str = None, timeframe: str = 'Days',
+                 compression: int = 1, refresh: bool = False) -> pd.DataFrame:
+        enforced = specified_sources if specified_sources is not None else self._specified_sources
+        return self._data_manager.get_data(
+            symbol,
+            start_date=start_date,
+            end_date=end_date,
+            specified_sources=enforced,
+            timeframe=timeframe,
+            compression=compression,
+            refresh=refresh,
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._data_manager, name)
+
+
 class LiveTrader:
     """实盘交易引擎"""
 
@@ -163,6 +216,50 @@ class LiveTrader:
             return scoped
         return raw_risk_params
 
+    @staticmethod
+    def _normalize_data_source(raw_source):
+        if raw_source is None:
+            return None
+        if isinstance(raw_source, str):
+            cleaned = raw_source.strip()
+            return cleaned if cleaned else None
+        cleaned = str(raw_source).strip()
+        return cleaned if cleaned else None
+
+    @staticmethod
+    def _is_default_live_source(platform: str, data_source: str) -> bool:
+        plat = str(platform or '').strip().lower()
+        ds = str(data_source or '').strip().lower()
+        if not plat or not ds:
+            return False
+        if plat in {'ib', 'ibkr'} and ds in {'ib', 'ibkr'}:
+            return True
+        if plat in {'gm', 'gmi'} and ds in {'gm', 'gmi'}:
+            return True
+        return False
+
+    def _maybe_override_live_data_provider(self):
+        data_source = self._normalize_data_source(self.config.get('data_source'))
+        if not data_source:
+            return
+
+        platform = self.config.get('platform', '')
+        if self._is_default_live_source(platform, data_source):
+            print(
+                f"[Engine] Live data_source '{data_source}' matches default provider for {platform}. "
+                "Using adapter provider."
+            )
+            return
+
+        if self._data_manager is None:
+            self._data_manager = DataManager()
+
+        if not isinstance(self._data_manager, _DataManagerProxy):
+            self._data_manager = _DataManagerProxy(self._data_manager, specified_sources=data_source)
+
+        self.data_provider = _DataManagerProvider(self._data_manager, specified_sources=data_source)
+        print(f"[Engine] Live data source override: {data_source}")
+
     def init(self, context):
         print("--- LiveTrader Engine Initializing ---")
 
@@ -203,6 +300,9 @@ class LiveTrader:
                     print(f"[Engine] Token correctly loaded and cleaned from context: {raw_token[:6]}***")
                 except ImportError:
                     pass
+
+        # 兼容实盘 data_source 覆盖：允许使用指定数据源替换默认 Provider
+        self._maybe_override_live_data_provider()
 
         # 3. 使用最终配置实例化所有组件
         self.strategy_class = get_class_from_name(self.config['strategy_name'], ['strategies'])
@@ -1288,3 +1388,4 @@ def launch_live(broker_name: str, conn_name: str, strategy_path: str, params: di
         AlarmManager().push_exception("Launcher Crash", str(e))
         traceback.print_exc()
         sys.exit(1)
+

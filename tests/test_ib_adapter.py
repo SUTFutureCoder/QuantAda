@@ -2,6 +2,7 @@ import sys
 import types
 import datetime
 
+import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 from types import SimpleNamespace
@@ -607,6 +608,69 @@ def test_ib_get_cash_dedupes_open_orders_and_local_ledger():
     assert broker.get_cash() == pytest.approx(expected_cash), (
         "IB get_cash 占资去重异常：应扣减 openTrades 冻结 + 本地额外订单占资。"
     )
+
+
+def test_ib_get_current_price_falls_back_to_provider_price_when_no_market_data(monkeypatch):
+    """
+    行情兜底回归:
+    无实时订阅时应回退到非 CSV 数据源价格，保证定时实盘可计算下单量。"""
+    import live_trader.adapters.ib_broker as ib_module
+
+    class DummyProvider:
+        def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                     timeframe: str = "Days", compression: int = 1):
+            return pd.DataFrame(
+                {"close": [123.4]},
+                index=[pd.Timestamp("2026-03-10")],
+            )
+
+    class DummyDataManager:
+        def __init__(self):
+            self.providers = [DummyProvider()]
+
+    monkeypatch.setattr(ib_module, "DataManager", DummyDataManager)
+
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=0.0))
+    broker = IBBrokerAdapter(context=context)
+    broker._tickers = {"AAPL": DummyTicker(float("nan"))}
+
+    data = SimpleNamespace(_name="AAPL")
+    price = broker.get_current_price(data)
+
+    assert price == pytest.approx(123.4), "无行情订阅时应回退到非 CSV 数据源价格。"
+
+
+def test_ib_get_current_price_no_provider_price_alarms_and_blocks(monkeypatch):
+    """
+    行情兜底回归:
+    无实时价且所有非 CSV 数据源均失败时，应报警并禁止下单。"""
+    import live_trader.adapters.ib_broker as ib_module
+
+    class DummyProvider:
+        def get_data(self, *args, **kwargs):
+            return pd.DataFrame()
+
+    class DummyDataManager:
+        def __init__(self):
+            self.providers = [DummyProvider()]
+
+    calls = []
+
+    def _capture_alarm(self, content, level="INFO"):
+        calls.append((content, level))
+
+    monkeypatch.setattr(ib_module, "DataManager", DummyDataManager)
+    monkeypatch.setattr(ib_module.AlarmManager, "push_text", _capture_alarm, raising=False)
+
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=0.0))
+    broker = IBBrokerAdapter(context=context)
+    broker._tickers = {"AAPL": DummyTicker(float("nan"))}
+
+    data = SimpleNamespace(_name="AAPL")
+    price = broker.get_current_price(data)
+
+    assert price == 0.0, "无有效价格时应返回 0，阻止下单。"
+    assert calls, "无有效价格时应触发报警。"
 
 
 def test_ib_fetch_smart_value_falls_back_to_base_when_fx_missing():

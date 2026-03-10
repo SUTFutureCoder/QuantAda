@@ -13,6 +13,8 @@ except ImportError:
 from alarms.manager import AlarmManager
 from common.ib_symbol_parser import resolve_ib_contract_spec
 import config
+from data_providers.csv_provider import CsvDataProvider
+from data_providers.manager import DataManager
 from data_providers.ibkr_provider import IbkrDataProvider
 from .base_broker import BaseLiveBroker, BaseOrderProxy
 
@@ -128,6 +130,9 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 账户探测诊断日志去重，避免重复刷屏。
         self._account_probe_debug_logged_accounts = set()
         self._last_account_snapshot_debug = {}
+        # 无实时价兜底与告警去重
+        self._price_data_manager = None
+        self._price_alarm_keys = set()
         super().__init__(context, cash_override, commission_override, slippage_override)
 
     @property
@@ -1277,11 +1282,133 @@ class IBBrokerAdapter(BaseLiveBroker):
                 print(f"[IB Debug] {symbol} marketPrice invalid. Using LAST price: {ticker.last}")
                 price = ticker.last
             else:
-                # 极少数情况：刚订阅连快照都没回来，打印警告
-                print(f"[IB Warning] No valid price (Market/Close/Last) for {symbol}. Ticker: {ticker}")
-                pass
+                # 无实时价时，从非 CSV 数据源按优先级兜底获取
+                fallback_price, tried_sources = self._fallback_price_from_sources(symbol)
+                if fallback_price > 0:
+                    print(
+                        f"[IB Warning] No valid price (Market/Close/Last) for {symbol}. "
+                        f"Using provider price: {fallback_price}"
+                    )
+                    price = fallback_price
+                else:
+                    self._alarm_no_price(symbol, tried_sources)
+                    price = 0.0
 
         return price
+
+    def _resolve_runtime_config(self) -> dict:
+        try:
+            ctx = getattr(self, '_context', None)
+            trader = getattr(ctx, 'strategy_instance', None)
+            if trader and hasattr(trader, 'config'):
+                return trader.config or {}
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _extract_last_price(df: pd.DataFrame) -> float:
+        if df is None or df.empty:
+            return 0.0
+        for col in ('close', 'Close', 'adjClose', 'Adj Close', 'last', 'Last'):
+            if col in df.columns:
+                try:
+                    val = df[col].iloc[-1]
+                    if val and val == val and val > 0:
+                        return float(val)
+                except Exception:
+                    continue
+        return 0.0
+
+    def _collect_price_providers(self, data_source: str = None):
+        if self._price_data_manager is None:
+            self._price_data_manager = DataManager()
+
+        providers = list(self._price_data_manager.providers or [])
+        allowed = None
+        if data_source:
+            allowed = {s.strip().lower() for s in str(data_source).split() if s.strip()}
+
+        selected = []
+        for provider in providers:
+            if isinstance(provider, CsvDataProvider):
+                continue
+            provider_name = provider.__class__.__name__.replace('DataProvider', '').lower()
+            if allowed and provider_name not in allowed:
+                continue
+            selected.append((provider_name, provider))
+
+        if not allowed:
+            # 未指定 data_source 时，优先使用 IBKR 数据源
+            selected.sort(key=lambda item: 0 if item[0] in {'ibkr', 'ib'} else 1)
+
+        return selected
+
+    def _build_price_window(self, now_ts: pd.Timestamp, timeframe: str, compression: int):
+        if timeframe == 'Minutes':
+            start_ts = now_ts - pd.Timedelta(days=2)
+            return (
+                start_ts.strftime('%Y-%m-%d %H:%M:%S'),
+                now_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            )
+        start_ts = now_ts - pd.Timedelta(days=7)
+        return (start_ts.strftime('%Y-%m-%d'), now_ts.strftime('%Y-%m-%d'))
+
+    def _fallback_price_from_sources(self, symbol: str):
+        cfg = self._resolve_runtime_config()
+        timeframe = cfg.get('timeframe', 'Days')
+        try:
+            compression = int(cfg.get('compression', 1) or 1)
+        except Exception:
+            compression = 1
+        data_source = cfg.get('data_source')
+
+        now_ts = pd.Timestamp(getattr(self._context, 'now', None) or datetime.datetime.now())
+        start_date, end_date = self._build_price_window(now_ts, timeframe, compression)
+
+        providers = self._collect_price_providers(data_source=data_source)
+        tried = []
+
+        for provider_name, provider in providers:
+            tried.append(provider_name)
+            try:
+                df = provider.get_data(
+                    symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeframe=timeframe,
+                    compression=compression,
+                )
+                price = self._extract_last_price(df)
+                if price > 0:
+                    return price, tried
+            except Exception:
+                continue
+
+        return 0.0, tried
+
+    def _alarm_no_price(self, symbol: str, tried_sources: list):
+        now = getattr(self._context, 'now', None) or datetime.datetime.now()
+        try:
+            now = pd.Timestamp(now)
+        except Exception:
+            now = pd.Timestamp(datetime.datetime.now())
+        day_key = now.strftime('%Y-%m-%d')
+        alarm_key = f"{symbol}:{day_key}"
+        if alarm_key in self._price_alarm_keys:
+            return
+        self._price_alarm_keys.add(alarm_key)
+
+        tried_str = ",".join(tried_sources) if tried_sources else "N/A"
+        msg = (
+            f"[IBBroker] No valid price for {symbol}. "
+            f"Tried providers: {tried_str}. Orders will be blocked."
+        )
+        print(f"[IB Warning] {msg}")
+        try:
+            AlarmManager().push_text(msg, level='ERROR')
+        except Exception:
+            pass
 
     # 4. 发单
     def _submit_order(self, data, volume, side, price):
@@ -1479,6 +1606,8 @@ class IBBrokerAdapter(BaseLiveBroker):
             engine_config['timeframe'] = kwargs.get('timeframe')
         if kwargs.get('compression') is not None:
             engine_config['compression'] = kwargs.get('compression')
+        if kwargs.get('data_source'):
+            engine_config['data_source'] = kwargs.get('data_source')
         if selection_name:
             engine_config['selection_name'] = selection_name
         if risk_name:
@@ -1654,3 +1783,4 @@ class IBBrokerAdapter(BaseLiveBroker):
                 print("\n[Stop] User interrupted. Exiting.")
                 ib.disconnect()
                 break
+

@@ -256,6 +256,138 @@ def test_full_day_engine_lifecycle(monkeypatch):
     assert sell_orders[-1]["volume"] == 1000, "清仓卖单数量异常，应与当前真实持仓 1000 股对齐！"
 
 
+def test_live_data_source_override_uses_data_manager(monkeypatch):
+    """
+    实盘 data_source 覆盖回归:
+    指定 data_source 时应通过 DataManager 拉取历史数据，而非默认 Provider。"""
+    import live_trader.engine as engine_module
+
+    captured = {}
+
+    class ExplodingProvider(DummyDataProvider):
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1) -> pd.DataFrame:
+            raise AssertionError("Adapter provider should not be used when data_source override is set.")
+
+    class StubDataManager:
+        def __init__(self):
+            captured["manager"] = self
+
+        def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                     specified_sources: str = None, timeframe: str = "Days",
+                     compression: int = 1, refresh: bool = False) -> pd.DataFrame:
+            captured["specified_sources"] = specified_sources
+            end = pd.to_datetime(end_date) if end_date else pd.Timestamp.now().normalize()
+            idx = pd.date_range(end=end, periods=3, freq="D")
+            return pd.DataFrame(
+                {
+                    "open": [10.0, 10.1, 10.2],
+                    "high": [10.2, 10.3, 10.4],
+                    "low": [9.8, 9.9, 10.0],
+                    "close": [10.0, 10.1, 10.2],
+                    "volume": [10000, 10000, 10000],
+                },
+                index=idx,
+            )
+
+    monkeypatch.setattr(engine_module, "DataManager", StubDataManager)
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, ExplodingProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["AAPL"],
+        "params": {},
+        "data_source": "tiingo",
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+
+    assert captured.get("specified_sources") == "tiingo", (
+        "data_source 覆盖未传递给 DataManager，实盘数据源切换失效。"
+    )
+
+
+def test_live_data_source_override_applies_to_selector(monkeypatch):
+    """
+    选股 data_source 覆盖回归:
+    指定 data_source 时，selector 调用的 DataManager 也应强制使用该数据源。"""
+    import live_trader.engine as engine_module
+
+    captured = {"sources": []}
+
+    class StubDataManager:
+        def __init__(self):
+            captured["manager"] = self
+
+        def get_data(self, symbol: str, start_date: str = None, end_date: str = None,
+                     specified_sources: str = None, timeframe: str = "Days",
+                     compression: int = 1, refresh: bool = False) -> pd.DataFrame:
+            captured["sources"].append(specified_sources)
+            end = pd.to_datetime(end_date) if end_date else pd.Timestamp.now().normalize()
+            idx = pd.date_range(end=end, periods=3, freq="D")
+            return pd.DataFrame(
+                {
+                    "open": [10.0, 10.1, 10.2],
+                    "high": [10.2, 10.3, 10.4],
+                    "low": [9.8, 9.9, 10.0],
+                    "close": [10.0, 10.1, 10.2],
+                    "volume": [10000, 10000, 10000],
+                },
+                index=idx,
+            )
+
+    class DummySelector:
+        def __init__(self, data_manager):
+            self.data_manager = data_manager
+
+        def run_selection(self):
+            self.data_manager.get_data("AAPL", start_date="2026-01-01", end_date="2026-02-01")
+            return ["AAPL"]
+
+    monkeypatch.setattr(engine_module, "DataManager", StubDataManager)
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+
+    def _fake_get_class(class_name, paths):
+        if class_name == "DummySelector":
+            return DummySelector
+        return CounterStrategy
+
+    monkeypatch.setattr(engine_module, "get_class_from_name", _fake_get_class)
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "selection_name": "DummySelector",
+        "params": {},
+        "data_source": "tiingo",
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+
+    assert captured["sources"], "selector 未调用 DataManager.get_data。"
+    assert all(src == "tiingo" for src in captured["sources"]), (
+        "selector 调用未强制 data_source，仅使用默认链路。"
+    )
+
+
 def test_backtest_mode_auto_warmup_start_date(monkeypatch):
     """
     回测模式默认预热:
@@ -1904,3 +2036,4 @@ def test_live_engine_supports_multi_risk_chain_without_fail_open(monkeypatch):
     assert controls[1].check_calls >= 1, "链式风控第2个模块未被执行。"
     sell_orders = [o for o in engine.broker.submitted_orders if o["side"] == "SELL"]
     assert sell_orders, "风控触发后应实际发出 SELL 平仓单。"
+
