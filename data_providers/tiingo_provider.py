@@ -18,23 +18,77 @@ class TiingoDataProvider(BaseDataProvider):
             self.client = None
         else:
             self.client = TiingoClient({'api_key': token, 'session': True})
-        self.post_adjust_enabled = True
+        # 对齐 IBKR 日线：使用 Tiingo 的 adjOHLCV 口径，不做额外“后复权缩放”
+        self.post_adjust_enabled = False
+        # US 交易所常见标识，用于解析 NASDAQ.AAPL / AAPL.SMART
+        self._us_exchange_tokens = {
+            'SMART', 'NASDAQ', 'NYSE', 'AMEX', 'ARCA', 'IEX', 'BATS',
+            'CBOE', 'MEMX', 'ISLAND', 'EDGX', 'EDGEA', 'BYX', 'BEX', 'NYSENAT'
+        }
 
     def _map_symbol(self, symbol):
         sym = symbol.upper()
         if 'SHSE.' in sym or 'SZSE.' in sym:
             return sym.split('.')[-1]
         if 'STK.' in sym and 'USD' in sym:
-            return sym.split('.')[1]
+            parts = sym.split('.')
+            if len(parts) == 3:
+                return parts[1]
         if sym.isdigit():
             return sym
         if '.' not in sym:
             return sym
-        return sym.split(".")[0]
+        parts = sym.split(".")
+        if len(parts) == 2:
+            p1, p2 = parts
+            if p1 in self._us_exchange_tokens:
+                return p2
+            if p2 in self._us_exchange_tokens:
+                return p1
+        return parts[0]
 
     @staticmethod
     def _as_naive_datetime(series: pd.Series) -> pd.Series:
         return pd.to_datetime(series, utc=True).dt.tz_convert(None)
+
+    def _as_exchange_datetime(self, series: pd.Series) -> pd.Series:
+        tz_name = getattr(config, 'TIINGO_TIMEZONE', None) or 'America/New_York'
+        try:
+            return pd.to_datetime(series, utc=True).dt.tz_convert(tz_name)
+        except Exception:
+            try:
+                return pd.to_datetime(series, utc=True).dt.tz_convert('America/New_York')
+            except Exception:
+                return pd.to_datetime(series, utc=True)
+
+    def _now_exchange_normalized(self) -> pd.Timestamp:
+        tz_name = getattr(config, 'TIINGO_TIMEZONE', None) or 'America/New_York'
+        try:
+            return pd.Timestamp.now(tz=tz_name).normalize()
+        except Exception:
+            return pd.Timestamp.now(tz='America/New_York').normalize()
+
+    def _normalize_exchange_date(self, dt_input) -> pd.Timestamp:
+        try:
+            ts = pd.to_datetime(dt_input)
+        except Exception:
+            return None
+        if ts.tzinfo is not None:
+            tz_name = getattr(config, 'TIINGO_TIMEZONE', None) or 'America/New_York'
+            try:
+                ts = ts.tz_convert(tz_name)
+            except Exception:
+                ts = ts.tz_convert('America/New_York')
+        return ts.normalize().tz_localize(None)
+
+    @staticmethod
+    def _normalize_daily_date(dt_input: str):
+        if not dt_input:
+            return None
+        try:
+            return pd.to_datetime(dt_input).strftime('%Y-%m-%d')
+        except Exception:
+            return dt_input
 
     @staticmethod
     def _safe_first_non_nan(series: pd.Series):
@@ -63,20 +117,19 @@ class TiingoDataProvider(BaseDataProvider):
         """
         仅在请求区间覆盖“今天”时才尝试拼接盘中数据。
         """
-        today = pd.Timestamp.now().normalize()
+        today = self._now_exchange_normalized().tz_localize(None)
         if not end_date:
             return True
-        try:
-            req_end = pd.to_datetime(end_date).normalize()
-            return req_end >= today
-        except Exception:
+        req_end = self._normalize_exchange_date(end_date)
+        if req_end is None:
             return True
+        return req_end >= today
 
     def _normalize_daily_dataframe(self, raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
         规范化 Tiingo 日线数据：
         1) 优先使用 adjOHLCV
-        2) 转为后复权口径 (价格乘固定缩放因子)
+        2) 使用 adjOHLCV 口径（不做后复权缩放）
         """
         if raw_df is None or raw_df.empty:
             return None, None
@@ -118,7 +171,7 @@ class TiingoDataProvider(BaseDataProvider):
         """
         将 IEX 1min 数据聚合为“今日临时日线”并转换到与历史相同复权口径后返回。
         """
-        today = pd.Timestamp.now().normalize()
+        today = self._now_exchange_normalized()
         day_str = today.strftime('%Y-%m-%d')
 
         intraday = self.client.get_ticker_price(
@@ -135,7 +188,7 @@ class TiingoDataProvider(BaseDataProvider):
         if intraday_df.empty or 'date' not in intraday_df.columns:
             return None
 
-        intraday_df['date'] = self._as_naive_datetime(intraday_df['date'])
+        intraday_df['date'] = self._as_exchange_datetime(intraday_df['date'])
         intraday_df.sort_values('date', inplace=True)
         intraday_df = intraday_df[intraday_df['date'].dt.normalize() == today]
         if intraday_df.empty:
@@ -192,7 +245,7 @@ class TiingoDataProvider(BaseDataProvider):
                 'close': [float(close_px) * raw_to_post_price_factor],
                 'volume': [float(volume) * raw_to_adj_volume_factor],
             },
-            index=[today]
+            index=[today.tz_localize(None)]
         )
         return row
 
@@ -203,7 +256,7 @@ class TiingoDataProvider(BaseDataProvider):
         if not self._should_stitch_intraday(end_date):
             return daily_df
 
-        today = pd.Timestamp.now().normalize()
+        today = self._now_exchange_normalized().tz_localize(None)
         if (daily_df.index.normalize() == today).any():
             return daily_df
 
@@ -231,18 +284,24 @@ class TiingoDataProvider(BaseDataProvider):
         tiingo_symbol = self._map_symbol(symbol)
         print(f"[Tiingo] Fetching {tiingo_symbol}...")
 
+        req_start_date = start_date
+        req_end_date = end_date
+        if timeframe == 'Days':
+            req_start_date = self._normalize_daily_date(start_date)
+            req_end_date = self._normalize_daily_date(end_date)
+
         try:
             data = self.client.get_ticker_price(
                 tiingo_symbol,
                 fmt='json',
-                startDate=start_date,
-                endDate=end_date,
+                startDate=req_start_date,
+                endDate=req_end_date,
                 frequency='daily'
             )
 
             if not data:
                 print(f"[Tiingo] No daily data returned for {tiingo_symbol}")
-                if timeframe == 'Days' and self._should_stitch_intraday(end_date):
+                if timeframe == 'Days' and self._should_stitch_intraday(req_end_date):
                     fallback_today = self._build_today_intraday_daily_bar(tiingo_symbol, daily_factor_df=None)
                     if fallback_today is not None and not fallback_today.empty:
                         print(f"[Tiingo] Fallback to intraday-only synthetic daily bar for {tiingo_symbol}.")
@@ -260,7 +319,7 @@ class TiingoDataProvider(BaseDataProvider):
                     tiingo_symbol=tiingo_symbol,
                     daily_df=clean_df,
                     daily_factor_df=daily_factor_df,
-                    end_date=end_date
+                    end_date=req_end_date
                 )
 
             return clean_df[['open', 'high', 'low', 'close', 'volume']]
@@ -268,3 +327,16 @@ class TiingoDataProvider(BaseDataProvider):
         except Exception as e:
             print(f"[Tiingo] Error fetching {symbol}: {e}")
             return None
+
+
+def _self_test():
+    p = TiingoDataProvider(token="DUMMY_TOKEN")
+    assert p._map_symbol("STK.AAPL.USD") == "AAPL"
+    assert p._map_symbol("AAPL.SMART") == "AAPL"
+    assert p._map_symbol("NASDAQ.AAPL") == "AAPL"
+    assert p._normalize_daily_date("20240101") == "2024-01-01"
+    assert p._normalize_daily_date("2024-01-02") == "2024-01-02"
+
+
+if __name__ == '__main__':
+    _self_test()

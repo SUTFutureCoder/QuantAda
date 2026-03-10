@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "quantada-backtest": {
+      "command": "python",
+      "args": ["-m", "mcp_backtest_server"],
+      "env": {
+        "MCP_BACKTEST_CMD_JSON": "[\"python\",\"E:\\\\Lin\\\\Github\\\\QuantAda\\\\run.py\"]",
+        "MCP_BACKTEST_WORKDIR": "E:\\\\Lin\\\\Github\\\\QuantAda",
+        "MCP_BACKTEST_MAX_CONCURRENT": "1"
+      }
+    }
+  }
+}
