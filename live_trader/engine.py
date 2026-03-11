@@ -304,6 +304,11 @@ class LiveTrader:
         # 兼容实盘 data_source 覆盖：允许使用指定数据源替换默认 Provider
         self._maybe_override_live_data_provider()
 
+        data_source_cfg = self.config.get('data_source')
+        data_source_label = data_source_cfg if data_source_cfg else 'default'
+        provider_name = self.data_provider.__class__.__name__ if self.data_provider else 'N/A'
+        print(f"[Engine] Data source setting: {data_source_label}; provider={provider_name}")
+
         # 3. 使用最终配置实例化所有组件
         self.strategy_class = get_class_from_name(self.config['strategy_name'], ['strategies'])
         if self.config.get('selection_name'):

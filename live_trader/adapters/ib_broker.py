@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import math
+import re
 import time
 
 import pandas as pd
@@ -1327,7 +1328,8 @@ class IBBrokerAdapter(BaseLiveBroker):
         providers = list(self._price_data_manager.providers or [])
         allowed = None
         if data_source:
-            allowed = {s.strip().lower() for s in str(data_source).split() if s.strip()}
+            raw_sources = str(data_source).strip().lower()
+            allowed = {s for s in re.split(r"[,\s]+", raw_sources) if s}
 
         selected = []
         for provider in providers:
@@ -1581,7 +1583,6 @@ class IBBrokerAdapter(BaseLiveBroker):
             except Exception as e:
                 print(f">>> ⚠️ Invalid schedule config: {schedule_rule}. Error: {e}")
                 parsed_daily_schedule = None
-
         # 1. 创建全局唯一的 IB 实例
         ib = IB()
 
@@ -1594,6 +1595,17 @@ class IBBrokerAdapter(BaseLiveBroker):
         ctx = Context()
         init_now = datetime.datetime.now(target_tz) if target_tz else datetime.datetime.now()
         ctx.now = pd.Timestamp(init_now)
+
+        if parsed_daily_schedule:
+            try:
+                target_h, target_m, target_s, _ = parsed_daily_schedule
+                next_run = init_now.replace(hour=target_h, minute=target_m, second=target_s, microsecond=0)
+                if next_run <= init_now:
+                    next_run = next_run + datetime.timedelta(days=1)
+                tz_info = timezone_str if timezone_str else "Server Local Time"
+                print(f">>> Next schedule: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (Zone: {tz_info})")
+            except Exception as e:
+                print(f">>> ⚠️ Failed to compute next schedule time: {e}")
 
         # 初始化 Engine (只做一次)
         from live_trader.engine import LiveTrader, on_order_status_callback

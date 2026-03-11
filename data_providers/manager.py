@@ -1,6 +1,7 @@
 import importlib
 import inspect
 import os
+import re
 from collections import OrderedDict
 
 import pandas as pd
@@ -19,6 +20,19 @@ class DataManager:
             (p.__class__.__name__.replace('DataProvider', '').lower(), p)
             for p in self.providers
         )
+
+    @staticmethod
+    def _split_source_names(specified_sources: str) -> list:
+        """
+        将 data_source 字符串拆分为 provider 名称列表。
+        支持空格/逗号分隔（如: "tiingo, akshare" 或 "tiingo akshare"）。
+        """
+        if not specified_sources:
+            return []
+        raw = str(specified_sources).strip().lower()
+        if not raw:
+            return []
+        return [s for s in re.split(r"[,\s]+", raw) if s]
 
     def auto_discover_and_sort_providers(self, provider_dir=None):
         """
@@ -75,8 +89,11 @@ class DataManager:
 
         # 路径一: 用户指定了数据源
         if specified_sources:
-            print(f"--- Using specified data sources: {specified_sources} ---")
-            source_names = specified_sources.lower().split()
+            source_names = self._split_source_names(specified_sources)
+            if source_names:
+                print(f"--- Using specified data sources: {', '.join(source_names)} ---")
+            else:
+                print(f"--- Using specified data sources: {specified_sources} ---")
             providers_to_use = [self.provider_map[name] for name in source_names if name in self.provider_map]
             if not providers_to_use:
                 print(f"Error: None of the specified sources '{specified_sources}' are valid.")
