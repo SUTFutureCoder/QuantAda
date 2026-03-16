@@ -27,10 +27,10 @@ Environment="AUTOSSH_GATETIME=0"
 
 # 启动命令，请删除不需要的端口映射并填写IP地址：
 # 注意：在 systemd 中不需要使用 -f (后台运行)，systemd 本身就会管理进程
-# -M 20001: 监控端口
+# -M 0: 不指定监控端口，依靠原始ssh心跳，避免多开冲突
 # -N: 不执行远程命令
 # -L: 端口映射
-ExecStart=/usr/bin/autossh -M 20001 -N \
+ExecStart=/usr/bin/autossh -M 0 -N \
     -o "StrictHostKeyChecking=no" \
     -o "UserKnownHostsFile=/dev/null" \
     -o "BatchMode=yes" \

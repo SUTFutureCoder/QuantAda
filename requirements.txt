@@ -17,7 +17,8 @@ optuna-dashboard
 scikit-learn
 plotly
 kaleido
+pytz
 
 # --- 实盘平台 ---
-# gm.api  # 掘金量化
+# gm  # 掘金量化
 # ib_insync
