@@ -999,6 +999,47 @@ def test_ib_submit_order_uses_default_account_when_config_empty(monkeypatch):
     )
 
 
+def test_ib_submit_order_blocks_when_multiple_accounts_without_config(monkeypatch):
+    """
+    多账户防误路由回归:
+    未配置 IBKR_ORDER_ACCOUNT 且存在多个账户时，应阻止下单并提示配置。"""
+    context = types.SimpleNamespace(
+        ib_instance=DummyIBForSubmit(managed_accounts=["U1111111", "U2222222"])
+    )
+    broker = IBBrokerAdapter(context=context)
+
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.adapters.ib_broker as ib_module
+    monkeypatch.setattr(
+        ib_module,
+        "MarketOrder",
+        lambda action, qty: SimpleNamespace(action=action, totalQuantity=qty, account=""),
+    )
+    monkeypatch.setattr(
+        ib_module.config,
+        "IBKR_ORDER_ACCOUNT",
+        "   ",
+        raising=False,
+    )
+    monkeypatch.setattr(ib_module, "AlarmManager", lambda: DummyAlarm())
+
+    data = SimpleNamespace(_name="AAPL.SMART")
+    proxy = broker._submit_order(data=data, volume=10, side="BUY", price=100.0)
+
+    assert proxy is None, "多账户且未配置下单账户时应阻止发单。"
+    assert context.ib_instance.last_order is None, "阻止发单时不应调用 placeOrder。"
+    assert len(pushed) == 1, "应推送一次配置提示告警。"
+    assert pushed[0]["level"] == "ERROR"
+    assert "IBKR_ORDER_ACCOUNT" in pushed[0]["content"]
+    assert "U1111111" in pushed[0]["content"]
+    assert "U2222222" in pushed[0]["content"]
+
+
 def test_ib_submit_order_rejects_unknown_configured_order_account(monkeypatch):
     """
     子账户校验回归:

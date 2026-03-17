@@ -131,6 +131,8 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 账户探测诊断日志去重，避免重复刷屏。
         self._account_probe_debug_logged_accounts = set()
         self._last_account_snapshot_debug = {}
+        # 多账户但未指定下单账户的告警去重
+        self._missing_order_account_warned = False
         # 无实时价兜底与告警去重
         self._price_data_manager = None
         self._price_alarm_keys = set()
@@ -258,6 +260,22 @@ class IBBrokerAdapter(BaseLiveBroker):
                     break
 
         return (accounts, debug) if with_debug else accounts
+
+    def _warn_missing_order_account_once(self, known_accounts):
+        if self._missing_order_account_warned:
+            return
+        self._missing_order_account_warned = True
+        accounts = sorted([a for a in (known_accounts or []) if a])
+        msg = (
+            "[IBBroker] Multiple accounts detected but IBKR_ORDER_ACCOUNT not set. "
+            f"managedAccounts={accounts}. Orders are blocked to avoid wrong routing. "
+            "Please set IBKR_ORDER_ACCOUNT to the intended account."
+        )
+        print(msg)
+        try:
+            AlarmManager().push_text(msg, level='ERROR')
+        except Exception as e:
+            print(f"[IBBroker Warning] failed to push missing account alarm: {e}")
 
     def _query_account_rows(self, method_name: str, configured_account: str, attempts_log: list, note: str = ''):
         method = getattr(self.ib, method_name, None)
@@ -1444,13 +1462,23 @@ class IBBrokerAdapter(BaseLiveBroker):
             print(f"[IB Warning] Order size < 1 (raw: {volume}), skipped.")
             return None
 
-        # 使用市价单 (MarketOrder) 或 限价单 (LimitOrder)
-        # 此处简单起见使用市价单
-        order = MarketOrder(action, volume_final)
         configured_account = self._configured_order_account()
+        known_accounts = None
         if configured_account:
             if not self._is_configured_order_account_valid(configured_account):
                 return None
+        else:
+            known_accounts = self._collect_known_accounts()
+            if known_accounts and all(self._is_aggregate_account_marker(a) for a in known_accounts):
+                known_accounts = set()
+            if len(known_accounts) > 1:
+                self._warn_missing_order_account_once(known_accounts)
+                return None
+
+        # 使用市价单 (MarketOrder) 或 限价单 (LimitOrder)
+        # 此处简单起见使用市价单
+        order = MarketOrder(action, volume_final)
+        if configured_account:
             # 透传 IB 订单 account 字段；留空时由 IB 默认使用主账户路由。
             order.account = configured_account
 
