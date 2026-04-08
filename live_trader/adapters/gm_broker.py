@@ -4,6 +4,7 @@ import pandas as pd
 
 import config
 from alarms.manager import AlarmManager
+from common.log import coerce_dt
 from data_providers.gm_provider import GmDataProvider as UnifiedGmDataProvider
 from live_trader.engine import LiveTrader, on_order_status_callback
 from .base_broker import BaseLiveBroker, BaseOrderProxy
@@ -68,8 +69,25 @@ class GmOrderProxy(BaseOrderProxy):
 
                 # 4. 手续费
                 self.comm = getattr(gm_order, 'commission', 0.0)
+                self.dt = GmOrderProxy._extract_execution_dt(gm_order)
 
         return ExecutedStats(self.platform_order)
+
+    @staticmethod
+    def _extract_execution_dt(order):
+        candidate_fields = (
+            'filled_at',
+            'filled_time',
+            'updated_at',
+            'updated_time',
+            'transact_time',
+            'transaction_time',
+        )
+        for field in candidate_fields:
+            dt = coerce_dt(getattr(order, field, None))
+            if dt is not None:
+                return dt
+        return None
 
     # 根据模式动态判断
     def is_completed(self) -> bool:
@@ -117,8 +135,11 @@ class GmDataProvider(UnifiedGmDataProvider):
 
 class GmBrokerAdapter(BaseLiveBroker):
     """掘金平台的交易执行器实现"""
+    _DEFAULT_LIVE_SLIPPAGE = 0.0001
 
     def __init__(self, context, cash_override=None, commission_override=None, slippage_override=None):
+        if slippage_override is None:
+            slippage_override = self._DEFAULT_LIVE_SLIPPAGE
         super().__init__(context, cash_override, commission_override, slippage_override)
         self.is_live = self.is_live_mode(context)  # 保存当前是否为实盘
 
@@ -163,6 +184,15 @@ class GmBrokerAdapter(BaseLiveBroker):
             return max(0, min(total_size, total_size - volume_today))
 
         return total_size
+
+    def _live_buy_cash_buffer_rate(self):
+        """
+        GM 实盘买单二次资金校验:
+        - freeze_price 已经包含委托滑点
+        - 此处仅追加手续费与绝对防线，避免重复计入滑点导致小资金过度降仓
+        """
+        comm = self._commission_override if self._commission_override is not None else 0.0003
+        return 1.0 + comm + 0.002
 
     def getcash(self):
         """ 获取可用资金 (Backtrader 命名风格)"""
@@ -315,7 +345,7 @@ class GmBrokerAdapter(BaseLiveBroker):
 
         if self.is_live:
             # --- 实盘逻辑 (Limit) ---
-            slippage = self._slippage_override if self._slippage_override is not None else 0.01
+            slippage = self._slippage_override if self._slippage_override is not None else self._DEFAULT_LIVE_SLIPPAGE
             if side == 'BUY':
                 actual_price = price * (1 + slippage)
                 actual_price = float(round(actual_price, 4))  # 保留精度
@@ -346,8 +376,8 @@ class GmBrokerAdapter(BaseLiveBroker):
             if available_cash < 0:
                 available_cash = 0.0
 
-            # 使用基类的动态安全垫计算
-            buffer_rate = self.safety_multiplier
+            # 实盘下 freeze_price 已含滑点，此处仅补手续费与绝对防线，避免重复计入滑点。
+            buffer_rate = self._live_buy_cash_buffer_rate() if self.is_live else self.safety_multiplier
             estimated_cost = volume * freeze_price * buffer_rate
 
             if freeze_price <= 0:
@@ -365,8 +395,11 @@ class GmBrokerAdapter(BaseLiveBroker):
 
                 min_volume = lot_size if lot_size > 1 else 1
                 if volume < min_volume:
-                    # 只有真的买不起了才打印 (避免刷屏)
-                    # print(f"[GmBroker] Skip Buy ...")
+                    print(
+                        f"[GmBroker Warning] Buy {data._name} skipped. "
+                        f"Cash ({available_cash:.2f}) insufficient for minimum lot {min_volume} "
+                        f"after cash-fit downsize."
+                    )
                     return None
 
                 # 仅在发生实质性降仓时打印

@@ -122,7 +122,7 @@ class OrderExecutor:
     """
     专门的执行器，负责把计划变成订单。
     """
-    _SELL_SETTLE_WAIT_SECONDS = 60.0
+    _SELL_SETTLE_WARN_SECONDS = 300.0
     _SELL_SETTLE_POLL_SECONDS = 1.0
 
     def __init__(self, broker, debug=False):
@@ -160,21 +160,11 @@ class OrderExecutor:
                 else:
                     has_untracked_sell = True
 
-        # 第二步：若本轮有卖单，最多等待 60 秒卖单终态。
-        # 超时则本轮跳过买入，等待下一次策略信号重新决策（无状态优先）。
+        # 第二步：若本轮有卖单，则持续等待直到卖单进入终态。
+        # 等待过久只告警，不据此改变交易决策。
         if sell_submitted:
-            self._log(f"等待卖单终态，最长 {int(self._SELL_SETTLE_WAIT_SECONDS)} 秒...")
-            if not self._wait_sells_settled(submitted_sell_ids, has_untracked_sell):
-                warn_msg = (
-                    f"[Executor] 卖单在 {int(self._SELL_SETTLE_WAIT_SECONDS)} 秒内未全部终态，"
-                    f"本轮跳过买入，等待下次调仓信号。"
-                )
-                print(warn_msg)
-                try:
-                    AlarmManager().push_text(warn_msg, level='WARNING')
-                except Exception:
-                    pass
-                return
+            self._log("等待卖单终态...")
+            self._wait_sells_settled(submitted_sell_ids, has_untracked_sell)
 
         # 第三步：处理所有买入动作 (补仓/开仓)
         for data, target in plan['increase']:
@@ -188,8 +178,10 @@ class OrderExecutor:
     def _wait_sells_settled(self, submitted_sell_ids=None, has_untracked_sell=False):
         tracked_ids = {str(x).strip() for x in (submitted_sell_ids or set()) if str(x).strip()}
 
-        deadline = time.time() + float(self._SELL_SETTLE_WAIT_SECONDS)
+        warn_after = max(0.0, float(self._SELL_SETTLE_WARN_SECONDS))
         poll = max(0.1, float(self._SELL_SETTLE_POLL_SECONDS))
+        start_ts = time.time()
+        warn_sent = False
 
         while True:
             local_pending_ids = set()
@@ -244,8 +236,17 @@ class OrderExecutor:
                         print(f"[Executor] 卖单终态后资金同步失败(继续执行): {e}")
                 return True
 
-            if time.time() >= deadline:
-                return False
+            if not warn_sent and warn_after > 0 and (time.time() - start_ts) >= warn_after:
+                warn_msg = (
+                    f"[Executor] 卖单在 {int(warn_after)} 秒内未全部终态，"
+                    f"继续等待，不据此跳过买入。"
+                )
+                print(warn_msg)
+                try:
+                    AlarmManager().push_text(warn_msg, level='WARNING')
+                except Exception:
+                    pass
+                warn_sent = True
 
             time.sleep(poll)
 

@@ -12,6 +12,7 @@ except ImportError:
     Crypto = None
 
 from alarms.manager import AlarmManager
+from common.log import coerce_dt
 from common.ib_symbol_parser import resolve_ib_contract_spec
 import config
 from data_providers.csv_provider import CsvDataProvider
@@ -55,8 +56,23 @@ class IBOrderProxy(BaseOrderProxy):
                     except AttributeError:
                         # 防御性编程：万一结构有变，默认为0不崩亏
                         self.comm = 0.0
+                self.dt = IBOrderProxy._extract_execution_dt(trade)
 
         return ExecutedStats(self.trade)
+
+    @staticmethod
+    def _extract_execution_dt(trade):
+        for fill in reversed(list(getattr(trade, 'fills', []) or [])):
+            dt = coerce_dt(getattr(fill, 'time', None))
+            if dt is not None:
+                return dt
+
+            execution = getattr(fill, 'execution', None)
+            dt = coerce_dt(getattr(execution, 'time', None))
+            if dt is not None:
+                return dt
+
+        return None
 
     def is_completed(self) -> bool:
         return self.trade.orderStatus.status == 'Filled'

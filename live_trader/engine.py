@@ -9,6 +9,7 @@ import pandas as pd
 
 import config
 from alarms.manager import AlarmManager
+from common.log import extract_order_execution_dt, format_dt
 from data_providers.base_provider import BaseDataProvider
 from data_providers.manager import DataManager
 from live_trader.adapters.base_broker import BaseLiveBroker
@@ -1187,6 +1188,7 @@ def on_order_status_callback(context, raw_order):
                 exec_price = float(getattr(order_proxy.executed, 'price', 0) or 0.0)
             except Exception:
                 exec_price = 0.0
+            exec_dt = extract_order_execution_dt(order_proxy, fallback=getattr(context, 'now', None))
 
             # 同一订单同一状态（含成交快照）重复回调去重，防止告警/日志刷屏。
             dedupe_key = order_id if order_id else f"raw:{id(raw_order)}"
@@ -1252,7 +1254,7 @@ def on_order_status_callback(context, raw_order):
                         'price': order_proxy.executed.price,
                         'size': _extract_target_qty(order_proxy, fallback=order_proxy.executed.size),
                         'value': order_proxy.executed.value,
-                        'dt': context.now.strftime('%Y-%m-%d %H:%M:%S')
+                        'dt': format_dt(exec_dt),
                     }
                     alarm_manager.push_trade(trade_info)
                     terminal_trade_push_dedupe.add(trade_push_key)

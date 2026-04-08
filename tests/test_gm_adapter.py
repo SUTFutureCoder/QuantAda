@@ -86,6 +86,24 @@ def test_gm_executed_stats_fallback():
     assert executed.comm == pytest.approx(12.3), "成交统计错误：executed.comm 应等于 commission 字段！"
 
 
+def test_gm_executed_stats_exposes_execution_dt():
+    """
+    成交时间回归:
+    GmOrderProxy.executed.dt 应优先暴露柜台回报中的实际更新时间。
+    """
+    filled_order = DummyGMOrder(
+        status=mock_gm_api.OrderStatus_Filled,
+        side=mock_gm_api.OrderSide_Buy,
+        filled_volume=1000,
+        filled_vwap=10.5,
+        commission=12.3,
+    )
+    filled_order.updated_at = "2026-04-08 14:45:33.123456"
+
+    proxy = GmOrderProxy(filled_order, is_live=True)
+    assert proxy.executed.dt.isoformat() == "2026-04-08T14:45:33.123456"
+
+
 def test_gm_live_vs_backtest_completion_logic():
     """
     Red Team Test:
@@ -147,7 +165,7 @@ def test_gm_submit_order_live_limit_with_auto_downsize(monkeypatch):
     broker = GmBrokerAdapter(context=MagicMock(), slippage_override=0.01, commission_override=0.0003)
     broker.is_live = True
     # 测试阶段固定可用资金，强制触发降仓
-    monkeypatch.setattr(broker, "_fetch_real_cash", lambda: 20000.0)
+    monkeypatch.setattr(broker, "_fetch_real_cash", lambda: 20300.0)
 
     data = SimpleNamespace(_name="SHSE.600000")
     proxy = broker._submit_order(data=data, volume=3000, side="BUY", price=10.0)
@@ -157,12 +175,75 @@ def test_gm_submit_order_live_limit_with_auto_downsize(monkeypatch):
     call = order_calls[0]
 
     expected_freeze_price = round(10.0 * (1 + 0.01), 4)  # 实盘 BUY 限价
-    expected_volume = int(20000.0 / (expected_freeze_price * broker.safety_multiplier) // 100) * 100
+    expected_buffer_rate = 1.0 + 0.0003 + 0.002
+    expected_volume = int(20300.0 / (expected_freeze_price * expected_buffer_rate) // 100) * 100
 
     assert call["order_type"] == mock_gm_api.OrderType_Limit, "实盘应使用限价单。"
     assert call["price"] == pytest.approx(expected_freeze_price), "实盘 BUY 限价计算不正确。"
-    assert call["volume"] == expected_volume, "资金不足时应按可用资金自动降仓并整手取整。"
+    assert call["volume"] == expected_volume, "GM 实盘二次降仓不应重复计入滑点。"
     assert 0 < call["volume"] < 3000, "该场景应发生实质降仓。"
+
+
+def test_gm_submit_order_live_default_slippage_matches_launch_default(monkeypatch):
+    """
+    默认值一致性:
+    未显式传 slippage 时，GM 实盘默认委托滑点应与 launch 默认值保持一致(0.0001)。
+    """
+    import live_trader.adapters.gm_broker as gm_module
+
+    order_calls = []
+
+    monkeypatch.setattr(gm_module, "OrderType_Limit", mock_gm_api.OrderType_Limit, raising=False)
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    def _fake_order_volume(**kwargs):
+        order_calls.append(kwargs)
+        return [DummyGMOrder(status=mock_gm_api.OrderStatus_New, side=kwargs["side"])]
+
+    monkeypatch.setattr(gm_module, "order_volume", _fake_order_volume)
+
+    broker = GmBrokerAdapter(context=MagicMock(), commission_override=0.0003)
+    broker.is_live = True
+    monkeypatch.setattr(broker, "_fetch_real_cash", lambda: 1_000_000.0)
+
+    data = SimpleNamespace(_name="SHSE.600000")
+    proxy = broker._submit_order(data=data, volume=1000, side="BUY", price=10.0)
+
+    assert proxy is not None, "默认滑点场景下应成功下单。"
+    assert len(order_calls) == 1, "应实际调用一次 order_volume。"
+    assert order_calls[0]["price"] == pytest.approx(10.001), "GM 实盘默认滑点应为 0.0001，而不是 0.01。"
+
+
+def test_gm_submit_order_logs_when_cash_fit_falls_below_min_lot(monkeypatch, capsys):
+    """
+    小资金可观测性:
+    二次降仓后若仍不足一手，不应静默返回 None，必须打印明确日志。
+    """
+    import live_trader.adapters.gm_broker as gm_module
+
+    order_calls = []
+
+    monkeypatch.setattr(gm_module, "OrderType_Limit", mock_gm_api.OrderType_Limit, raising=False)
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    def _fake_order_volume(**kwargs):
+        order_calls.append(kwargs)
+        return [DummyGMOrder(status=mock_gm_api.OrderStatus_New, side=kwargs["side"])]
+
+    monkeypatch.setattr(gm_module, "order_volume", _fake_order_volume)
+
+    broker = GmBrokerAdapter(context=MagicMock(), slippage_override=0.0001, commission_override=0.0003)
+    broker.is_live = True
+    monkeypatch.setattr(broker, "_fetch_real_cash", lambda: 500.0)
+
+    data = SimpleNamespace(_name="SHSE.600000")
+    proxy = broker._submit_order(data=data, volume=1000, side="BUY", price=10.0)
+
+    captured = capsys.readouterr()
+
+    assert proxy is None, "不足一手时应直接放弃下单。"
+    assert order_calls == [], "不足一手时不应真正调用 order_volume。"
+    assert "insufficient for minimum lot" in captured.out, "不足一手时必须输出明确日志。"
 
 
 def test_gm_submit_order_backtest_market_mode(monkeypatch):
@@ -232,9 +313,9 @@ def test_gm_secondary_downsize_updates_active_buy_and_virtual_ledger(monkeypatch
     broker = GmBrokerAdapter(context=MagicMock(), slippage_override=0.01, commission_override=0.0003)
     broker.is_live = True
     # 关键构造:
-    # - 基类 _smart_buy_value 看到 cash=10200 时不会先降仓 (1000*10*safety_multiplier < 10200)
-    # - GM _submit_order 会按 freeze_price=10.1 做二次降仓到 900
-    monkeypatch.setattr(broker, "_fetch_real_cash", lambda: 10200.0)
+    # - 基类 _smart_buy_value 看到 cash=10123.10 时不会先降仓
+    # - GM _submit_order 用更贴近实盘的 freeze_price 二次校验后，会把 1000 股降到 900
+    monkeypatch.setattr(broker, "_fetch_real_cash", lambda: 10123.10)
     monkeypatch.setattr(broker, "get_current_price", lambda data: 10.0)
     monkeypatch.setattr(broker, "get_pending_orders", lambda: [])
 

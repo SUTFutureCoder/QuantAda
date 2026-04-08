@@ -47,7 +47,7 @@ def test_order_executor_waits_for_sell_settlement_then_buys(monkeypatch):
     assert broker.sync_calls == 1, "卖单终态后应同步资金。"
 
 
-def test_order_executor_skips_buy_when_sell_not_settled_in_60s(monkeypatch):
+def test_order_executor_waits_beyond_60s_until_sell_settles_then_buys(monkeypatch):
     import common.rebalancer as rebalancer_module
 
     clock = {"t": 0.0}
@@ -72,13 +72,19 @@ def test_order_executor_skips_buy_when_sell_not_settled_in_60s(monkeypatch):
     class DummyBroker:
         def __init__(self):
             self.calls = []
+            self.sync_calls = 0
 
         def order_target_value(self, data, target):
             self.calls.append((data._name, float(target)))
             return object()
 
         def get_pending_orders(self):
-            return [{"id": "S1", "symbol": "SPY.ARCA", "direction": "SELL", "size": 100}]
+            if clock["t"] < 106.0:
+                return [{"id": "S1", "symbol": "SPY.ARCA", "direction": "SELL", "size": 100}]
+            return []
+
+        def sync_balance(self):
+            self.sync_calls += 1
 
     broker = DummyBroker()
     executor = rebalancer_module.OrderExecutor(broker)
@@ -90,11 +96,68 @@ def test_order_executor_skips_buy_when_sell_not_settled_in_60s(monkeypatch):
 
     executor.execute_plan(plan)
 
-    assert broker.calls == [("SPY.ARCA", 0.0)], "卖单超时未终态时，本轮应跳过买入。"
-    assert clock["t"] >= 60.0, "卖单等待应持续到 60 秒超时。"
-    assert len(pushed) == 1, "超时应推送一次告警。"
+    assert broker.calls == [("SPY.ARCA", 0.0), ("EWJ.ARCA", 100000.0)], "卖单未终态时应持续等待，终态后再买入。"
+    assert clock["t"] >= 106.0, "卖单等待不应受 60 秒上限限制。"
+    assert broker.sync_calls == 1, "卖单终态后应同步资金。"
+    assert len(pushed) == 0, "未达到 5 分钟告警阈值时不应推送消息。"
+
+
+def test_order_executor_warns_after_5m_but_keeps_waiting_until_sell_settles(monkeypatch):
+    import common.rebalancer as rebalancer_module
+
+    clock = {"t": 0.0}
+
+    def _fake_time():
+        return clock["t"]
+
+    def _fake_sleep(seconds):
+        clock["t"] += float(seconds)
+
+    monkeypatch.setattr(rebalancer_module.time, "time", _fake_time)
+    monkeypatch.setattr(rebalancer_module.time, "sleep", _fake_sleep)
+
+    pushed = []
+
+    class DummyAlarmManager:
+        def push_text(self, content, level="INFO"):
+            pushed.append({"content": content, "level": level})
+
+    monkeypatch.setattr(rebalancer_module, "AlarmManager", lambda: DummyAlarmManager())
+
+    class DummyBroker:
+        def __init__(self):
+            self.calls = []
+            self.sync_calls = 0
+
+        def order_target_value(self, data, target):
+            self.calls.append((data._name, float(target)))
+            return object()
+
+        def get_pending_orders(self):
+            if clock["t"] < 306.0:
+                return [{"id": "S1", "symbol": "SPY.ARCA", "direction": "SELL", "size": 100}]
+            return []
+
+        def sync_balance(self):
+            self.sync_calls += 1
+
+    broker = DummyBroker()
+    executor = rebalancer_module.OrderExecutor(broker)
+    plan = {
+        "sell_clear": [SimpleNamespace(_name="SPY.ARCA")],
+        "reduce": [],
+        "increase": [(SimpleNamespace(_name="EWJ.ARCA"), 100000.0)],
+    }
+
+    executor.execute_plan(plan)
+
+    assert broker.calls == [("SPY.ARCA", 0.0), ("EWJ.ARCA", 100000.0)], "超过 5 分钟后仍应继续等待终态并在完成后买入。"
+    assert clock["t"] >= 306.0, "超过 5 分钟告警后不应停止等待。"
+    assert broker.sync_calls == 1, "卖单终态后应同步资金。"
+    assert len(pushed) == 1, "超过 5 分钟应推送一次告警。"
     assert pushed[0]["level"] == "WARNING"
-    assert "跳过买入" in pushed[0]["content"]
+    assert "300 秒内未全部终态" in pushed[0]["content"]
+    assert "继续等待，不据此跳过买入" in pushed[0]["content"]
 
 
 def test_order_executor_waits_local_pending_sells_even_if_remote_empty(monkeypatch):

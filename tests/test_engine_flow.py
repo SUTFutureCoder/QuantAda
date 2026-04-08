@@ -979,7 +979,13 @@ def test_on_order_status_callback_terminal_fill_pushes_once_with_target_qty(monk
             self.id = "ORDER_FILLED_1"
             self.status = "Filled"
             self.data = SimpleNamespace(_name="SPY.ARCA")
-            self.executed = SimpleNamespace(size=40.0, price=10.0, value=400.0, comm=0.0)
+            self.executed = SimpleNamespace(
+                size=40.0,
+                price=10.0,
+                value=400.0,
+                comm=0.0,
+                dt=datetime(2026, 2, 17, 10, 17, 32),
+            )
             self.trade = SimpleNamespace(order=SimpleNamespace(totalQuantity=100.0))
 
         def is_completed(self):
@@ -1040,6 +1046,7 @@ def test_on_order_status_callback_terminal_fill_pushes_once_with_target_qty(monk
     assert len(pushed_trades) == 1, "Filled 终态成交应只推送一次。"
     assert pushed_trades[0]["size"] == 100, "成交推送数量应为最终目标数量(totalQuantity)。"
     assert pushed_trades[0]["symbol"] == "SPY.ARCA"
+    assert pushed_trades[0]["dt"] == "2026-02-17T10:17:32", "成交推送时间应优先使用真实执行时间。"
 
 
 def test_on_order_status_callback_skips_submitted_alarm_for_untracked_external_order(monkeypatch):

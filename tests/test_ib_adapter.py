@@ -45,15 +45,37 @@ class DummyCommissionReport:
 
 
 class DummyFill:
-    def __init__(self, commission=None):
+    def __init__(self, commission=None, fill_time=None, execution_time=None):
         self.commissionReport = None if commission is None else DummyCommissionReport(commission=commission)
+        self.time = fill_time
+        self.execution = SimpleNamespace(time=execution_time) if execution_time is not None else None
 
 
 class DummyIBTrade:
-    def __init__(self, status, action="BUY", order_id=1, total_quantity=0, filled=0, avg_fill_price=0.0, commissions=None):
+    def __init__(
+        self,
+        status,
+        action="BUY",
+        order_id=1,
+        total_quantity=0,
+        filled=0,
+        avg_fill_price=0.0,
+        commissions=None,
+        fill_times=None,
+        execution_times=None,
+    ):
         self.order = DummyIBOrder(order_id=order_id, action=action, total_quantity=total_quantity)
         self.orderStatus = DummyIBOrderStatus(status=status, filled=filled, avg_fill_price=avg_fill_price)
-        self.fills = [DummyFill(c) for c in (commissions or [])]
+        fill_times = list(fill_times or [])
+        execution_times = list(execution_times or [])
+        commissions = list(commissions or [])
+        fill_count = max(len(commissions), len(fill_times), len(execution_times))
+        self.fills = []
+        for idx in range(fill_count):
+            commission = commissions[idx] if idx < len(commissions) else None
+            fill_time = fill_times[idx] if idx < len(fill_times) else None
+            execution_time = execution_times[idx] if idx < len(execution_times) else None
+            self.fills.append(DummyFill(commission=commission, fill_time=fill_time, execution_time=execution_time))
 
 
 class DummyAccountValue:
@@ -366,6 +388,28 @@ def test_ib_executed_stats_extraction():
     assert executed.price == pytest.approx(150.25), "成交均价提取错误：executed.price 应为 150.25！"
     assert executed.value == pytest.approx(75125.0), "成交金额计算错误：executed.value 应为 500*150.25=75125.0！"
     assert executed.comm == pytest.approx(2.0), "手续费提取错误：executed.comm 应等于 commissionReport 合计 2.0！"
+
+
+def test_ib_executed_stats_exposes_last_fill_time():
+    """
+    成交时间回归:
+    IBOrderProxy.executed.dt 应优先使用最后一笔 fill 的实际时间。
+    """
+    trade = DummyIBTrade(
+        status="Filled",
+        action="BUY",
+        total_quantity=500,
+        filled=500,
+        avg_fill_price=150.25,
+        commissions=[1.2, 0.8],
+        fill_times=[
+            datetime.datetime(2026, 4, 8, 21, 45, 30),
+            datetime.datetime(2026, 4, 8, 21, 45, 32),
+        ],
+    )
+    proxy = IBOrderProxy(trade, data=None)
+
+    assert proxy.executed.dt.isoformat() == "2026-04-08T21:45:32", "成交时间应取最后一笔 fill 的实际时间。"
 
 
 def test_ib_get_cash_respects_virtual_ledger():
