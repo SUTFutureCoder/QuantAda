@@ -152,6 +152,7 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 无实时价兜底与告警去重
         self._price_data_manager = None
         self._price_alarm_keys = set()
+        self._delayed_market_data_enabled = False
         super().__init__(context, cash_override, commission_override, slippage_override)
 
     @property
@@ -710,6 +711,70 @@ class IBBrokerAdapter(BaseLiveBroker):
             return False
         except Exception:
             return False
+
+    @staticmethod
+    def _extract_price_from_ticker(ticker) -> float:
+        if not ticker:
+            return 0.0
+        try:
+            price = ticker.marketPrice()
+            if price and price > 0 and price == price:
+                return float(price)
+        except Exception:
+            pass
+        for field in ('close', 'last'):
+            try:
+                val = getattr(ticker, field, None)
+                if val and val > 0 and val == val:
+                    return float(val)
+            except Exception:
+                continue
+        return 0.0
+
+    def _try_enable_delayed_market_data(self, reason: str = '') -> bool:
+        if self._delayed_market_data_enabled:
+            return True
+        if not hasattr(self, 'ib') or not self.ib:
+            return False
+        switcher = getattr(self.ib, 'reqMarketDataType', None)
+        if not callable(switcher):
+            return False
+        try:
+            switcher(3)  # delayed
+            self._delayed_market_data_enabled = True
+            reason_msg = f" ({reason})" if reason else ""
+            print(f"[IB Warning] Realtime quote unavailable, switched to delayed market data{reason_msg}.")
+            return True
+        except Exception as e:
+            print(f"[IB Warning] Failed to switch to delayed market data: {e}")
+            return False
+
+    def _resubscribe_symbol_ticker(self, symbol: str):
+        if not hasattr(self, 'ib') or not self.ib:
+            return None
+        try:
+            contract = self.parse_contract(symbol)
+            self.ib.qualifyContracts(contract)
+            ticker = self.ib.reqMktData(contract, '', False, False)
+            self._tickers[symbol] = ticker
+            return ticker
+        except Exception:
+            return self._tickers.get(symbol)
+
+    def _try_get_delayed_quote(self, symbol: str):
+        was_delayed_mode = bool(self._delayed_market_data_enabled)
+        if not self._try_enable_delayed_market_data(reason=f"{symbol} no realtime quote"):
+            return 0.0
+
+        ticker = self._tickers.get(symbol)
+        if ticker is None or not was_delayed_mode:
+            ticker = self._resubscribe_symbol_ticker(symbol) or ticker
+        for _ in range(20):
+            price = self._extract_price_from_ticker(ticker)
+            if price > 0:
+                return price
+            self._sleep_ib(0.05)
+        return self._extract_price_from_ticker(ticker)
 
     def _safe_pending_id(self, trade) -> str:
         oid = self._safe_order_id(trade)
@@ -1304,7 +1369,15 @@ class IBBrokerAdapter(BaseLiveBroker):
         # 2. 获取价格 (优先 marketPrice)
         price = ticker.marketPrice()
 
-        # 如果 marketPrice 无效 (NaN/0/-1)，尝试使用 close 或 last
+        # 如果 marketPrice 无效 (NaN/0/-1)，先尝试切换 delayed 行情并重取。
+        if not (price and 0 < price == price):
+            delayed_price = self._try_get_delayed_quote(symbol)
+            ticker = self._tickers.get(symbol, ticker)
+            if delayed_price > 0:
+                print(f"[IB Warning] {symbol} realtime quote invalid. Using DELAYED price: {delayed_price}")
+                price = delayed_price
+
+        # 如果仍无效，尝试使用 close 或 last
         # 这种情况常见于周末、盘前盘后或停牌
         if not (price and 0 < price == price):
             # 优先用昨日收盘价 (Close)
@@ -1445,6 +1518,15 @@ class IBBrokerAdapter(BaseLiveBroker):
             AlarmManager().push_text(msg, level='ERROR')
         except Exception:
             pass
+
+    @staticmethod
+    def _augment_live_data_source(data_source: str) -> str:
+        source_names = [s for s in re.split(r"[,\s]+", str(data_source or '').strip().lower()) if s]
+        if not source_names:
+            return data_source
+        if any(s in {'ib', 'ibkr'} for s in source_names):
+            return ",".join(source_names)
+        return ",".join(source_names + ['ibkr'])
 
     # 4. 发单
     def _submit_order(self, data, volume, side, price):
@@ -1663,7 +1745,16 @@ class IBBrokerAdapter(BaseLiveBroker):
         if kwargs.get('compression') is not None:
             engine_config['compression'] = kwargs.get('compression')
         if kwargs.get('data_source'):
-            engine_config['data_source'] = kwargs.get('data_source')
+            raw_data_source = kwargs.get('data_source')
+            source_names = [s for s in re.split(r"[,\s]+", str(raw_data_source or '').strip().lower()) if s]
+            had_ib_source = any(s in {'ib', 'ibkr'} for s in source_names)
+            data_source = cls._augment_live_data_source(raw_data_source)
+            if data_source != raw_data_source and not had_ib_source:
+                print(
+                    f"[IBBroker] Live data source fallback enabled: "
+                    f"{raw_data_source} -> {data_source}"
+                )
+            engine_config['data_source'] = data_source
         if selection_name:
             engine_config['selection_name'] = selection_name
         if risk_name:
@@ -1710,6 +1801,12 @@ class IBBrokerAdapter(BaseLiveBroker):
                     try:
                         ib.connect(host, port, clientId=client_id)
                         print("[System] ✅ Connected successfully.")
+                        # 连接恢复后先复位行情模式标记，后续若实时不可用可再次自动降级 delayed。
+                        try:
+                            if hasattr(trader, 'broker') and trader.broker:
+                                trader.broker._delayed_market_data_enabled = False
+                        except Exception:
+                            pass
                         try:
                             if client_id == 0 and hasattr(ib, 'reqAutoOpenOrders'):
                                 ib.reqAutoOpenOrders(True)

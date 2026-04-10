@@ -218,6 +218,26 @@ class DummyIBForAvailableFundsDual(DummyIBForCash):
         return DummyTicker(7.8)
 
 
+class DummyIBForDelayedQuote(DummyIBForCash):
+    def __init__(self):
+        super().__init__(cash_usd=0.0)
+        self.market_data_types = []
+        self.req_mkt_calls = 0
+
+    def reqMarketDataType(self, market_data_type: int):
+        self.market_data_types.append(market_data_type)
+
+    def sleep(self, seconds):
+        return None
+
+    def reqMktData(self, contract, genericTickList="", snapshot=False, regulatorySnapshot=False):
+        self.req_mkt_calls += 1
+        ticker = DummyTicker(float("nan"))
+        if self.market_data_types and self.market_data_types[-1] == 3:
+            ticker.close = 98.76
+        return ticker
+
+
 class DummyIBForAccountScopedFunds(DummyIBForCash):
     def __init__(self):
         super().__init__(cash_usd=0.0)
@@ -715,6 +735,57 @@ def test_ib_get_current_price_no_provider_price_alarms_and_blocks(monkeypatch):
 
     assert price == 0.0, "无有效价格时应返回 0，阻止下单。"
     assert calls, "无有效价格时应触发报警。"
+
+
+def test_ib_get_current_price_switches_to_delayed_quote_when_realtime_missing():
+    """
+    行情自愈回归:
+    实时报价无效时，应自动切换 delayed 行情模式并重取报价。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForDelayedQuote())
+    broker = IBBrokerAdapter(context=context)
+    broker._tickers = {"AAPL": DummyTicker(float("nan"))}
+
+    data = SimpleNamespace(_name="AAPL")
+    price = broker.get_current_price(data)
+    price2 = broker.get_current_price(data)
+
+    assert price == pytest.approx(98.76), "应在实时价缺失时自动回退 delayed 报价。"
+    assert price2 == pytest.approx(98.76), "后续同标的报价应继续可用。"
+    assert broker._delayed_market_data_enabled is True, "应记录 delayed 模式已启用。"
+    assert context.ib_instance.market_data_types == [3], "应仅触发一次 delayed 模式切换请求。"
+    assert context.ib_instance.req_mkt_calls == 1, "delayed 模式已生效后不应重复订阅同标的行情。"
+
+
+def test_ib_get_current_price_uses_refreshed_ticker_after_delayed_switch():
+    """
+    行情自愈回归:
+    delayed 重订阅后若首轮仍无价，应使用刷新后的 ticker 继续 close/last 兜底。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=0.0))
+    broker = IBBrokerAdapter(context=context)
+    broker._tickers = {"AAPL": DummyTicker(float("nan"))}
+
+    def _fake_try_get_delayed_quote(symbol: str):
+        refreshed = DummyTicker(float("nan"))
+        refreshed.last = 66.6
+        broker._tickers[symbol] = refreshed
+        return 0.0
+
+    broker._try_get_delayed_quote = _fake_try_get_delayed_quote
+
+    price = broker.get_current_price(SimpleNamespace(_name="AAPL"))
+    assert price == pytest.approx(66.6)
+
+
+def test_ib_augment_live_data_source_appends_ibkr_fallback():
+    """
+    IB 启动配置回归:
+    非 ib 单源应在 adapter 层自动补齐 ibkr 末位兜底。
+    """
+    assert IBBrokerAdapter._augment_live_data_source("tiingo") == "tiingo,ibkr"
+    assert IBBrokerAdapter._augment_live_data_source("tiingo, ibkr") == "tiingo,ibkr"
+    assert IBBrokerAdapter._augment_live_data_source("ibkr") == "ibkr"
 
 
 def test_ib_fetch_smart_value_falls_back_to_base_when_fx_missing():
