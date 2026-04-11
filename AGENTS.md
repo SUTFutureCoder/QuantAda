@@ -4,6 +4,14 @@
 This file defines non-negotiable engineering rules for all coding agents working in this repo.
 If a proposed change conflicts with these rules, reject or redesign it.
 
+## 0.5) Documentation Hierarchy
+1. `docs/specs/*` is the formalized repository spec layer for agent-facing development.
+2. `agent_prompts/*` is the code-generation template layer; it is not the primary contract source.
+3. Source code + tests remain the final reality check.
+4. If docs/specs, prompts, and code diverge:
+- align behavior to current code/tests first
+- then update `docs/specs/*` and `agent_prompts/*` in the same change
+
 ## 1) Core Principles (Non-Negotiable)
 1. High Self-Healing First
 - Prefer recovery over perfection: reconnect, retry, reconcile, alarm.
@@ -29,18 +37,36 @@ If a proposed change conflicts with these rules, reject or redesign it.
 - `strategies/base_strategy.py`
 - `stock_selectors/base_selector.py`
 - `risk_controls/base_risk_control.py`
+- When touching related module types, also respect:
+  - `data_providers/base_provider.py`
+  - `alarms/base_alarm.py`
+  - `recorders/base_recorder.py`
 
-2. Broker-side hard constraints:
+2. Live adapter module contract:
+- Each `live_trader/adapters/*_broker.py` loaded by `LiveTrader` must expose both:
+  - a `BaseLiveBroker` subclass
+  - a `BaseDataProvider` subclass discoverable in the same module
+- Order proxy runtime contract must satisfy not only `BaseOrderProxy` abstract methods, but also current engine expectations such as `status`, `executed`, `data`, and `is_accepted()`.
+
+3. Strategy-side execution contract:
+- Current equal-weight rebalance API is `BaseStrategy.execute_rebalance(target_symbols, top_k, rebalance_threshold)`.
+- `target_symbols` should be a list of data objects, not weight dicts or raw symbol strings.
+- Prefer `self.tradable_datas` over raw `self.broker.datas` in trading loops so ignored-symbol cascading remains effective.
+
+4. Broker-side hard constraints:
 - Pending orders contract includes `id` in `get_pending_orders`.
 - Implement `cancel_pending_order(order_id)` with safe failure behavior (False instead of crash).
 - No local fake cash/position as long-lived source of truth.
 
-3. Order-state semantics:
+5. Order-state semantics:
 - Rejected BUY: immediate same-bar downgrade retry path is preferred.
 - Multi-symbol retries must be independent.
 - A-share/T+1 markets must use sellable semantics, not total position only.
 
-4. Overnight pending order policy:
+6. Live self-healing baseline:
+- Do not regress multi-risk chaining, live-refresh completeness gate, empty-data recovery, stale `strategy.order` auto-clear, or schedule prewarm paths without explicit failure evidence and tests.
+
+7. Overnight pending order policy:
 - Live run performs overnight cleanup before refresh unless `KEEP_OVERNIGHT_ORDERS=True`.
 - Cleanup may retry; failures must be logged and alarmed.
 
@@ -51,10 +77,11 @@ If a proposed change conflicts with these rules, reject or redesign it.
 
 ## 4) Fast-Generation Workflow (Mandatory)
 When user asks for rapid code generation or new module scaffolding, agents must follow this order:
-1. Read relevant `vibe_coding_prompts/*` first (broker/strategy/debug_fix/etc.).
-2. Then read corresponding base class interface(s).
-3. Generate code strictly against prompt constraints + base contracts.
-4. If prompt and code diverge, align to current code/tests, then update prompt docs in same change.
+1. Read relevant `docs/specs/*` first.
+2. Then read relevant `agent_prompts/*` (broker/strategy/debug_fix/etc.).
+3. Then read corresponding base class interface(s) and loader/runtime contracts.
+4. Generate code strictly against spec + prompt + base/runtime contracts.
+5. If spec/prompt and code diverge, align to current code/tests, then update `docs/specs/*` and `agent_prompts/*` in same change.
 
 ## 5) Testing and Verification Discipline
 1. Every behavioral change must include focused tests or updated assertions.

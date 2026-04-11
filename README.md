@@ -105,6 +105,12 @@ python run.py my_strategies.my_cool_strategy --selection=my_selectors.my_selecto
 - 执行纪律：统一遵循先卖后买、失败告警、可审计日志链路。
   ![diagram](https://github.com/SUTFutureCoder/QuantAda/blob/main/.sample_pictures/diagram.png?raw=true)
 
+## AI与二次开发入口
+
+- `docs/specs/`: 更正式的规范层，适合先理解当前架构、运行语义和扩展契约。
+- `agent_prompts/`: 面向 agent / AI 的生成模板层，适合快速生成 broker、strategy、selector、risk、debug fix 等改动输入。
+- 推荐顺序：先读 `docs/specs/`，再读 `agent_prompts/`，最后结合当前源码和测试实现。
+
 ## 样例截图
 
 ### AI辅助Vibe Coding快速实现策略开发

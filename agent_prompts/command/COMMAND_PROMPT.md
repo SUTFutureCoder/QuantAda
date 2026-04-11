@@ -10,8 +10,8 @@
 - 风控: `[可空，可逗号分隔]`
 - 标的: `[可空，可逗号分隔]`
 - 参数字典: `[可空，Python dict 字符串]`
-- 风控参数字典: `[可空，Python dict 字符串]`
-- 数据源: `[可空，如 gm akshare tushare csv]`
+- 风控参数字典: `[可空，Python dict 字符串；多风控时也可为 {risk_name: {...}}]`
+- 数据源: `[可空，可为单个或逗号/空格分隔多个 provider，如 gm akshare tushare csv]`
 - 时间范围: `[start_date/end_date，可空，格式 YYYYMMDD]`
 - 资金与成本: `[cash/commission/slippage，可空]`
 - 实盘连接: `[可空，格式 broker:env，例如 gm_broker:sim]`
@@ -22,10 +22,15 @@
 1. 必须输出可直接复制执行的一行命令，不允许伪代码。
 2. 兼容 QuantAda 的参数语法:
    - `--params` / `--risk_params` / `--config` 使用 Python 字典字符串。
+   - `--risk` 支持逗号分隔多个模块。
+   - 多风控时，`--risk_params` 可以使用平铺 dict，也可以使用 `{risk_name: {...}}` 的 scoped dict。
+   - `--data_source` 可以是单个 provider，也可以是逗号/空格分隔的 provider 链。
    - `--connect` 必须是 `broker:env`。
 3. 当 `mode=live` 且提供 `--connect` 时:
-   - 如果给了 `start_date`，表示走券商回放/仿真回测路径。
-   - 如果不提供 `start_date`，表示实时事件循环模式。
+   - 先按**具体 broker 适配器**判断语义，不要假设所有 broker 都一样。
+   - `gm_broker` 当前实现中，如果给了 `start_date`，会进入 GM SDK 的 backtest/sim 路径。
+   - `ib_broker` 当前实现中，不要把 `start_date` 解读成 replay/backtest；它仍是 live Phoenix/event-loop 路径，除非适配器文档明确说明了别的行为。
+   - 如果不确定某个 broker 是否支持“带 `start_date` 的 live 回放”，要明确写出这是 broker-specific，而不是擅自承诺。
 4. 命令必须包含最少必要参数；不要加入与目标无关的参数。
 5. 除主命令外，再给出一个“排错版命令”，用于快速定位问题（通常追加 `--no_plot`、明确 `--data_source`、显式 `--start_date --end_date` 等）。
 6. 参数冲突时先指出冲突，再给修正后的命令。

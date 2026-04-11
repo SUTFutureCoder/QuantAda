@@ -1,6 +1,11 @@
-# QuantAda Vibe Coding Prompts
+# QuantAda Agent Prompts
 
-本目录用于“复制即用”的 AI Prompt 模板，目标是降低接口对接与命令编排成本。
+本目录用于“复制即用”的 agent/codegen Prompt 模板，目标是降低接口对接与命令编排成本。
+
+重要说明:
+1. `docs/specs/*` 是更正式的规范层。
+2. `agent_prompts/*` 是生成模板层，不应单独充当最终契约来源。
+3. 若模板、spec 与代码/tests 不一致，应以当前代码/tests 为准，并在同一变更中同步回写 spec 与模板。
 
 ## 目录结构
 - `broker/BROKER_PROMPT.md`: 新券商适配器生成
@@ -21,7 +26,7 @@
 3. 把完整文本发给 AI，然后让 AI 直接改代码并验证。
 4. 最后用 `debug_fix/DEBUG_FIX_PROMPT.md` 做回归和稳定性检查。
 
-## 当前框架行为基线（2026-03）
+## 当前框架行为基线（2026-04）
 1. Broker/Engine 已切换为**无状态执行**：不再使用 `deferred`/`buffered` 队列保存历史买入意图。
 2. 买单拒绝后在同回调内**当场降级重提**（默认最多 10 次：前 5 次按 `LOT_SIZE` 线性降级，后 5 次按几何降级）；达到上限后放弃本 K，下一根 K 重新决策。
 3. 卖出侧遵循可卖仓位约束（A 股等 T+1 场景应基于 `sellable`/`available_now` 等字段），避免“仓位不足”反复拒单。
@@ -29,3 +34,14 @@
 5. 实盘每个自然日首次 `run` 会在**拉数据前**执行隔夜在途委托清理（可用 `config.KEEP_OVERNIGHT_ORDERS` 保留隔夜单）。
 6. 隔夜清理失败会最多重试 5 次；若仍未清空，在继续本轮执行前会记录详细日志并推送 ERROR 级别报警。
 7. `get_pending_orders` 统一契约要求包含 `id` 字段，并由适配器实现 `cancel_pending_order(order_id)` 支持按单撤单。
+8. 策略侧当前的等权调仓接口为 `execute_rebalance(target_symbols, top_k, rebalance_threshold)`；`target_symbols` 传 `data` 对象列表，不传权重字典。
+9. 策略交易循环优先遍历 `self.tradable_datas`，自动尊重全局/环境/策略三级 `ignored_symbols` 豁免。
+10. 实盘 adapter 模块需在同一文件中同时暴露 Broker 与 DataProvider 类，供 `LiveTrader` 反射发现。
+11. 风控支持逗号分隔的多模块链式加载；`risk_params` 可为平铺 dict，也可为 `{risk_name: {...}}` 的 scoped 结构。
+12. 实盘引擎自愈基线：当轮 live data refresh 不完整会跳过执行；`datas` 为空会尝试恢复；僵尸 `strategy.order` 会自动清锁。
+13. GM/IB 的 schedule 运行支持 prewarm；相关生成/修复应保留 `LIVE_SCHEDULE_PREWARM_LEAD` 语义。
+
+## 推荐阅读顺序
+1. 先读 `docs/specs/*` 中与你任务最相关的正式规范。
+2. 再选本目录下最贴近任务的 Prompt 模板。
+3. 最后打开对应的基类接口与当前实现/测试，确保生成结果贴合真实代码。
