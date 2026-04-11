@@ -22,6 +22,7 @@ sys.modules["ib_insync"] = mock_ib_insync
 # 重新导入被测模块，确保使用上面的 mock ib_insync
 sys.modules.pop("live_trader.adapters.ib_broker", None)
 from live_trader.adapters.ib_broker import IBBrokerAdapter, IBOrderProxy
+from live_trader.data_bridge.data_warm import SchedulePlanner
 from data_providers.ibkr_provider import IbkrDataProvider
 
 
@@ -939,14 +940,14 @@ def test_ib_daily_schedule_parse_and_validation():
     - 支持 1d:HH:MM(:SS)
     - 非法时间抛出异常
     """
-    parsed = IBBrokerAdapter._parse_daily_schedule("1d:15:45:00")
+    parsed = SchedulePlanner.parse_daily_schedule("1d:15:45:00")
     assert parsed == (15, 45, 0, "15:45:00"), "应正确解析带秒的 daily schedule。"
 
-    parsed_no_sec = IBBrokerAdapter._parse_daily_schedule("1d:09:30")
+    parsed_no_sec = SchedulePlanner.parse_daily_schedule("1d:09:30")
     assert parsed_no_sec == (9, 30, 0, "09:30"), "应兼容不带秒的 daily schedule。"
 
     with pytest.raises(ValueError):
-        IBBrokerAdapter._parse_daily_schedule("1d:25:61:00")
+        SchedulePlanner.parse_daily_schedule("1d:25:61:00")
 
 
 def test_ib_daily_schedule_should_only_trigger_in_tolerance_window():
@@ -986,6 +987,408 @@ def test_ib_daily_schedule_should_only_trigger_in_tolerance_window():
         last_schedule_run_date="2026-02-27",
     )
     assert not should_run_again, "同一自然日只允许运行一次。"
+
+
+def test_ib_interval_schedule_parse_and_trigger_inside_slot_window():
+    """
+    固定频率调度回归:
+    - 支持 5m:HH:MM:SS 解析
+    - 仅在 slot 后短窗口内触发
+    - 同一 slot 不重复触发
+    """
+    parsed = SchedulePlanner.parse_schedule_rule("5m:09:30:00")
+    assert parsed is not None
+    assert parsed["freq_n"] == 5
+    assert parsed["freq_unit"] == "m"
+    assert parsed["interval_seconds"] == pytest.approx(300.0)
+
+    now = datetime.datetime(2026, 2, 27, 9, 35, 2)
+    should_run, delta, slot_key = SchedulePlanner.should_trigger_schedule(
+        now=now,
+        parsed_schedule=parsed,
+        last_schedule_run_key=None,
+    )
+    assert should_run, "进入 09:35 slot 的容忍窗口后应触发。"
+    assert delta == pytest.approx(2.0)
+    assert slot_key == "2026-02-27 09:35:00"
+
+    should_repeat, _, _ = SchedulePlanner.should_trigger_schedule(
+        now=now,
+        parsed_schedule=parsed,
+        last_schedule_run_key="2026-02-27 09:35:00",
+    )
+    assert not should_repeat, "同一 slot 不应重复运行。"
+
+    late_now = datetime.datetime(2026, 2, 27, 9, 35, 6)
+    should_late, _, _ = SchedulePlanner.should_trigger_schedule(
+        now=late_now,
+        parsed_schedule=parsed,
+        last_schedule_run_key=None,
+    )
+    assert not should_late, "错过 slot 容忍窗口后不应补跑。"
+
+    before_anchor = datetime.datetime(2026, 2, 27, 9, 29, 59)
+    should_before_anchor, delta_before_anchor, slot_key_before_anchor = SchedulePlanner.should_trigger_schedule(
+        now=before_anchor,
+        parsed_schedule=parsed,
+        last_schedule_run_key=None,
+    )
+    assert not should_before_anchor
+    assert delta_before_anchor == pytest.approx(-1.0)
+    assert slot_key_before_anchor is None
+
+
+def test_ib_schedule_prewarm_lead_parse_and_validation():
+    """
+    预热提前量解析回归:
+    - 支持 0 / 秒数 / 1s|1m|1h
+    - 非法格式抛出异常
+    """
+    assert SchedulePlanner.parse_schedule_prewarm_lead(0) == pytest.approx(0.0)
+    assert SchedulePlanner.parse_schedule_prewarm_lead("1s") == pytest.approx(1.0)
+    assert SchedulePlanner.parse_schedule_prewarm_lead("5m") == pytest.approx(300.0)
+    assert SchedulePlanner.parse_schedule_prewarm_lead("1h") == pytest.approx(3600.0)
+    assert SchedulePlanner.parse_schedule_prewarm_lead(15) == pytest.approx(15.0)
+
+    with pytest.raises(ValueError):
+        SchedulePlanner.parse_schedule_prewarm_lead("tomorrow")
+
+
+def test_ib_schedule_prewarm_should_only_trigger_inside_lead_window():
+    """
+    预热触发回归:
+    - 仅在 schedule 前 lead 窗口内触发
+    - 同一自然日只预热一次
+    - schedule 已执行时不再预热
+    """
+    now = datetime.datetime(2026, 2, 27, 15, 44, 30)
+    should_prewarm, seconds_to_schedule, day_str = SchedulePlanner.should_trigger_schedule_prewarm(
+        now=now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        lead_seconds=60.0,
+        last_prewarm_run_date=None,
+        last_schedule_run_date=None,
+    )
+    assert should_prewarm, "schedule 前 lead 窗口内应触发预热。"
+    assert seconds_to_schedule == pytest.approx(30.0)
+    assert day_str == "2026-02-27"
+
+    early_now = datetime.datetime(2026, 2, 27, 15, 43, 30)
+    should_early, _, _ = SchedulePlanner.should_trigger_schedule_prewarm(
+        now=early_now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        lead_seconds=60.0,
+        last_prewarm_run_date=None,
+        last_schedule_run_date=None,
+    )
+    assert not should_early, "尚未进入 lead 窗口时不应触发预热。"
+
+    late_now = datetime.datetime(2026, 2, 27, 15, 45, 1)
+    should_late, _, _ = SchedulePlanner.should_trigger_schedule_prewarm(
+        now=late_now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        lead_seconds=60.0,
+        last_prewarm_run_date=None,
+        last_schedule_run_date=None,
+    )
+    assert not should_late, "schedule 到点后不应再触发预热。"
+
+    should_repeat, _, _ = SchedulePlanner.should_trigger_schedule_prewarm(
+        now=now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        lead_seconds=60.0,
+        last_prewarm_run_date="2026-02-27",
+        last_schedule_run_date=None,
+    )
+    assert not should_repeat, "同一自然日不应重复预热。"
+
+    should_after_run, _, _ = SchedulePlanner.should_trigger_schedule_prewarm(
+        now=now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        lead_seconds=60.0,
+        last_prewarm_run_date=None,
+        last_schedule_run_date="2026-02-27",
+    )
+    assert not should_after_run, "schedule 已执行后不应再触发预热。"
+
+
+def test_ib_interval_schedule_prewarm_is_reversed_from_next_slot():
+    """
+    固定频率预热回归:
+    prewarm 必须基于“下一个正式 slot”逆推，而不是独立 cron。
+    """
+    parsed = SchedulePlanner.parse_schedule_rule("5m:09:30:00")
+
+    now = datetime.datetime(2026, 2, 27, 9, 34, 1)
+    should_prewarm, seconds_to_schedule, slot_key = SchedulePlanner.should_trigger_schedule_prewarm_for_rule(
+        now=now,
+        parsed_schedule=parsed,
+        lead_seconds=60.0,
+        last_prewarm_run_key=None,
+        last_schedule_run_key=None,
+    )
+    assert should_prewarm, "应在 09:35 slot 前 60s 窗口内触发预热。"
+    assert seconds_to_schedule == pytest.approx(59.0)
+    assert slot_key == "2026-02-27 09:35:00"
+
+    before_window = datetime.datetime(2026, 2, 27, 9, 33, 58)
+    should_early, _, _ = SchedulePlanner.should_trigger_schedule_prewarm_for_rule(
+        now=before_window,
+        parsed_schedule=parsed,
+        lead_seconds=60.0,
+        last_prewarm_run_key=None,
+        last_schedule_run_key=None,
+    )
+    assert not should_early, "尚未进入下一个 slot 的逆推窗口时不应预热。"
+
+    should_repeat, _, _ = SchedulePlanner.should_trigger_schedule_prewarm_for_rule(
+        now=now,
+        parsed_schedule=parsed,
+        lead_seconds=60.0,
+        last_prewarm_run_key="2026-02-27 09:35:00",
+        last_schedule_run_key=None,
+    )
+    assert not should_repeat, "同一 slot 不应重复预热。"
+
+    should_after_run, _, _ = SchedulePlanner.should_trigger_schedule_prewarm_for_rule(
+        now=now,
+        parsed_schedule=parsed,
+        lead_seconds=60.0,
+        last_prewarm_run_key=None,
+        last_schedule_run_key="2026-02-27 09:35:00",
+    )
+    assert not should_after_run, "正式 slot 已执行后不应再为该 slot 预热。"
+
+
+def test_ib_schedule_prewarm_disabled_when_lead_is_zero():
+    """
+    默认配置回归:
+    lead=0 时必须完全关闭预热。
+    """
+    now = datetime.datetime(2026, 2, 27, 15, 44, 30)
+    should_prewarm, seconds_to_schedule, day_str = SchedulePlanner.should_trigger_schedule_prewarm(
+        now=now,
+        target_h=15,
+        target_m=45,
+        target_s=0,
+        lead_seconds=0.0,
+        last_prewarm_run_date=None,
+        last_schedule_run_date=None,
+    )
+    assert not should_prewarm, "lead=0 时不应触发任何预热。"
+    assert seconds_to_schedule == pytest.approx(30.0)
+    assert day_str == "2026-02-27"
+
+
+def test_ib_schedule_preview_builds_next_three_daily_slots_with_prewarm():
+    parsed = SchedulePlanner.parse_schedule_rule("1d:15:45:00")
+
+    previews = SchedulePlanner.build_schedule_preview(
+        now=datetime.datetime(2026, 4, 11, 15, 44, 10),
+        parsed_schedule=parsed,
+        prewarm_lead_seconds=60.0,
+        count=3,
+    )
+
+    assert [item["slot_dt"].strftime("%Y-%m-%d %H:%M:%S") for item in previews] == [
+        "2026-04-11 15:45:00",
+        "2026-04-12 15:45:00",
+        "2026-04-13 15:45:00",
+    ]
+    assert [item["prewarm_dt"].strftime("%Y-%m-%d %H:%M:%S") for item in previews] == [
+        "2026-04-11 15:44:00",
+        "2026-04-12 15:44:00",
+        "2026-04-13 15:44:00",
+    ]
+
+
+def test_ib_schedule_preview_builds_next_three_interval_slots_with_prewarm():
+    parsed = SchedulePlanner.parse_schedule_rule("5m:09:30:00")
+
+    previews = SchedulePlanner.build_schedule_preview(
+        now=datetime.datetime(2026, 2, 27, 9, 34, 10),
+        parsed_schedule=parsed,
+        prewarm_lead_seconds=60.0,
+        count=3,
+    )
+
+    assert [item["slot_dt"].strftime("%Y-%m-%d %H:%M:%S") for item in previews] == [
+        "2026-02-27 09:35:00",
+        "2026-02-27 09:40:00",
+        "2026-02-27 09:45:00",
+    ]
+    assert [item["prewarm_dt"].strftime("%Y-%m-%d %H:%M:%S") for item in previews] == [
+        "2026-02-27 09:34:00",
+        "2026-02-27 09:39:00",
+        "2026-02-27 09:44:00",
+    ]
+
+
+def test_ib_prewarm_before_schedule_uses_first_data_and_fx(monkeypatch):
+    """
+    预热执行回归:
+    优先使用 broker 第一个 data 的当前价路径，并额外预热 USDHKD。
+    """
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=0.0))
+    broker = IBBrokerAdapter(context=context)
+    broker.datas = [SimpleNamespace(_name="QQQ.SMART")]
+
+    seen = {"price": [], "fx": []}
+
+    def _fake_price(data):
+        seen["price"].append(data._name)
+        return 123.4
+
+    def _fake_fx(pair_symbol, in_loop=None):
+        seen["fx"].append(pair_symbol)
+        return 7.8
+
+    monkeypatch.setattr(broker, "get_current_price", _fake_price)
+    monkeypatch.setattr(broker, "_load_fx_rate", _fake_fx)
+
+    summary = broker.prewarm_before_schedule(
+        data_provider=None,
+        symbols=["QQQ.SMART"],
+        timeframe="Days",
+        compression=1,
+        now=datetime.datetime(2026, 4, 11, 15, 44, 0),
+    )
+
+    assert summary["source"] == "broker"
+    assert summary["symbol"] == "QQQ.SMART"
+    assert summary["price"] == pytest.approx(123.4)
+    assert summary["extras"] == ["USDHKD"]
+    assert seen["price"] == ["QQQ.SMART"]
+    assert seen["fx"] == ["USDHKD"]
+
+
+def test_ib_prewarm_before_schedule_falls_back_to_data_provider_when_no_datas(monkeypatch):
+    """
+    预热执行回归:
+    若 broker 尚无 datas，应回退到 data_provider 的首标的最小窗口请求。
+    """
+    class StubProvider:
+        def __init__(self):
+            self.calls = []
+
+        def get_history(self, symbol: str, start_date: str, end_date: str,
+                        timeframe: str = "Days", compression: int = 1):
+            self.calls.append(
+                {
+                    "symbol": symbol,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "timeframe": timeframe,
+                    "compression": compression,
+                }
+            )
+            return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp("2026-04-11 15:44:00")])
+
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=0.0))
+    broker = IBBrokerAdapter(context=context)
+    provider = StubProvider()
+    monkeypatch.setattr(broker, "_load_fx_rate", lambda pair_symbol, in_loop=None: 0.0)
+
+    summary = broker.prewarm_before_schedule(
+        data_provider=provider,
+        symbols=["QQQ.SMART", "SPY.ARCA"],
+        timeframe="Minutes",
+        compression=5,
+        now=datetime.datetime(2026, 4, 11, 15, 44, 0),
+    )
+
+    assert summary["source"] == "data_provider"
+    assert summary["symbol"] == "QQQ.SMART"
+    assert summary["history_rows"] == 1
+    assert provider.calls[0]["symbol"] == "QQQ.SMART"
+    assert provider.calls[0]["start_date"] == "2026-04-11 15:29:00"
+    assert provider.calls[0]["end_date"] == "2026-04-11 15:44:00"
+
+
+def test_ib_schedule_prewarm_summary_error_pushes_warning_alarm_once(monkeypatch):
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.data_bridge.data_warm as data_warm_module
+
+    monkeypatch.setattr(data_warm_module, "AlarmManager", lambda: DummyAlarm())
+
+    now = datetime.datetime(2026, 4, 11, 15, 44, 0)
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=0.0), now=now)
+    broker = IBBrokerAdapter(context=context)
+
+    sent = broker.alarm_schedule_prewarm_issue_once(
+        schedule_rule="1d:15:45:00",
+        now=now,
+        summary={
+            "source": "broker",
+            "symbol": "QQQ.SMART",
+            "extras": [],
+            "errors": ["broker:no price"],
+        },
+        level='WARNING',
+    )
+    sent_repeat = broker.alarm_schedule_prewarm_issue_once(
+        schedule_rule="1d:15:45:00",
+        now=now,
+        summary={
+            "source": "broker",
+            "symbol": "QQQ.SMART",
+            "extras": [],
+            "errors": ["broker:no price"],
+        },
+        level='WARNING',
+    )
+
+    assert sent is True
+    assert sent_repeat is False, "同一自然日同一 schedule 的预热异常告警应去重。"
+    assert len(pushed) == 1
+    assert pushed[0]["level"] == "WARNING"
+    assert "Schedule prewarm finished with errors before 1d:15:45:00" in pushed[0]["content"]
+    assert "QQQ.SMART" in pushed[0]["content"]
+    assert "Normal schedule will continue." in pushed[0]["content"]
+
+
+def test_ib_schedule_prewarm_exception_pushes_error_alarm_without_raising(monkeypatch):
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.data_bridge.data_warm as data_warm_module
+
+    monkeypatch.setattr(data_warm_module, "AlarmManager", lambda: DummyAlarm())
+
+    now = datetime.datetime(2026, 4, 11, 15, 44, 0)
+    context = types.SimpleNamespace(ib_instance=DummyIBForCash(cash_usd=0.0), now=now)
+    broker = IBBrokerAdapter(context=context)
+
+    sent = broker.alarm_schedule_prewarm_issue_once(
+        schedule_rule="1d:15:45:00",
+        now=now,
+        error=RuntimeError("boom"),
+        level='ERROR',
+    )
+
+    assert sent is True
+    assert len(pushed) == 1
+    assert pushed[0]["level"] == "ERROR"
+    assert "Schedule prewarm failed before 1d:15:45:00: boom" in pushed[0]["content"]
+    assert "Normal schedule will continue." in pushed[0]["content"]
 
 
 def test_ib_submit_order_allows_fractional_sell_for_full_close(monkeypatch):

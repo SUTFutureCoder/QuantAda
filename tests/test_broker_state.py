@@ -5,6 +5,7 @@ import pytest
 
 import config
 from live_trader.adapters.base_broker import BaseLiveBroker, BaseOrderProxy
+from live_trader.data_bridge.data_warm import BrokerDataWarmBridge
 
 
 class MockOrderProxy(BaseOrderProxy):
@@ -137,6 +138,14 @@ def test_stateless_buy_skips_when_cash_insufficient_even_with_pending_sell():
     assert len(broker.submitted_orders) == 1, "第二次尝试应发出真实买单"
     assert broker.submitted_orders[0]["side"] == "BUY", "买单方向应为 BUY"
     assert broker.submitted_orders[0]["volume"] == 100, "买单数量应为 100 股"
+
+
+def test_base_broker_uses_composed_data_warm_bridge():
+    broker = MockBroker(initial_cash=1000.0)
+
+    assert isinstance(broker._data_warm, BrokerDataWarmBridge)
+    assert broker._data_warm._host is broker
+    assert not isinstance(broker, BrokerDataWarmBridge)
 
 
 def test_auto_downgrade_and_refund():

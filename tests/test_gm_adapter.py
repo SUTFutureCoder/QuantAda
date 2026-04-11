@@ -1,4 +1,5 @@
 import sys
+import datetime
 from unittest.mock import MagicMock
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ sys.modules["gm.api"] = mock_gm_api
 # 延迟导入被测模块，确保它使用上述 Mock 的 gm.api
 sys.modules.pop("live_trader.adapters.gm_broker", None)
 from live_trader.adapters.gm_broker import GmOrderProxy, GmBrokerAdapter
+from live_trader.data_bridge.data_warm import SchedulePlanner
 
 
 # 2. 构造掘金底层订单替身
@@ -463,3 +465,80 @@ def test_gm_cancel_pending_order_by_id(monkeypatch):
     ok = broker.cancel_pending_order("GM_OID_002")
     assert ok is True, "按 id 撤单应返回 True。"
     assert len(cancel_calls) == 1, "应至少发起一次撤单调用。"
+
+
+def test_gm_schedule_prewarm_time_rule_uses_common_live_helper():
+    """
+    通用预热调度回归:
+    GM 也应复用通用 fixed-slot prewarm 时间计算逻辑。
+    """
+    assert SchedulePlanner.build_schedule_prewarm_time_rule("1d:14:45:00", 60.0) == "14:44:00"
+    assert SchedulePlanner.build_schedule_prewarm_time_rule("1d:09:30", 300.0) == "09:25:00"
+    assert SchedulePlanner.build_schedule_prewarm_time_rule("5m:09:30:00", 60.0) == "09:29:00"
+    assert SchedulePlanner.build_schedule_prewarm_time_rule("1h:09:30:00", 300.0) == "09:25:00"
+    assert SchedulePlanner.build_schedule_prewarm_time_rule("1d:14:45:00", 0.0) is None
+    assert SchedulePlanner.build_schedule_prewarm_time_rule("5m:14:45:00", 300.0) is None
+
+
+def test_gm_schedule_preview_uses_common_live_helper():
+    parsed = SchedulePlanner.parse_schedule_rule("1h:09:30:00")
+
+    previews = SchedulePlanner.build_schedule_preview(
+        now=datetime.datetime(2026, 4, 11, 10, 12, 0),
+        parsed_schedule=parsed,
+        prewarm_lead_seconds=300.0,
+        count=3,
+    )
+
+    assert [item["slot_dt"].strftime("%Y-%m-%d %H:%M:%S") for item in previews] == [
+        "2026-04-11 10:30:00",
+        "2026-04-11 11:30:00",
+        "2026-04-11 12:30:00",
+    ]
+    assert [item["prewarm_dt"].strftime("%Y-%m-%d %H:%M:%S") for item in previews] == [
+        "2026-04-11 10:25:00",
+        "2026-04-11 11:25:00",
+        "2026-04-11 12:25:00",
+    ]
+
+
+def test_gm_run_schedule_prewarm_is_non_blocking_and_pushes_warning(monkeypatch):
+    """
+    通用预热执行回归:
+    GM broker 走通用预热能力时，异常应只报警，不应抛出中断。
+    """
+    pushed = []
+
+    class DummyAlarm:
+        def push_text(self, content, level='INFO'):
+            pushed.append({"content": content, "level": level})
+
+    import live_trader.data_bridge.data_warm as data_warm_module
+    import live_trader.adapters.gm_broker as gm_module
+
+    monkeypatch.setattr(data_warm_module, "AlarmManager", lambda: DummyAlarm())
+    monkeypatch.setattr(gm_module, "get_cash", lambda: SimpleNamespace(available=0.0, nav=0.0))
+
+    broker = GmBrokerAdapter(context=MagicMock())
+    broker.datas = [SimpleNamespace(_name="SHSE.600000")]
+    monkeypatch.setattr(
+        broker,
+        "get_current_price",
+        lambda data: (_ for _ in ()).throw(RuntimeError("gm cold connection")),
+    )
+
+    summary = broker.run_schedule_prewarm(
+        schedule_rule="1d:14:45:00",
+        data_provider=None,
+        symbols=["SHSE.600000"],
+        timeframe="Days",
+        compression=1,
+    )
+
+    assert summary["source"] == "broker"
+    assert summary["symbol"] == "SHSE.600000"
+    assert summary["errors"] == ["broker:gm cold connection"]
+    assert len(pushed) == 1
+    assert pushed[0]["level"] == "WARNING"
+    assert "Schedule prewarm finished with errors before 1d:14:45:00" in pushed[0]["content"]
+    assert "Normal schedule will continue." in pushed[0]["content"]

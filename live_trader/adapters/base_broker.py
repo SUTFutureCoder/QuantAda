@@ -7,6 +7,7 @@ import config
 from common import log
 
 from alarms.manager import AlarmManager
+from ..data_bridge.data_warm import BrokerDataWarmBridge
 
 
 class BaseOrderProxy(ABC):
@@ -72,6 +73,8 @@ class BaseLiveBroker(ABC):
         self._ledger_lock = threading.RLock()
         # 风控锁定黑名单
         self._risk_locked_symbols = set()
+        # 预热属于组合能力，不进入 broker 继承语义。
+        self._data_warm = BrokerDataWarmBridge(self)
 
     @property
     def safety_multiplier(self):
@@ -139,6 +142,45 @@ class BaseLiveBroker(ABC):
         返回统一格式: [{'id': '123', 'symbol': 'SHSE.510300', 'direction': 'BUY', 'size': 1000}, ...]
         """
         pass
+
+    def prewarm_additional_connections(self, now=None):
+        """
+        预热附加连接钩子。
+        默认无操作，子类可按需预热行情/汇率等轻量连接。
+        """
+        return []
+
+    def alarm_schedule_prewarm_issue_once(self, schedule_rule, now=None, slot_key=None, summary=None,
+                                          error=None, level='ERROR') -> bool:
+        return self._data_warm.alarm_schedule_prewarm_issue_once(
+            schedule_rule=schedule_rule,
+            now=now,
+            slot_key=slot_key,
+            summary=summary,
+            error=error,
+            level=level,
+        )
+
+    def run_schedule_prewarm(self, schedule_rule, data_provider=None, symbols=None,
+                             timeframe='Days', compression=1, now=None) -> dict:
+        return self._data_warm.run_schedule_prewarm(
+            schedule_rule=schedule_rule,
+            data_provider=data_provider,
+            symbols=symbols,
+            timeframe=timeframe,
+            compression=compression,
+            now=now,
+        )
+
+    def prewarm_before_schedule(self, data_provider=None, symbols=None,
+                                timeframe='Days', compression=1, now=None) -> dict:
+        return self._data_warm.prewarm_before_schedule(
+            data_provider=data_provider,
+            symbols=symbols,
+            timeframe=timeframe,
+            compression=compression,
+            now=now,
+        )
 
     # --- 隔日委托清理协议（默认无操作，子类按需覆盖） ---
     def cancel_pending_order(self, order_id: str) -> bool:

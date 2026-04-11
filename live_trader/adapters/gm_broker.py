@@ -7,6 +7,7 @@ from alarms.manager import AlarmManager
 from common.log import coerce_dt
 from data_providers.gm_provider import GmDataProvider as UnifiedGmDataProvider
 from live_trader.engine import LiveTrader, on_order_status_callback
+from ..data_bridge.data_warm import SchedulePlanner
 from .base_broker import BaseLiveBroker, BaseOrderProxy
 
 try:
@@ -475,7 +476,44 @@ class GmBrokerAdapter(BaseLiveBroker):
         compression = kwargs.get('compression')
         risk_name = kwargs.get('risk')
         risk_params = kwargs.get('risk_params')
-
+        parsed_schedule = None
+        if schedule_rule:
+            try:
+                parsed_schedule = SchedulePlanner.parse_schedule_rule(schedule_rule)
+            except Exception as e:
+                print(f"[GmBroker Warning] Invalid schedule config: {schedule_rule}. Error: {e}")
+                parsed_schedule = None
+        try:
+            prewarm_lead_seconds = SchedulePlanner.parse_schedule_prewarm_lead(
+                getattr(config, 'LIVE_SCHEDULE_PREWARM_LEAD', 0)
+            )
+        except Exception as e:
+            print(f"[GmBroker Warning] Invalid LIVE_SCHEDULE_PREWARM_LEAD: {e}. Prewarm disabled.")
+            prewarm_lead_seconds = 0.0
+        prewarm_time_rule = None
+        if schedule_rule and prewarm_lead_seconds > 0:
+            if parsed_schedule is None:
+                print(
+                    "[GmBroker Warning] Prewarm currently supports schedule format "
+                    "1d|Nm|Nh:HH:MM[:SS]. Prewarm disabled."
+                )
+            elif prewarm_lead_seconds >= float(parsed_schedule.get('interval_seconds') or 0.0):
+                print(
+                    f"[GmBroker Warning] LIVE_SCHEDULE_PREWARM_LEAD={prewarm_lead_seconds:.0f}s is not smaller than "
+                    f"schedule interval {float(parsed_schedule.get('interval_seconds') or 0.0):.0f}s. "
+                    "Prewarm disabled."
+                )
+            else:
+                prewarm_time_rule = SchedulePlanner.build_schedule_prewarm_time_rule(
+                    schedule_rule,
+                    prewarm_lead_seconds,
+                )
+                if prewarm_time_rule:
+                    prewarm_rule_type = f"{parsed_schedule['freq_n']}{parsed_schedule['freq_unit']}"
+                    print(
+                        f"[GmBroker] Prewarm enabled: trigger {prewarm_lead_seconds:.0f}s before schedule "
+                        f"({prewarm_rule_type} @ {prewarm_time_rule})"
+                    )
         def _pick_probe_symbol(raw_symbols):
             if isinstance(raw_symbols, (list, tuple)):
                 for s in raw_symbols:
@@ -626,12 +664,50 @@ class GmBrokerAdapter(BaseLiveBroker):
                 if mode == MODE_LIVE and schedule_rule:
                     try:
                         from gm.api import schedule
+                        if parsed_schedule:
+                            try:
+                                SchedulePlanner.print_schedule_preview(
+                                    now=datetime.datetime.now(),
+                                    parsed_schedule=parsed_schedule,
+                                    prewarm_lead_seconds=prewarm_lead_seconds,
+                                    tz_info="Server Local Time",
+                                    count=3,
+                                    prefix="[GmBroker]",
+                                )
+                            except Exception as e:
+                                print(f"[GmBroker Warning] Failed to compute schedule preview: {e}")
                         # 解析格式 "1d:14:50:00" -> freq="1d", time="14:50:00"
                         if ':' in schedule_rule:
                             rule_type, rule_time = schedule_rule.split(':', 1)
                             print(f"[GmBroker] Schedule enabled (from config): {rule_type} @ {rule_time}")
                             print(f"            策略将在指定时间主动运行，忽略 on_bar 事件。")
 
+                            if prewarm_time_rule:
+                                def _run_prewarm(schedule_ctx):
+                                    strategy = getattr(schedule_ctx, 'strategy_instance', None)
+                                    if strategy is None:
+                                        print("[GmBroker Warning] Prewarm skipped: strategy instance unavailable.")
+                                        return
+                                    prewarm_symbols = [d._name for d in getattr(strategy.broker, 'datas', [])]
+                                    if not prewarm_symbols:
+                                        prewarm_symbols = current_symbols or symbols
+                                    summary = strategy.broker.run_schedule_prewarm(
+                                        schedule_rule=schedule_rule,
+                                        data_provider=strategy.data_provider,
+                                        symbols=prewarm_symbols,
+                                        timeframe=strategy.config.get('timeframe', 'Days'),
+                                        compression=strategy.config.get('compression', 1),
+                                        now=getattr(schedule_ctx, 'now', None),
+                                    )
+                                    print(
+                                        "[GmBroker] Prewarm Finished. "
+                                        f"source={summary.get('source')}, "
+                                        f"symbol={summary.get('symbol')}, "
+                                        f"extras={summary.get('extras')}, "
+                                        f"errors={summary.get('errors')}"
+                                    )
+
+                                schedule(schedule_func=_run_prewarm, date_rule=rule_type, time_rule=prewarm_time_rule)
                             schedule(schedule_func=trader.run, date_rule=rule_type, time_rule=rule_time)
                             ctx.use_schedule = True
                         else:

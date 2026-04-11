@@ -25,6 +25,17 @@ IGNORED_SYMBOLS = ['SGOV', 'BIL', 'USFR', 'SHY']
 # - True : 保留隔日委托，不做自动清理
 KEEP_OVERNIGHT_ORDERS = False
 
+# 正式 schedule 前的轻量预热提前量：
+# - 0: 关闭预热（默认）
+# - 支持秒数值，或带单位字符串：'1s'、'1m'、'5m'、'1h'
+# - 作用：在正式 schedule 触发前，先对第一个标的做一次轻量数据预热；
+#   IB 实盘还会额外预热 USDHKD 外汇报价，降低冷连接/沉睡连接导致的首轮失败概率。
+# - 注意：对于 1m/5m/15m/30m/1h 这类固定频率 schedule，预热是按正式 schedule 的下一个 slot 逆推，
+#   因此该值必须严格小于 schedule 间隔，否则会自动禁用预热。
+# - 用法示例：
+#   LIVE_SCHEDULE_PREWARM_LEAD = '1m'
+LIVE_SCHEDULE_PREWARM_LEAD = 0
+
 
 # --- 数据源配置 ---
 # Tushare API Token
@@ -90,6 +101,10 @@ BROKER_ENVIRONMENTS = {
             'strategy_id': 'xxx',
             'token': 'xxx',
             'serv_addr': '127.0.0.1:7001',
+            # 支持:
+            # - 1d:14:45:00   每日固定时刻
+            # - 5m:09:30:00   以 09:30:00 为 anchor，每 5 分钟一个 slot
+            # - 1h:09:30:00   以 09:30:00 为 anchor，每 1 小时一个 slot
             'schedule': '1d:14:45:00'
         },
         'real': {
@@ -103,6 +118,10 @@ BROKER_ENVIRONMENTS = {
     # IB 配置
     "ib_broker": {
         'sim': {  # 模拟盘/Paper Trading
+            # IB 当前也支持:
+            # - 1d:15:45:00
+            # - 5m:09:30:00
+            # - 1h:09:30:00
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
             # 实盘特定不卖的长线资产

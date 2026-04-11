@@ -18,6 +18,7 @@ import config
 from data_providers.csv_provider import CsvDataProvider
 from data_providers.manager import DataManager
 from data_providers.ibkr_provider import IbkrDataProvider
+from ..data_bridge.data_warm import SchedulePlanner
 from .base_broker import BaseLiveBroker, BaseOrderProxy
 
 
@@ -1197,51 +1198,9 @@ class IBBrokerAdapter(BaseLiveBroker):
                             pair_symbol = f"{item.currency}USD"
                             inverse_pair = True
 
-                        ticker = self._fx_tickers.get(pair_symbol)
-                        if not ticker:
-                            contract = Forex(pair_symbol)
-                            if not in_loop:
-                                self.ib.qualifyContracts(contract)
-                            ticker = self.ib.reqMktData(contract, '', False, False)
-                            self._fx_tickers[pair_symbol] = ticker
-                            if not in_loop:
-                                start_wait = datetime.datetime.now()
-                                while (datetime.datetime.now() - start_wait).total_seconds() < 1.0:
-                                    self.ib.sleep(0.1)
-                                    if self._extract_rate_from_ticker(ticker) > 0:
-                                        break
-
-                        exchange_rate = self._extract_rate_from_ticker(ticker)
-
-                        # LKGR 和 历史兜底
-                        if not (exchange_rate > 0):
-                            if pair_symbol in self._last_valid_fx_rates:
-                                exchange_rate = self._last_valid_fx_rates[pair_symbol]
-                            else:
-                                if not in_loop:
-                                    now_utc = datetime.datetime.now(datetime.timezone.utc)
-                                    retry_not_before = self._fx_rate_retry_not_before.get(pair_symbol)
-                                    if not retry_not_before or now_utc >= retry_not_before:
-                                        try:
-                                            bars = self.ib.reqHistoricalData(
-                                                Forex(pair_symbol), endDateTime='', durationStr='2 D',
-                                                barSizeSetting='1 day', whatToShow='MIDPOINT', useRTH=False,
-                                                timeout=3.0
-                                            )
-                                            if bars:
-                                                exchange_rate = bars[-1].close
-                                                self._fx_rate_retry_not_before.pop(pair_symbol, None)
-                                            else:
-                                                self._fx_rate_retry_not_before[pair_symbol] = (
-                                                    now_utc + datetime.timedelta(minutes=5)
-                                                )
-                                        except Exception:
-                                            self._fx_rate_retry_not_before[pair_symbol] = (
-                                                now_utc + datetime.timedelta(minutes=5)
-                                            )
+                        exchange_rate = self._load_fx_rate(pair_symbol, in_loop=in_loop)
 
                         if exchange_rate > 0:
-                            self._last_valid_fx_rates[pair_symbol] = exchange_rate
                             if inverse_pair:
                                 total_usd += val * exchange_rate
                             else:
@@ -1280,6 +1239,75 @@ class IBBrokerAdapter(BaseLiveBroker):
             elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
                 return (ticker.bid + ticker.ask) / 2
         return rate
+
+    def _get_or_request_fx_ticker(self, pair_symbol: str, in_loop: bool = None):
+        if in_loop is None:
+            in_loop = self._in_async_task()
+        ticker = self._fx_tickers.get(pair_symbol)
+        if ticker:
+            return ticker
+
+        contract = Forex(pair_symbol)
+        if not in_loop:
+            self.ib.qualifyContracts(contract)
+        ticker = self.ib.reqMktData(contract, '', False, False)
+        self._fx_tickers[pair_symbol] = ticker
+        if not in_loop:
+            start_wait = datetime.datetime.now()
+            while (datetime.datetime.now() - start_wait).total_seconds() < 1.0:
+                self.ib.sleep(0.1)
+                if self._extract_rate_from_ticker(ticker) > 0:
+                    break
+        return ticker
+
+    def _load_fx_rate(self, pair_symbol: str, in_loop: bool = None) -> float:
+        if not hasattr(self, 'ib') or not self.ib:
+            return 0.0
+        if in_loop is None:
+            in_loop = self._in_async_task()
+
+        exchange_rate = 0.0
+        try:
+            ticker = self._get_or_request_fx_ticker(pair_symbol, in_loop=in_loop)
+            exchange_rate = self._extract_rate_from_ticker(ticker)
+        except Exception:
+            exchange_rate = 0.0
+
+        if not (exchange_rate > 0):
+            if pair_symbol in self._last_valid_fx_rates:
+                exchange_rate = self._last_valid_fx_rates[pair_symbol]
+            elif not in_loop:
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                retry_not_before = self._fx_rate_retry_not_before.get(pair_symbol)
+                if not retry_not_before or now_utc >= retry_not_before:
+                    try:
+                        bars = self.ib.reqHistoricalData(
+                            Forex(pair_symbol), endDateTime='', durationStr='2 D',
+                            barSizeSetting='1 day', whatToShow='MIDPOINT', useRTH=False,
+                            timeout=3.0
+                        )
+                        if bars:
+                            exchange_rate = bars[-1].close
+                            self._fx_rate_retry_not_before.pop(pair_symbol, None)
+                        else:
+                            self._fx_rate_retry_not_before[pair_symbol] = (
+                                now_utc + datetime.timedelta(minutes=5)
+                            )
+                    except Exception:
+                        self._fx_rate_retry_not_before[pair_symbol] = (
+                            now_utc + datetime.timedelta(minutes=5)
+                        )
+
+        if exchange_rate > 0:
+            self._last_valid_fx_rates[pair_symbol] = exchange_rate
+            return float(exchange_rate)
+        return 0.0
+
+    def prewarm_additional_connections(self, now=None):
+        warmed = []
+        if self._load_fx_rate('USDHKD', in_loop=False) > 0:
+            warmed.append('USDHKD')
+        return warmed
 
     # 2. 查持仓
     def get_position(self, data):
@@ -1584,33 +1612,6 @@ class IBBrokerAdapter(BaseLiveBroker):
         return IBOrderProxy(trade, data=data)
 
     @staticmethod
-    def _parse_daily_schedule(schedule_rule: str):
-        """
-        解析每日调度规则，支持:
-        - 1d:HH:MM
-        - 1d:HH:MM:SS
-        返回 (hour, minute, second, time_str)，无效则返回 None。
-        """
-        if not schedule_rule or not isinstance(schedule_rule, str):
-            return None
-        if not schedule_rule.startswith('1d:'):
-            return None
-
-        _, target_time_str = schedule_rule.split(':', 1)
-        parts = target_time_str.split(':')
-        if len(parts) not in (2, 3):
-            raise ValueError(f"Invalid schedule time format: {target_time_str}")
-
-        target_h = int(parts[0])
-        target_m = int(parts[1])
-        target_s = int(parts[2]) if len(parts) > 2 else 0
-
-        if not (0 <= target_h <= 23 and 0 <= target_m <= 59 and 0 <= target_s <= 59):
-            raise ValueError(f"Invalid schedule time value: {target_time_str}")
-
-        return target_h, target_m, target_s, target_time_str
-
-    @staticmethod
     def _should_trigger_daily_schedule(now: datetime.datetime, target_h: int, target_m: int, target_s: int,
                                        last_schedule_run_date: str):
         """
@@ -1700,15 +1701,36 @@ class IBBrokerAdapter(BaseLiveBroker):
         else:
             print(f">>> ⚠️ No Schedule Found: Strategy will NOT run automatically. (Heartbeat Only)")
 
-        parsed_daily_schedule = None
+        parsed_schedule = None
         if schedule_rule:
             try:
-                parsed_daily_schedule = cls._parse_daily_schedule(schedule_rule)
-                if parsed_daily_schedule is None:
-                    print(f">>> ⚠️ Unsupported schedule format for IB adapter: {schedule_rule}. Expected: 1d:HH:MM[:SS]")
+                parsed_schedule = SchedulePlanner.parse_schedule_rule(schedule_rule)
+                if parsed_schedule is None:
+                    print(
+                        f">>> ⚠️ Unsupported schedule format for IB adapter: {schedule_rule}. "
+                        "Expected: 1d|Nm|Nh:HH:MM[:SS]"
+                    )
             except Exception as e:
                 print(f">>> ⚠️ Invalid schedule config: {schedule_rule}. Error: {e}")
-                parsed_daily_schedule = None
+                parsed_schedule = None
+
+        try:
+            prewarm_lead_seconds = SchedulePlanner.parse_schedule_prewarm_lead(
+                getattr(config, 'LIVE_SCHEDULE_PREWARM_LEAD', 0)
+            )
+        except Exception as e:
+            print(f">>> ⚠️ Invalid LIVE_SCHEDULE_PREWARM_LEAD: {e}. Prewarm disabled.")
+            prewarm_lead_seconds = 0.0
+        if parsed_schedule and prewarm_lead_seconds > 0:
+            interval_seconds = float(parsed_schedule.get('interval_seconds') or 0.0)
+            if interval_seconds <= 0 or prewarm_lead_seconds >= interval_seconds:
+                print(
+                    f">>> ⚠️ LIVE_SCHEDULE_PREWARM_LEAD={prewarm_lead_seconds:.0f}s is not smaller than "
+                    f"schedule interval {interval_seconds:.0f}s. Prewarm disabled."
+                )
+                prewarm_lead_seconds = 0.0
+        if parsed_schedule and prewarm_lead_seconds > 0:
+            print(f">>> 🔥 Prewarm enabled: trigger {prewarm_lead_seconds:.0f}s before schedule")
         # 1. 创建全局唯一的 IB 实例
         ib = IB()
 
@@ -1722,14 +1744,17 @@ class IBBrokerAdapter(BaseLiveBroker):
         init_now = datetime.datetime.now(target_tz) if target_tz else datetime.datetime.now()
         ctx.now = pd.Timestamp(init_now)
 
-        if parsed_daily_schedule:
+        if parsed_schedule:
             try:
-                target_h, target_m, target_s, _ = parsed_daily_schedule
-                next_run = init_now.replace(hour=target_h, minute=target_m, second=target_s, microsecond=0)
-                if next_run <= init_now:
-                    next_run = next_run + datetime.timedelta(days=1)
                 tz_info = timezone_str if timezone_str else "Server Local Time"
-                print(f">>> Next schedule: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (Zone: {tz_info})")
+                SchedulePlanner.print_schedule_preview(
+                    now=init_now,
+                    parsed_schedule=parsed_schedule,
+                    prewarm_lead_seconds=prewarm_lead_seconds,
+                    tz_info=tz_info,
+                    count=3,
+                    prefix=">>>",
+                )
             except Exception as e:
                 print(f">>> ⚠️ Failed to compute next schedule time: {e}")
 
@@ -1789,7 +1814,8 @@ class IBBrokerAdapter(BaseLiveBroker):
         ib.orderStatusEvent += on_trade_update
 
         # --- 调度器状态变量 ---
-        last_schedule_run_date = None  # 记录上次运行的日期 (防止同一分钟重复运行)
+        last_schedule_run_key = None
+        last_prewarm_run_key = None
         is_first_connect = True
 
         # --- 3. 进入“不死鸟”主循环 ---
@@ -1877,16 +1903,50 @@ class IBBrokerAdapter(BaseLiveBroker):
                     # 2. 执行策略
                     ctx.now = pd.Timestamp(now)
 
-                    # (B) 调度检查逻辑
-                    if parsed_daily_schedule:
+                    if parsed_schedule and prewarm_lead_seconds > 0:
                         try:
-                            target_h, target_m, target_s, target_time_str = parsed_daily_schedule
-                            should_run, delta, current_date_str = cls._should_trigger_daily_schedule(
+                            should_prewarm, seconds_to_schedule, schedule_slot_key = (
+                                SchedulePlanner.should_trigger_schedule_prewarm_for_rule(
+                                    now=now,
+                                    parsed_schedule=parsed_schedule,
+                                    lead_seconds=prewarm_lead_seconds,
+                                    last_prewarm_run_key=last_prewarm_run_key,
+                                    last_schedule_run_key=last_schedule_run_key,
+                                )
+                            )
+                            if should_prewarm:
+                                timeframe = trader.config.get('timeframe', 'Days')
+                                compression = trader.config.get('compression', 1)
+                                print(
+                                    f"\n>>> 🔥 Prewarm Triggered: {schedule_rule} "
+                                    f"(T-{seconds_to_schedule:.2f}s) <<<"
+                                )
+                                summary = trader.broker.run_schedule_prewarm(
+                                    schedule_rule=schedule_rule,
+                                    data_provider=trader.data_provider,
+                                    symbols=target_symbols,
+                                    timeframe=timeframe,
+                                    compression=compression,
+                                    now=ctx.now,
+                                )
+                                last_prewarm_run_key = schedule_slot_key
+                                print(
+                                    ">>> Prewarm Finished. "
+                                    f"source={summary.get('source')}, "
+                                    f"symbol={summary.get('symbol')}, "
+                                    f"extras={summary.get('extras')}, "
+                                    f"errors={summary.get('errors')}\n"
+                                )
+                        except Exception as e:
+                            print(f"[Prewarm Error] Check failed: {e}")
+
+                    # (B) 调度检查逻辑
+                    if parsed_schedule:
+                        try:
+                            should_run, delta, schedule_slot_key = SchedulePlanner.should_trigger_schedule(
                                 now=now,
-                                target_h=target_h,
-                                target_m=target_m,
-                                target_s=target_s,
-                                last_schedule_run_date=last_schedule_run_date
+                                parsed_schedule=parsed_schedule,
+                                last_schedule_run_key=last_schedule_run_key,
                             )
                             if should_run:
                                 print(
@@ -1896,8 +1956,12 @@ class IBBrokerAdapter(BaseLiveBroker):
                                 trader.run(ctx)
 
                                 # === 更新状态锁 ===
-                                last_schedule_run_date = current_date_str
-                                print(f">>> Run Finished. Next run: Tomorrow {target_time_str}\n")
+                                last_schedule_run_key = schedule_slot_key
+                                next_run = SchedulePlanner.resolve_next_schedule_slot(
+                                    now + datetime.timedelta(seconds=1),
+                                    parsed_schedule,
+                                )
+                                print(f">>> Run Finished. Next run: {next_run.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
                         except Exception as e:
                             print(f"[Schedule Error] Check failed: {e}")
