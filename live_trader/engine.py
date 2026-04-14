@@ -79,6 +79,8 @@ class _RiskControlChain:
 
 class LiveTrader:
     """实盘交易引擎"""
+    _LIVE_REFRESH_MAX_ATTEMPTS = 3
+    _LIVE_REFRESH_RETRY_SLEEP_SECONDS = 1.0
 
     def __init__(self, config: dict):
         self.user_config = config
@@ -369,17 +371,19 @@ class LiveTrader:
             # 只有在实盘模式下，每次 schedule 触发 run 时，才需要重新拉取数据
             if self.broker.is_live:
                 print("[Engine] Live Mode: Refreshing data...")
-                refresh_stats = self._refresh_live_data(context)
+                refresh_stats = self._refresh_live_data_with_retry(context)
                 total_feeds = int(refresh_stats.get('total_feeds', 0))
                 updated_feeds = int(refresh_stats.get('updated_feeds', 0))
                 failed_feeds = int(refresh_stats.get('failed_feeds', 0))
+                refresh_attempts = int(refresh_stats.get('attempts_used', 1) or 1)
 
                 # 刷新质量门控:
                 # - 只要有任一标的刷新失败，直接跳过本轮，避免缺失数据触发错误调仓。
                 if total_feeds > 0 and failed_feeds > 0:
                     warn_msg = (
                         f"[Engine Error] Live data refresh incomplete: "
-                        f"{updated_feeds}/{total_feeds} updated, {failed_feeds} failed. Skipping this run."
+                        f"{updated_feeds}/{total_feeds} updated, {failed_feeds} failed "
+                        f"after {refresh_attempts} attempts. Skipping this run."
                     )
                     print(warn_msg)
                     if hasattr(self, 'alarm_manager'):
@@ -387,6 +391,7 @@ class LiveTrader:
                             (
                                 f"实盘报错并跳过: 当轮刷新存在缺失 "
                                 f"({updated_feeds}/{total_feeds} 成功, {failed_feeds} 失败)。"
+                                f"已重试 {refresh_attempts} 次仍未恢复。"
                             ),
                             level='ERROR'
                         )
@@ -585,6 +590,58 @@ class LiveTrader:
         # 无状态优先：同一自然日只清理一次，避免分钟级重复干扰。
         self._overnight_cleanup_done_on = run_date
         return
+
+    def _refresh_live_data_with_retry(self, context):
+        try:
+            max_attempts = max(1, int(self._LIVE_REFRESH_MAX_ATTEMPTS))
+        except Exception:
+            max_attempts = 1
+        try:
+            retry_sleep_seconds = max(0.0, float(self._LIVE_REFRESH_RETRY_SLEEP_SECONDS))
+        except Exception:
+            retry_sleep_seconds = 0.0
+
+        last_stats = {
+            'total_feeds': 0,
+            'updated_feeds': 0,
+            'failed_feeds': 0,
+        }
+        attempts_used = 0
+
+        for attempt in range(1, max_attempts + 1):
+            attempts_used = attempt
+            refresh_stats = self._refresh_live_data(context) or {}
+            total_feeds = int(refresh_stats.get('total_feeds', 0) or 0)
+            updated_feeds = int(refresh_stats.get('updated_feeds', 0) or 0)
+            failed_feeds = int(refresh_stats.get('failed_feeds', 0) or 0)
+            last_stats = {
+                'total_feeds': total_feeds,
+                'updated_feeds': updated_feeds,
+                'failed_feeds': failed_feeds,
+            }
+
+            if total_feeds <= 0 or failed_feeds <= 0:
+                if attempt > 1:
+                    print(
+                        "[Engine] Live data refresh recovered "
+                        f"on attempt {attempt}/{max_attempts}: "
+                        f"{updated_feeds}/{total_feeds} updated, {failed_feeds} failed."
+                    )
+                break
+
+            print(
+                "[Engine Warning] Live data refresh incomplete "
+                f"(attempt {attempt}/{max_attempts}): "
+                f"{updated_feeds}/{total_feeds} updated, {failed_feeds} failed."
+            )
+            if attempt < max_attempts:
+                print("[Engine] Retrying live data refresh...")
+                if retry_sleep_seconds > 0:
+                    time.sleep(retry_sleep_seconds)
+
+        last_stats['attempts_used'] = attempts_used
+        last_stats['max_attempts'] = max_attempts
+        return last_stats
 
     def _confirm_pending_orders_cleared(self, max_checks=6, sleep_seconds=0.5):
         if not hasattr(self.broker, 'get_pending_orders'):

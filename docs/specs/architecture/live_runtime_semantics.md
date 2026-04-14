@@ -39,9 +39,10 @@
 
 ## 5. Live Self-Healing Baseline
 1. Live data refresh 不完整时，不执行当轮策略。
-2. `datas` 为空时，尝试恢复历史数据与 data feed。
-3. 若策略层残留 `strategy.order`，但柜台和 broker 内部已无在途状态，则自动清锁。
-4. 风控支持多模块链式挂载。
-5. GM / IB schedule 运行支持 prewarm；相关改动不得破坏 `LIVE_SCHEDULE_PREWARM_LEAD` 语义。
-6. schedule 附近的 IM 报警推送支持时间窗限制；默认读取 `LIVE_SCHEDULE_ALARM_WINDOW`，连接配置中的 `alarm_window` 可覆盖全局默认值。
-7. `STARTED` / `STOPPED` / `DEAD` 等生命周期消息，以及显式标注为 `plan` 的执行计划消息，不受 schedule 报警时间窗限制。
+2. 在判定跳过前，可在同一轮内对 live data refresh 做有限次重试；若仍不完整，再跳过本轮并告警。
+3. `datas` 为空时，尝试恢复历史数据与 data feed。
+4. 若策略层残留 `strategy.order`，但柜台和 broker 内部已无在途状态，则自动清锁。
+5. 风控支持多模块链式挂载。
+6. GM / IB schedule 运行支持 prewarm；相关改动不得破坏 `LIVE_SCHEDULE_PREWARM_LEAD` 语义。
+7. schedule 附近的 IM 报警推送支持时间窗限制；默认读取 `LIVE_SCHEDULE_ALARM_WINDOW`，连接配置中的 `alarm_window` 可覆盖全局默认值。
+8. `STARTED` / `STOPPED` / `DEAD` 等生命周期消息，以及显式标注为 `plan` 的执行计划消息，不受 schedule 报警时间窗限制。

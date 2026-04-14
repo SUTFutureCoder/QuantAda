@@ -1564,6 +1564,122 @@ def test_live_run_skips_when_recovery_still_has_no_data(monkeypatch):
     assert engine.strategy.next_calls == 0, "无数据时应跳过策略执行，防止误报空仓计划。"
 
 
+def test_live_run_retries_refresh_and_continues_after_recovery(monkeypatch):
+    """
+    实盘刷新有限重试:
+    若首轮 refresh 缺失，但有限次重试内恢复完整，应继续执行本轮策略。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+    monkeypatch.setattr(engine_module.time, "sleep", lambda _: None)
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+
+    class DummyAlarmManager:
+        def __init__(self):
+            self.text_calls = []
+
+        def push_text(self, content, level='INFO'):
+            self.text_calls.append({"content": content, "level": level})
+
+    dummy_alarm = DummyAlarmManager()
+    engine.alarm_manager = dummy_alarm
+
+    refresh_calls = {"count": 0}
+
+    def _flaky_refresh(_ctx):
+        refresh_calls["count"] += 1
+        if refresh_calls["count"] == 1:
+            return {"total_feeds": 2, "updated_feeds": 1, "failed_feeds": 1}
+        return {"total_feeds": 2, "updated_feeds": 2, "failed_feeds": 0}
+
+    engine._refresh_live_data = _flaky_refresh
+
+    engine.run(context)
+
+    assert refresh_calls["count"] == 2, "refresh 缺失后应在本轮内进行有限重试。"
+    assert engine.strategy.next_calls == 1, "重试恢复完整后应继续执行策略 next。"
+    assert dummy_alarm.text_calls == [], "重试恢复成功时不应推送最终失败报警。"
+
+
+def test_live_run_skips_after_refresh_retry_exhausted(monkeypatch):
+    """
+    实盘刷新有限重试:
+    若多次 refresh 仍存在缺失，应在重试耗尽后跳过本轮并报警一次。
+    """
+    import live_trader.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module.LiveTrader,
+        "_load_adapter_classes",
+        lambda self, platform: (MockEngineBroker, DummyDataProvider),
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "get_class_from_name",
+        lambda class_name, paths: CounterStrategy,
+    )
+    monkeypatch.setattr(engine_module.time, "sleep", lambda _: None)
+
+    cfg = {
+        "strategy_name": "CounterStrategy",
+        "platform": "mock_engine",
+        "symbols": ["SHSE.600000"],
+        "cash": 100000.0,
+        "params": {},
+    }
+
+    engine = LiveTrader(cfg)
+    context = MockContext(now=datetime(2026, 2, 17, 9, 30, 0))
+    engine.init(context)
+
+    class DummyAlarmManager:
+        def __init__(self):
+            self.text_calls = []
+
+        def push_text(self, content, level='INFO'):
+            self.text_calls.append({"content": content, "level": level})
+
+    dummy_alarm = DummyAlarmManager()
+    engine.alarm_manager = dummy_alarm
+
+    refresh_calls = {"count": 0}
+
+    def _always_incomplete_refresh(_ctx):
+        refresh_calls["count"] += 1
+        return {"total_feeds": 2, "updated_feeds": 1, "failed_feeds": 1}
+
+    engine._refresh_live_data = _always_incomplete_refresh
+
+    engine.run(context)
+
+    assert refresh_calls["count"] == engine._LIVE_REFRESH_MAX_ATTEMPTS, "refresh 应只重试固定次数。"
+    assert engine.strategy.next_calls == 0, "重试耗尽仍缺失时应跳过策略执行。"
+    assert len(dummy_alarm.text_calls) == 1, "重试耗尽后应只推送一次最终失败报警。"
+    assert "已重试" in dummy_alarm.text_calls[0]["content"]
+    assert dummy_alarm.text_calls[0]["level"] == "ERROR"
+
+
 def test_live_run_continues_when_overnight_cleanup_barrier_not_cleared_after_retries(monkeypatch):
     """
     隔夜撤单短确认屏障:
