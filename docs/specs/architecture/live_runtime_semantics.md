@@ -43,3 +43,4 @@
 3. 若策略层残留 `strategy.order`，但柜台和 broker 内部已无在途状态，则自动清锁。
 4. 风控支持多模块链式挂载。
 5. GM / IB schedule 运行支持 prewarm；相关改动不得破坏 `LIVE_SCHEDULE_PREWARM_LEAD` 语义。
+6. schedule 附近的 IM 报警推送支持时间窗限制；默认读取 `LIVE_SCHEDULE_ALARM_WINDOW`，连接配置中的 `alarm_window` 可覆盖全局默认值。

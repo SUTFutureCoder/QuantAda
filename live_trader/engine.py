@@ -1328,7 +1328,10 @@ def launch_live(broker_name: str, conn_name: str, strategy_path: str, params: di
             conn_id=identity,
             strategy=strategy_path,
             params=params,
-            market_scope=market_scope
+            market_scope=market_scope,
+            schedule_rule=conn_cfg.get('schedule'),
+            schedule_timezone=conn_cfg.get('timezone'),
+            alarm_window=conn_cfg.get('alarm_window'),
         )
 
         # 净化 sys.argv

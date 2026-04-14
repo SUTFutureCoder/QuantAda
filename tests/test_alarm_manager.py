@@ -1,3 +1,4 @@
+import datetime
 import time
 
 import pytest
@@ -150,3 +151,132 @@ def test_exception_log_cooldown_merges_counts_across_windows(fresh_alarm_manager
 def test_format_market_scope_prefers_selector_only():
     scope = _format_market_scope(selection="cn_topn_selector", symbols=["SHSE.510300", "SZSE.159915"])
     assert scope == "selector=cn_topn_selector"
+
+
+def test_parse_schedule_alarm_window_supports_mixed_units(fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+
+    before_seconds, after_seconds = mgr._parse_schedule_alarm_window("1h:30s")
+    assert before_seconds == pytest.approx(3600.0)
+    assert after_seconds == pytest.approx(30.0)
+
+    before_seconds, after_seconds = mgr._parse_schedule_alarm_window("5m:15m")
+    assert before_seconds == pytest.approx(300.0)
+    assert after_seconds == pytest.approx(900.0)
+
+
+def test_schedule_alarm_window_uses_global_default_when_runtime_value_missing(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    monkeypatch.setattr(manager_module.config, "LIVE_SCHEDULE_ALARM_WINDOW", "30m:15m")
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="1d:15:45:00",
+        alarm_window=None,
+    )
+
+    assert mgr._schedule_alarm_window_before_seconds == pytest.approx(1800.0)
+    assert mgr._schedule_alarm_window_after_seconds == pytest.approx(900.0)
+
+
+def test_schedule_alarm_window_zero_zero_means_unrestricted(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="1d:15:45:00",
+        alarm_window="0:0",
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_current_schedule_alarm_time",
+        lambda: datetime.datetime(2026, 4, 14, 3, 0, 0),
+    )
+
+    mgr.push_text("夜间报警仍应放行", level="WARNING")
+    assert _wait_until(lambda: len(fake.text_calls) == 1), "0:0 应视为不限制报警窗口。"
+
+
+def test_schedule_alarm_window_blocks_text_outside_window(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="1d:15:45:00",
+        alarm_window="30m:15m",
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_current_schedule_alarm_time",
+        lambda: datetime.datetime(2026, 4, 14, 14, 0, 0),
+    )
+
+    mgr.push_text("窗口外报警", level="WARNING")
+    time.sleep(0.2)
+    assert fake.text_calls == [], "正式 schedule 窗口外的 text 报警不应推送到 IM。"
+
+
+def test_schedule_alarm_window_allows_text_inside_interval_slot(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="5m:09:30:00",
+        alarm_window="1m:30s",
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_current_schedule_alarm_time",
+        lambda: datetime.datetime(2026, 4, 14, 9, 34, 20),
+    )
+
+    mgr.push_text("slot 前 40 秒报警", level="WARNING")
+    assert _wait_until(lambda: len(fake.text_calls) == 1), "固定频率 slot 窗口内的报警应正常推送。"
+
+
+def test_schedule_alarm_window_blocks_exception_intake_outside_window(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+    mgr._exception_aggregation_window_seconds = 0.2
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="1d:15:45:00",
+        alarm_window="30m:15m",
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_current_schedule_alarm_time",
+        lambda: datetime.datetime(2026, 4, 14, 20, 0, 0),
+    )
+
+    mgr.push_exception("IB Kernel Error", "Error 1100")
+    time.sleep(0.5)
+    assert fake.exception_calls == [], "窗口外异常不应进入 IM 聚合/推送流程。"

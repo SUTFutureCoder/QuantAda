@@ -36,6 +36,19 @@ KEEP_OVERNIGHT_ORDERS = False
 #   LIVE_SCHEDULE_PREWARM_LEAD = '1m'
 LIVE_SCHEDULE_PREWARM_LEAD = 0
 
+# 正式 schedule 前后的报警推送时间窗：
+# - 0:0 表示不限制报警窗口（默认）
+# - 格式为 before:after，支持秒/分/时自由组合：
+#   '30s:15m'、'5m:30s'、'30m:15m'、'1h:30m'
+# - 作用：仅在正式 schedule 生效时间点附近，将报警推送到 IM；
+#   超出窗口的报警本地仍会打印，但不推送到钉钉/企业微信，降低非交易时段噪音。
+# - 对于固定频率 schedule（如 5m/1h），窗口同样基于正式 slot 计算。
+# - 若具体连接配置（BROKER_ENVIRONMENTS -> xxx -> conn -> alarm_window）提供该字段，
+#   则连接级配置优先级更高，可覆盖这里的全局默认值。
+# - 用法示例：
+#   LIVE_SCHEDULE_ALARM_WINDOW = '30m:15m'
+LIVE_SCHEDULE_ALARM_WINDOW = '0:0'
+
 
 # --- 数据源配置 ---
 # Tushare API Token
@@ -105,13 +118,16 @@ BROKER_ENVIRONMENTS = {
             # - 1d:14:45:00   每日固定时刻
             # - 5m:09:30:00   以 09:30:00 为 anchor，每 5 分钟一个 slot
             # - 1h:09:30:00   以 09:30:00 为 anchor，每 1 小时一个 slot
-            'schedule': '1d:14:45:00'
+            'schedule': '1d:14:45:00',
+            # 可选：覆盖 LIVE_SCHEDULE_ALARM_WINDOW
+            # 'alarm_window': '30m:15m',
         },
         'real': {
             'strategy_id': 'xxx',
             'token': 'xxx',
             'serv_addr': '127.0.0.1:7001',
-            'schedule': '1d:14:45:00'
+            'schedule': '1d:14:45:00',
+            # 'alarm_window': '30m:15m',
         }
     },
 
@@ -124,12 +140,14 @@ BROKER_ENVIRONMENTS = {
             # - 1h:09:30:00
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
+            # 'alarm_window': '30m:15m',
             # 实盘特定不卖的长线资产
             # 'ignored_symbols': ['AAPL', 'TSLA']
         },
         'real': {  # 实盘/Docker Gateway
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
+            # 'alarm_window': '30m:15m',
             # 实盘特定不卖的长线资产
             # 'ignored_symbols': ['AAPL', 'TSLA']
         }

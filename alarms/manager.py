@@ -1,11 +1,14 @@
 import atexit
+import datetime
 import math
+import pandas as pd
 import signal
 import socket
 import sys
 import threading
 import time
 from typing import Dict, Tuple
+from zoneinfo import ZoneInfo
 
 import config
 from .dingtalk_alarm import DingTalkAlarm
@@ -44,6 +47,11 @@ class AlarmManager:
         self.host_name = socket.gethostname()
         self.context_tag = ""  # 例如: [IB:7497]
         self.context_detail = ""  # 例如: 策略参数详情
+        self._schedule_alarm_rule = None
+        self._parsed_schedule_alarm_rule = None
+        self._schedule_alarm_timezone = ""
+        self._schedule_alarm_window_before_seconds = 0.0
+        self._schedule_alarm_window_after_seconds = 0.0
 
         # 异常报警聚合: 默认开启，固定 60 秒窗口内合并相同(context, error)
         self._exception_aggregation_window_seconds = self._EXCEPTION_AGGREGATION_WINDOW_SECONDS
@@ -66,21 +74,149 @@ class AlarmManager:
         print(f"[AlarmManager] Initialized with {len(self.alarms)} channels.")
 
     # 供 Launcher 调用，注入身份信息
-    def set_runtime_context(self, broker, conn_id, strategy, params, market_scope=""):
+    @staticmethod
+    def _parse_schedule_alarm_window(raw_value) -> tuple[float, float]:
+        from live_trader.data_bridge.data_warm import SchedulePlanner
+
+        if raw_value in (None, "", "0:0"):
+            return 0.0, 0.0
+
+        raw = str(raw_value).strip().lower()
+        if not raw:
+            return 0.0, 0.0
+        if ":" not in raw:
+            raise ValueError(
+                f"Invalid schedule alarm window format: {raw_value}. "
+                "Expected like '30m:15m' or '1h:30s'."
+            )
+
+        before_raw, after_raw = raw.split(":", 1)
+        before_seconds = SchedulePlanner.parse_schedule_prewarm_lead(before_raw.strip() or 0)
+        after_seconds = SchedulePlanner.parse_schedule_prewarm_lead(after_raw.strip() or 0)
+        return before_seconds, after_seconds
+
+    def _current_schedule_alarm_time(self):
+        tz_name = str(getattr(self, "_schedule_alarm_timezone", "") or "").strip()
+        if tz_name:
+            try:
+                return datetime.datetime.now(ZoneInfo(tz_name))
+            except Exception as e:
+                print(f"[AlarmManager] Invalid schedule timezone '{tz_name}': {e}. Falling back to local time.")
+        return datetime.datetime.now()
+
+    @staticmethod
+    def _resolve_last_schedule_slot_for_day(anchor_dt, parsed_schedule):
+        slot_ts = pd.Timestamp(anchor_dt)
+        if parsed_schedule.get('kind') == 'daily':
+            return slot_ts
+
+        interval_seconds = float(parsed_schedule.get('interval_seconds') or 0.0)
+        if interval_seconds <= 0:
+            return None
+
+        day_end = slot_ts.normalize() + pd.Timedelta(days=1)
+        remaining_seconds = max(0.0, (day_end - slot_ts).total_seconds())
+        last_slot_index = int(max(0.0, remaining_seconds - 1e-9) // interval_seconds)
+        return slot_ts + pd.Timedelta(seconds=last_slot_index * interval_seconds)
+
+    @classmethod
+    def _resolve_previous_schedule_slot(cls, now, parsed_schedule):
+        from live_trader.data_bridge.data_warm import SchedulePlanner
+
+        now_ts = pd.Timestamp(now)
+        anchor_dt = SchedulePlanner.schedule_anchor_for_day(now_ts, parsed_schedule)
+
+        if parsed_schedule.get('kind') == 'daily':
+            if now_ts < anchor_dt:
+                return anchor_dt - pd.Timedelta(days=1)
+            return anchor_dt
+
+        interval_seconds = float(parsed_schedule.get('interval_seconds') or 0.0)
+        if interval_seconds <= 0:
+            return None
+        if now_ts < anchor_dt:
+            prev_anchor_dt = SchedulePlanner.schedule_anchor_for_day(now_ts - pd.Timedelta(days=1), parsed_schedule)
+            return cls._resolve_last_schedule_slot_for_day(prev_anchor_dt, parsed_schedule)
+
+        elapsed_seconds = max(0.0, (now_ts - anchor_dt).total_seconds())
+        slot_index = int(elapsed_seconds // interval_seconds)
+        return anchor_dt + pd.Timedelta(seconds=slot_index * interval_seconds)
+
+    def _should_dispatch_now(self, now=None) -> bool:
+        if (self._schedule_alarm_window_before_seconds <= 0
+                and self._schedule_alarm_window_after_seconds <= 0):
+            return True
+        if not self._schedule_alarm_rule or not self._parsed_schedule_alarm_rule:
+            return True
+
+        from live_trader.data_bridge.data_warm import SchedulePlanner
+
+        now_ts = pd.Timestamp(now or self._current_schedule_alarm_time())
+        parsed_schedule = self._parsed_schedule_alarm_rule
+        candidate_slots = [
+            self._resolve_previous_schedule_slot(now_ts, parsed_schedule),
+            SchedulePlanner.resolve_next_schedule_slot(now_ts, parsed_schedule),
+        ]
+
+        before_delta = pd.Timedelta(seconds=float(self._schedule_alarm_window_before_seconds))
+        after_delta = pd.Timedelta(seconds=float(self._schedule_alarm_window_after_seconds))
+
+        for slot_dt in candidate_slots:
+            if slot_dt is None:
+                continue
+            slot_ts = pd.Timestamp(slot_dt)
+            if (slot_ts - before_delta) <= now_ts <= (slot_ts + after_delta):
+                return True
+        return False
+
+    def set_runtime_context(self, broker, conn_id, strategy, params, market_scope="",
+                            schedule_rule=None, schedule_timezone=None, alarm_window=None):
         """
         设置运行时上下文，用于区分多实例
         """
         self.context_tag = f"[{broker.upper()}:{conn_id}]"
+        self._schedule_alarm_rule = str(schedule_rule or '').strip() or None
+        self._schedule_alarm_timezone = str(schedule_timezone or '').strip()
+        self._parsed_schedule_alarm_rule = None
+        self._schedule_alarm_window_before_seconds = 0.0
+        self._schedule_alarm_window_after_seconds = 0.0
+
+        try:
+            before_seconds, after_seconds = self._parse_schedule_alarm_window(
+                getattr(config, 'LIVE_SCHEDULE_ALARM_WINDOW', '0:0')
+                if alarm_window is None else alarm_window
+            )
+            self._schedule_alarm_window_before_seconds = before_seconds
+            self._schedule_alarm_window_after_seconds = after_seconds
+        except Exception as e:
+            print(f"[AlarmManager] Invalid schedule alarm window: {e}. Alarm window disabled.")
+
+        if self._schedule_alarm_rule:
+            try:
+                from live_trader.data_bridge.data_warm import SchedulePlanner
+                self._parsed_schedule_alarm_rule = SchedulePlanner.parse_schedule_rule(self._schedule_alarm_rule)
+            except Exception as e:
+                print(f"[AlarmManager] Invalid schedule rule for alarm window: {self._schedule_alarm_rule}. Error: {e}")
+                self._parsed_schedule_alarm_rule = None
 
         # 格式化参数详情，便于在报警中查看
         param_str = ", ".join([f"{k}={v}" for k, v in params.items()]) if params else "None"
         market_str = market_scope if market_scope else "N/A"
-        self.context_detail = (
+        detail_lines = [
             f"Machine: {self.host_name}\n"
             f"Strategy: {strategy}\n"
             f"Market: {market_str}\n"
             f"Params: {param_str}"
-        )
+        ]
+        if self._schedule_alarm_rule:
+            detail_lines.append(f"Schedule: {self._schedule_alarm_rule}")
+        if (self._schedule_alarm_window_before_seconds > 0
+                or self._schedule_alarm_window_after_seconds > 0):
+            detail_lines.append(
+                "AlarmWindow: "
+                f"-{self._schedule_alarm_window_before_seconds:.0f}s/+{self._schedule_alarm_window_after_seconds:.0f}s"
+            )
+        self.context_detail = "\n".join(detail_lines)
 
     def _register_dead_letter_handlers(self):
         """注册死信监听 (Ctrl+C, Kill, 正常退出)"""
@@ -118,6 +254,8 @@ class AlarmManager:
     def push_text(self, content, level='INFO'):
         if not self.alarms:
             return
+        if not self._should_dispatch_now():
+            return
 
         if self.context_tag:
             content = f"""### {self.context_tag}
@@ -129,12 +267,18 @@ class AlarmManager:
     def push_exception(self, context, error):
         if not self.alarms:
             return
+        if not self._should_dispatch_now():
+            return
 
         full_context = f"{self.context_tag} {context} @ {self.host_name}"
         error_text = str(error).strip()
         self._buffer_exception_alarm(full_context, error_text)
 
     def push_trade(self, order_info):
+        if not self.alarms:
+            return
+        if not self._should_dispatch_now():
+            return
         for alarm in self.alarms:
             threading.Thread(target=alarm.push_trade, args=(order_info,)).start()
 
@@ -143,6 +287,10 @@ class AlarmManager:
         self.push_status("STARTED", detail)
 
     def push_status(self, status, detail=""):
+        if not self.alarms:
+            return
+        if not self._should_dispatch_now():
+            return
         full_status = f"{status} {self.context_tag}" if self.context_tag else status
 
         # 如果 detail 里没有包含机器信息，自动补全 (防止重复叠加)

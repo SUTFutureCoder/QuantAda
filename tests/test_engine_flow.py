@@ -1,7 +1,7 @@
 from datetime import datetime
 import importlib.util
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -2043,4 +2043,72 @@ def test_live_engine_supports_multi_risk_chain_without_fail_open(monkeypatch):
     assert controls[1].check_calls >= 1, "链式风控第2个模块未被执行。"
     sell_orders = [o for o in engine.broker.submitted_orders if o["side"] == "SELL"]
     assert sell_orders, "风控触发后应实际发出 SELL 平仓单。"
+
+
+def test_launch_live_prefers_connection_alarm_window_over_global_default(monkeypatch):
+    """
+    启动器报警窗口优先级:
+    连接配置中的 alarm_window 应覆盖 config.LIVE_SCHEDULE_ALARM_WINDOW。
+    """
+    import live_trader.engine as engine_module
+
+    captured = {}
+    module_name = "live_trader.adapters.fake_broker"
+    fake_module = ModuleType(module_name)
+
+    class FakeBroker(engine_module.BaseLiveBroker):
+        @classmethod
+        def launch(cls, conn_cfg, strategy_path, params, **kwargs):
+            captured["launch"] = {
+                "conn_cfg": conn_cfg,
+                "strategy_path": strategy_path,
+                "params": params,
+                "kwargs": kwargs,
+            }
+
+    FakeBroker.__module__ = module_name
+    fake_module.FakeBroker = FakeBroker
+
+    class DummyAlarmManager:
+        def set_runtime_context(self, **kwargs):
+            captured["runtime_context"] = kwargs
+
+        def push_exception(self, context, error):
+            captured["exception"] = {"context": context, "error": str(error)}
+
+    dummy_alarm = DummyAlarmManager()
+
+    monkeypatch.setattr(
+        config,
+        "BROKER_ENVIRONMENTS",
+        {
+            "fake_broker": {
+                "real": {
+                    "schedule": "1d:15:45:00",
+                    "timezone": "America/New_York",
+                    "alarm_window": "5m:30s",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(config, "LIVE_SCHEDULE_ALARM_WINDOW", "30m:15m")
+    monkeypatch.setattr(
+        engine_module.importlib,
+        "import_module",
+        lambda import_name: fake_module if import_name == module_name else None,
+    )
+    monkeypatch.setattr(engine_module, "AlarmManager", lambda: dummy_alarm)
+
+    engine_module.launch_live(
+        broker_name="fake_broker",
+        conn_name="real",
+        strategy_path="strategies.my_strategy",
+        params={"lookback": 20},
+        symbols=["QQQ"],
+    )
+
+    assert "exception" not in captured, "连接级 alarm_window 覆盖不应导致 launch 崩溃。"
+    assert captured["runtime_context"]["alarm_window"] == "5m:30s"
+    assert captured["runtime_context"]["schedule_rule"] == "1d:15:45:00"
+    assert captured["runtime_context"]["schedule_timezone"] == "America/New_York"
 

@@ -40,6 +40,7 @@
 11. 风控支持逗号分隔的多模块链式加载；`risk_params` 可为平铺 dict，也可为 `{risk_name: {...}}` 的 scoped 结构。
 12. 实盘引擎自愈基线：当轮 live data refresh 不完整会跳过执行；`datas` 为空会尝试恢复；僵尸 `strategy.order` 会自动清锁。
 13. GM/IB 的 schedule 运行支持 prewarm；相关生成/修复应保留 `LIVE_SCHEDULE_PREWARM_LEAD` 语义。
+14. schedule 附近的 IM 报警支持时间窗；默认用 `LIVE_SCHEDULE_ALARM_WINDOW`，连接配置中的 `alarm_window` 可按连接覆盖。
 
 ## 推荐阅读顺序
 1. 先读 `docs/specs/*` 中与你任务最相关的正式规范。
