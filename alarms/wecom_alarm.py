@@ -97,8 +97,9 @@ class WeComAlarm(BaseAlarm):
         self._send(payload)
 
     def push_status(self, status: str, detail: str = ""):
-        icon = "🚀" if status.startswith("STARTED") else "💀" if status == "DEAD" else "🛑"
-        color = "info" if status.startswith("STARTED") else "warning"
+        normalized = str(status or "").strip().upper()
+        icon = "🚀" if normalized.startswith("STARTED") else "💀" if normalized.startswith("DEAD") else "🛑"
+        color = "info" if normalized.startswith("STARTED") else "warning"
 
         md_text = f"""### <font color=\"{color}\">{icon} 系统状态: {status}</font>
 **时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}

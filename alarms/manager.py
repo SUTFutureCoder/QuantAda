@@ -11,6 +11,7 @@ from typing import Dict, Tuple
 from zoneinfo import ZoneInfo
 
 import config
+from .base_alarm import BaseAlarm
 from .dingtalk_alarm import DingTalkAlarm
 from .wecom_alarm import WeComAlarm
 
@@ -18,6 +19,11 @@ from .wecom_alarm import WeComAlarm
 class AlarmManager:
     _instance = None
     _lock = threading.Lock()
+    _WINDOW_BYPASS_ALARM_TAGS = frozenset({
+        BaseAlarm.TAG_LIFECYCLE,
+        BaseAlarm.TAG_PLAN,
+    })
+    _LIFECYCLE_STATUSES = frozenset({"STARTED", "DEAD", "STOPPED"})
     _EXCEPTION_AGGREGATION_WINDOW_SECONDS = 60
     _COOLDOWN_BASE_DELAY_SECONDS = 30
     _COOLDOWN_MAX_DELAY_SECONDS = 10 * 60
@@ -52,6 +58,7 @@ class AlarmManager:
         self._schedule_alarm_timezone = ""
         self._schedule_alarm_window_before_seconds = 0.0
         self._schedule_alarm_window_after_seconds = 0.0
+        self._terminal_lifecycle_status = None
 
         # 异常报警聚合: 默认开启，固定 60 秒窗口内合并相同(context, error)
         self._exception_aggregation_window_seconds = self._EXCEPTION_AGGREGATION_WINDOW_SECONDS
@@ -142,7 +149,25 @@ class AlarmManager:
         slot_index = int(elapsed_seconds // interval_seconds)
         return anchor_dt + pd.Timedelta(seconds=slot_index * interval_seconds)
 
-    def _should_dispatch_now(self, now=None) -> bool:
+    @staticmethod
+    def _normalize_alarm_tag(alarm_tag=None) -> str:
+        raw = str(alarm_tag or BaseAlarm.TAG_GENERAL).strip().lower()
+        return raw or BaseAlarm.TAG_GENERAL
+
+    @classmethod
+    def _resolve_status_alarm_tag(cls, status, alarm_tag=None) -> str:
+        if alarm_tag is not None:
+            return cls._normalize_alarm_tag(alarm_tag)
+
+        status_text = str(status or "").strip().upper()
+        if status_text in cls._LIFECYCLE_STATUSES:
+            return BaseAlarm.TAG_LIFECYCLE
+        return BaseAlarm.TAG_GENERAL
+
+    def _should_dispatch_now(self, now=None, alarm_tag=None) -> bool:
+        normalized_tag = self._normalize_alarm_tag(alarm_tag)
+        if normalized_tag in self._WINDOW_BYPASS_ALARM_TAGS:
+            return True
         if (self._schedule_alarm_window_before_seconds <= 0
                 and self._schedule_alarm_window_after_seconds <= 0):
             return True
@@ -239,6 +264,9 @@ class AlarmManager:
         # 这里可以发一个简单的结束报告
         self._flush_exception_aggregation()
         self._flush_exception_cooldown_pending(force=True)
+        if self._terminal_lifecycle_status in {"DEAD", "STOPPED"}:
+            return
+        self._terminal_lifecycle_status = "STOPPED"
         self.push_status("STOPPED", "Program exited normally.")
         pass
 
@@ -246,15 +274,16 @@ class AlarmManager:
         """捕获中断信号"""
         sig_name = "SIGINT (Ctrl+C)" if sig == signal.SIGINT else "SIGTERM"
         print(f"\n[AlarmManager] Caught signal {sig_name}. Sending Dead Letter...")
+        self._terminal_lifecycle_status = "DEAD"
         self.push_status("DEAD", f"Process killed by {sig_name}")
         sys.exit(0)
 
     # --- 统一推送接口 ---
 
-    def push_text(self, content, level='INFO'):
+    def push_text(self, content, level='INFO', alarm_tag=None):
         if not self.alarms:
             return
-        if not self._should_dispatch_now():
+        if not self._should_dispatch_now(alarm_tag=alarm_tag):
             return
 
         if self.context_tag:
@@ -264,33 +293,40 @@ class AlarmManager:
 
         self._dispatch_text(content, level)
 
-    def push_exception(self, context, error):
+    def push_plan(self, content, level='INFO'):
+        self.push_text(content, level=level, alarm_tag=BaseAlarm.TAG_PLAN)
+
+    def push_exception(self, context, error, alarm_tag=None):
         if not self.alarms:
             return
-        if not self._should_dispatch_now():
+        if not self._should_dispatch_now(alarm_tag=alarm_tag):
             return
 
         full_context = f"{self.context_tag} {context} @ {self.host_name}"
         error_text = str(error).strip()
         self._buffer_exception_alarm(full_context, error_text)
 
-    def push_trade(self, order_info):
+    def push_trade(self, order_info, alarm_tag=BaseAlarm.TAG_TRADE):
         if not self.alarms:
             return
-        if not self._should_dispatch_now():
+        if not self._should_dispatch_now(alarm_tag=alarm_tag):
             return
         for alarm in self.alarms:
             threading.Thread(target=alarm.push_trade, args=(order_info,)).start()
 
     def push_start(self, strategy_name):
         detail = self.context_detail if self.context_detail else f"Strategy: {strategy_name}"
-        self.push_status("STARTED", detail)
+        self.push_status("STARTED", detail, alarm_tag=BaseAlarm.TAG_LIFECYCLE)
 
-    def push_status(self, status, detail=""):
+    def push_status(self, status, detail="", alarm_tag=None):
         if not self.alarms:
             return
-        if not self._should_dispatch_now():
+        resolved_alarm_tag = self._resolve_status_alarm_tag(status, alarm_tag=alarm_tag)
+        if not self._should_dispatch_now(alarm_tag=resolved_alarm_tag):
             return
+        status_text = str(status or "").strip().upper()
+        if resolved_alarm_tag == BaseAlarm.TAG_LIFECYCLE and status_text in {"DEAD", "STOPPED"}:
+            self._terminal_lifecycle_status = status_text
         full_status = f"{status} {self.context_tag}" if self.context_tag else status
 
         # 如果 detail 里没有包含机器信息，自动补全 (防止重复叠加)

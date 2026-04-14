@@ -65,7 +65,7 @@ class PortfolioRebalancer:
             # 终端打印
             plan_md_str = PortfolioRebalancer._log_plan(plan, current_positions, target_symbols, target_value, rebalance_threshold)
             # 推送消息
-            AlarmManager().push_text(plan_md_str)
+            AlarmManager().push_plan(plan_md_str)
 
         return plan
 

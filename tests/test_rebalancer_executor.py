@@ -1,6 +1,38 @@
 from types import SimpleNamespace
 
 
+def test_calculate_plan_pushes_plan_via_semantic_tag(monkeypatch):
+    import common.rebalancer as rebalancer_module
+
+    pushed = []
+
+    class DummyData:
+        def __init__(self, name):
+            self._name = name
+
+    class DummyAlarmManager:
+        def push_plan(self, content, level="INFO"):
+            pushed.append({"content": content, "level": level})
+
+    monkeypatch.setattr(rebalancer_module, "AlarmManager", lambda: DummyAlarmManager())
+    monkeypatch.setattr(rebalancer_module.config, "PRINT_PLAN", True)
+    monkeypatch.setattr(rebalancer_module.config, "LOG", False)
+
+    current_positions = {DummyData("SPY.ARCA"): 50000.0}
+    target_symbols = [DummyData("QQQ.NASDAQ")]
+    plan = rebalancer_module.PortfolioRebalancer.calculate_plan(
+        current_positions=current_positions,
+        target_symbols=target_symbols,
+        total_capital=100000.0,
+        select_top_k=1,
+        rebalance_threshold=0.05,
+    )
+
+    assert plan["sell_clear"], "应正常生成调仓计划。"
+    assert len(pushed) == 1, "PRINT_PLAN=True 时应通过 push_plan 推送计划。"
+    assert "调仓计划生成" in pushed[0]["content"]
+
+
 def test_order_executor_waits_for_sell_settlement_then_buys(monkeypatch):
     import common.rebalancer as rebalancer_module
 

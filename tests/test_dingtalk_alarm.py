@@ -86,3 +86,23 @@ def test_dingtalk_retry_once_with_random_sleep_when_request_raises(monkeypatch):
 
     assert len(sent) == 2, "异常时应重试 1 次。"
     assert sleep_calls == [10.0], "异常重试前应使用随机退避秒数。"
+
+
+def test_dingtalk_push_status_with_context_keeps_lifecycle_icon(monkeypatch):
+    sent = []
+
+    def fake_post(url, json=None, headers=None, timeout=0):
+        sent.append((url, json, headers, timeout))
+        return _FakeResponse()
+
+    monkeypatch.setattr(dingtalk_module.config, "DINGTALK_WEBHOOK", "https://example.invalid/dingtalk")
+    monkeypatch.setattr(dingtalk_module.config, "DINGTALK_SECRET", "", raising=False)
+    monkeypatch.setattr(dingtalk_module.requests, "post", fake_post)
+
+    alarm = dingtalk_module.DingTalkAlarm()
+    alarm.push_status("DEAD [IB_BROKER:7497]", "detail")
+
+    assert len(sent) == 1
+    _, payload, _, _ = sent[0]
+    assert payload["msgtype"] == "markdown"
+    assert "💀 系统状态: DEAD [IB_BROKER:7497]" in payload["markdown"]["text"]

@@ -48,6 +48,25 @@ def test_wecom_push_status_still_sends_payload(monkeypatch):
     assert "系统状态: STARTED [GM_BROKER:demo]" in payload["markdown"]["content"]
 
 
+def test_wecom_push_dead_status_with_context_keeps_dead_style(monkeypatch):
+    sent = []
+
+    def fake_post(url, json=None, headers=None, timeout=0):
+        sent.append((url, json, headers, timeout))
+        return _FakeResponse()
+
+    monkeypatch.setattr(wecom_module.config, "WECOM_WEBHOOK", "https://example.invalid/wecom", raising=False)
+    monkeypatch.setattr(wecom_module.requests, "post", fake_post)
+
+    alarm = wecom_module.WeComAlarm()
+    alarm.push_status("DEAD [IB_BROKER:7497]", "detail")
+
+    assert len(sent) == 1
+    _, payload, _, _ = sent[0]
+    assert payload["msgtype"] == "markdown"
+    assert "💀 系统状态: DEAD [IB_BROKER:7497]" in payload["markdown"]["content"]
+
+
 def test_wecom_retry_once_when_api_returns_error(monkeypatch):
     sent = []
     sleep_calls = []

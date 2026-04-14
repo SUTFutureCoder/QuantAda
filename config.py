@@ -43,6 +43,7 @@ LIVE_SCHEDULE_PREWARM_LEAD = 0
 # - 作用：仅在正式 schedule 生效时间点附近，将报警推送到 IM；
 #   超出窗口的报警本地仍会打印，但不推送到钉钉/企业微信，降低非交易时段噪音。
 # - 对于固定频率 schedule（如 5m/1h），窗口同样基于正式 slot 计算。
+# - 生命周期消息（STARTED/STOPPED/DEAD）与显式 plan 标签消息默认不受该窗口限制。
 # - 若具体连接配置（BROKER_ENVIRONMENTS -> xxx -> conn -> alarm_window）提供该字段，
 #   则连接级配置优先级更高，可覆盖这里的全局默认值。
 # - 用法示例：

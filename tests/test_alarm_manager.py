@@ -280,3 +280,94 @@ def test_schedule_alarm_window_blocks_exception_intake_outside_window(monkeypatc
     mgr.push_exception("IB Kernel Error", "Error 1100")
     time.sleep(0.5)
     assert fake.exception_calls == [], "窗口外异常不应进入 IM 聚合/推送流程。"
+
+
+def test_schedule_alarm_window_allows_plan_messages_outside_window(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="1d:15:45:00",
+        alarm_window="30m:15m",
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_current_schedule_alarm_time",
+        lambda: datetime.datetime(2026, 4, 14, 2, 0, 0),
+    )
+
+    mgr.push_plan("#### 调仓计划生成")
+    assert _wait_until(lambda: len(fake.text_calls) == 1), "plan 标签消息应绕过 schedule 报警窗口。"
+
+
+def test_schedule_alarm_window_allows_lifecycle_status_outside_window(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="1d:15:45:00",
+        alarm_window="30m:15m",
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_current_schedule_alarm_time",
+        lambda: datetime.datetime(2026, 4, 14, 2, 0, 0),
+    )
+
+    mgr.push_status("DEAD", "Process killed by SIGTERM")
+    assert _wait_until(lambda: len(fake.status_calls) == 1), "生命周期状态消息应绕过 schedule 报警窗口。"
+
+
+def test_schedule_alarm_window_still_blocks_non_lifecycle_status_outside_window(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    mgr.set_runtime_context(
+        broker="ib_broker",
+        conn_id="7497",
+        strategy="my_strategy",
+        params={},
+        market_scope="symbols=QQQ",
+        schedule_rule="1d:15:45:00",
+        alarm_window="30m:15m",
+    )
+    monkeypatch.setattr(
+        mgr,
+        "_current_schedule_alarm_time",
+        lambda: datetime.datetime(2026, 4, 14, 2, 0, 0),
+    )
+
+    mgr.push_status("INFO", "GM Session Shutdown (Preparing to Restart)")
+    time.sleep(0.2)
+    assert fake.status_calls == [], "普通 INFO 状态不应因为 status 接口而自动绕过报警窗口。"
+
+
+def test_dead_signal_does_not_emit_stopped_again_on_exit(monkeypatch, fresh_alarm_manager):
+    mgr = fresh_alarm_manager
+    fake = FakeAlarmChannel()
+    mgr.alarms = [fake]
+
+    monkeypatch.setattr(manager_module.sys, "exit", lambda code=0: None)
+
+    mgr._signal_handler(manager_module.signal.SIGTERM, None)
+    time.sleep(0.1)
+    mgr._on_exit()
+    time.sleep(0.1)
+
+    assert len(fake.status_calls) == 1, "DEAD 已发送后，atexit 不应再补发 STOPPED。"
+    status, detail = fake.status_calls[0]
+    assert status == "DEAD"
+    assert "SIGTERM" in detail
