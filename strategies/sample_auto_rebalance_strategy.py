@@ -15,6 +15,8 @@ class SampleAutoRebalanceStrategy(BaseStrategy):
     params = {
         'selectTopK': 1,  # 每次只买排名第 1 的标的
         'roc_period': 20,  # 观察它过去 20 天的动量（涨幅）
+        'rebalance_threshold': 0.05,  # 5% 缓冲带，防止微小波动导致频繁交易
+        'rebalance_when': 'daily',  # 若想把现金注入延后到正式调仓日，可改为 weekly/monthly
 
         # 🛡️ 核心护盾：告诉系统，这里面的标的是“理财底仓”或“信仰股”
         # 系统在算钱和卖出时，会把它们当做空气，绝对不会动它们一分一毫！
@@ -77,9 +79,10 @@ class SampleAutoRebalanceStrategy(BaseStrategy):
         # ==========================================
         # 就像将军下令一样，你只需要指明进攻目标 (targets)。
         # 如果大盘暴跌没有标的满足条件，targets 就是空的，框架会自动帮你清仓防守。
-        # 底层框架会自动算可用资金、扣除手续费、换算股数并发单。
+        # 底层框架会自动算可用资金、扣除手续费、换算股数并发单；
+        # rebalance_when 会阻止非正式调仓时点因现金注入/波动而立刻补仓。
         self.execute_rebalance(
             target_symbols=targets,
             top_k=self.p.selectTopK,
-            rebalance_threshold=0.05  # 设置 5% 的缓冲带，防止每天微小波动导致频繁买卖白交手续费
+            rebalance_threshold=self.p.rebalance_threshold
         )

@@ -36,7 +36,21 @@
 3. `top_k` 代表目标持仓槽位数。
 4. 需要不等权目标时，应改用 `order_target_percent/value`。
 
-## 6. Isolated Capital Semantics
+## 6. Rebalance Timing Gate
+1. `execute_rebalance()` 使用统一的调仓时点入口 `rebalance_when`。
+2. 若未配置 `params['rebalance_when']`，则保持旧行为: 每个策略周期都可执行。
+3. `rebalance_when` 支持两类值:
+- 固定频率字符串: `bar` / `daily` / `weekly` / `monthly`
+- 显式调仓字符串: `next` / `skip`
+4. 当 `rebalance_when='next'` 时，表示“本次就是 next rebalance”，允许把闲置资金纳入正式补仓。
+5. 当 `rebalance_when='skip'` 时，表示“本次只是普通运行”，不执行正式调仓。
+6. 该门控必须保持无状态:
+- 不记录“上次调仓日期”
+- 不维护跨 K 调仓意图
+- 仅基于当前 bar 与上一 bar 的日/周/月边界判断是否到达正式调仓时点
+7. 该门控用于解耦“策略运行频率”和“正式调仓频率”。
+
+## 7. Isolated Capital Semantics
 1. 策略调仓使用真实持仓 + 在途订单做 bottom-up 盘点。
 2. 被豁免的底仓不会计入策略可分配资金。
 3. 若 broker 提供 `get_rebalance_cash()`，策略计划口径优先使用该值。

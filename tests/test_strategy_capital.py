@@ -1,6 +1,7 @@
 from datetime import datetime
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 import config
@@ -16,14 +17,24 @@ class DummyStrategy(BaseStrategy):
 
 
 class DummyData:
-    def __init__(self, name):
+    def __init__(self, name, index=None):
         self._name = name
+        if index is None:
+            index = [
+                datetime(2026, 4, 20, 14, 45, 0),
+                datetime(2026, 4, 21, 14, 45, 0),
+            ]
+        self.p = SimpleNamespace()
+        self.p.dataname = pd.DataFrame(
+            {"close": [100.0] * len(index)},
+            index=index,
+        )
 
 
 class DummyBroker:
-    def __init__(self, cash=0.0, rebalance_cash=None):
+    def __init__(self, cash=0.0, rebalance_cash=None, datas=None):
         self.is_live = True
-        self.datas = [DummyData("AAPL.SMART")]
+        self.datas = datas if datas is not None else [DummyData("AAPL.SMART")]
         self._cash = cash
         self._rebalance_cash = rebalance_cash
 
@@ -123,3 +134,313 @@ def test_notify_order_prefers_execution_dt_for_logs(monkeypatch):
 
     assert len(broker.log_calls) == 1, "成交日志应被记录一次。"
     assert broker.log_calls[0]["dt"].isoformat() == "2026-04-08T14:45:33", "成交日志应使用真实执行时间。"
+
+
+def test_should_execute_rebalance_defaults_to_every_bar(monkeypatch):
+    """
+    兼容性回归:
+    未配置 rebalance_when 时，execute_rebalance 仍应保持每个 bar 可执行。
+    """
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0)
+    strategy = DummyStrategy(broker=broker, params={})
+
+    assert strategy.should_execute_rebalance(target_symbols=broker.datas), "默认行为应保持每个 bar 允许调仓。"
+
+
+def test_should_execute_rebalance_weekly_blocks_same_week(monkeypatch):
+    """
+    调仓时点回归:
+    weekly 模式下，同一自然周内的后续 bar 不应再次触发等权调仓。
+    """
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+    data = DummyData(
+        "AAPL.SMART",
+        index=[
+            datetime(2026, 4, 20, 14, 45, 0),  # Monday
+            datetime(2026, 4, 21, 14, 45, 0),  # Tuesday
+        ],
+    )
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={"rebalance_when": "weekly"})
+
+    assert not strategy.should_execute_rebalance(target_symbols=[data]), "同一周内不应重复触发 weekly 调仓。"
+
+
+def test_should_execute_rebalance_weekly_allows_new_week(monkeypatch):
+    """
+    调仓时点回归:
+    weekly 模式下，跨周后的首个 bar 应允许执行调仓。
+    """
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+    data = DummyData(
+        "AAPL.SMART",
+        index=[
+            datetime(2026, 4, 24, 14, 45, 0),  # Friday
+            datetime(2026, 4, 27, 14, 45, 0),  # Next Monday
+        ],
+    )
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={"rebalance_when": "weekly"})
+
+    assert strategy.should_execute_rebalance(target_symbols=[data]), "跨周首个 bar 应允许 weekly 调仓。"
+
+
+def test_should_execute_rebalance_monthly_allows_new_month(monkeypatch):
+    """
+    调仓时点回归:
+    monthly 模式下，跨月后的首个 bar 应允许执行调仓。
+    """
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+    data = DummyData(
+        "AAPL.SMART",
+        index=[
+            datetime(2026, 4, 30, 14, 45, 0),
+            datetime(2026, 5, 4, 14, 45, 0),
+        ],
+    )
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={"rebalance_when": "monthly"})
+
+    assert strategy.should_execute_rebalance(target_symbols=[data]), "跨月首个 bar 应允许 monthly 调仓。"
+
+
+def test_execute_rebalance_skips_plan_when_weekly_gate_not_due(monkeypatch):
+    """
+    调仓主流程回归:
+    非调仓周内不应生成计划，也不应进入执行器。
+    """
+    import common.rebalancer as rebalancer_module
+
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+
+    calculate_calls = []
+    execute_calls = []
+
+    def fake_calculate_plan(**kwargs):
+        calculate_calls.append(kwargs)
+        return {"sell_clear": [], "reduce": [], "increase": [], "target_per_stock": 0.0}
+
+    class DummyExecutor:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def execute_plan(self, plan):
+            execute_calls.append(plan)
+
+    monkeypatch.setattr(
+        rebalancer_module.PortfolioRebalancer,
+        "calculate_plan",
+        staticmethod(fake_calculate_plan),
+    )
+    monkeypatch.setattr(rebalancer_module, "OrderExecutor", DummyExecutor)
+
+    data = DummyData(
+        "AAPL.SMART",
+        index=[
+            datetime(2026, 4, 20, 14, 45, 0),
+            datetime(2026, 4, 21, 14, 45, 0),
+        ],
+    )
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={"rebalance_when": "weekly"})
+
+    strategy.execute_rebalance(target_symbols=[data], top_k=1, rebalance_threshold=0.2)
+
+    assert calculate_calls == [], "非调仓周内不应生成调仓计划。"
+    assert execute_calls == [], "非调仓周内不应进入执行器。"
+
+
+def test_execute_rebalance_runs_plan_when_weekly_gate_due(monkeypatch):
+    """
+    调仓主流程回归:
+    到达新交易周时，应正常生成计划并交给执行器。
+    """
+    import common.rebalancer as rebalancer_module
+
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+
+    calculate_calls = []
+    execute_calls = []
+
+    def fake_calculate_plan(**kwargs):
+        calculate_calls.append(kwargs)
+        return {"sell_clear": [], "reduce": [], "increase": [], "target_per_stock": 0.0}
+
+    class DummyExecutor:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def execute_plan(self, plan):
+            execute_calls.append(plan)
+
+    monkeypatch.setattr(
+        rebalancer_module.PortfolioRebalancer,
+        "calculate_plan",
+        staticmethod(fake_calculate_plan),
+    )
+    monkeypatch.setattr(rebalancer_module, "OrderExecutor", DummyExecutor)
+
+    data = DummyData(
+        "AAPL.SMART",
+        index=[
+            datetime(2026, 4, 24, 14, 45, 0),
+            datetime(2026, 4, 27, 14, 45, 0),
+        ],
+    )
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={"rebalance_when": "weekly"})
+
+    strategy.execute_rebalance(target_symbols=[data], top_k=1, rebalance_threshold=0.2)
+
+    assert len(calculate_calls) == 1, "新交易周应正常生成调仓计划。"
+    assert len(execute_calls) == 1, "新交易周应将计划交给执行器。"
+
+
+def test_should_execute_rebalance_respects_rebalance_when_skip(monkeypatch):
+    """
+    显式调仓信号回归:
+    rebalance_when='skip' 时，应跳过本次正式调仓，不受默认频率影响。
+    """
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0)
+    strategy = DummyStrategy(broker=broker, params={})
+
+    assert not strategy.should_execute_rebalance(
+        target_symbols=broker.datas,
+        rebalance_when='skip',
+    ), "显式 rebalance_when='skip' 时应跳过调仓。"
+
+
+def test_should_execute_rebalance_respects_rebalance_when_next(monkeypatch):
+    """
+    显式调仓信号回归:
+    rebalance_when='next' 时，应允许本次正式调仓，不受频率门控限制。
+    """
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+    data = DummyData(
+        "AAPL.SMART",
+        index=[
+            datetime(2026, 4, 20, 14, 45, 0),
+            datetime(2026, 4, 21, 14, 45, 0),
+        ],
+    )
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={"rebalance_when": "weekly"})
+
+    assert strategy.should_execute_rebalance(
+        target_symbols=[data],
+        rebalance_when='next',
+    ), "显式 rebalance_when='next' 时应允许本次正式调仓。"
+
+
+def test_execute_rebalance_skips_plan_when_rebalance_when_skip(monkeypatch):
+    """
+    显式调仓主流程回归:
+    rebalance_when='skip' 时，即使默认频率是 bar，也不应生成计划。
+    """
+    import common.rebalancer as rebalancer_module
+
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+
+    calculate_calls = []
+    execute_calls = []
+
+    def fake_calculate_plan(**kwargs):
+        calculate_calls.append(kwargs)
+        return {"sell_clear": [], "reduce": [], "increase": [], "target_per_stock": 0.0}
+
+    class DummyExecutor:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def execute_plan(self, plan):
+            execute_calls.append(plan)
+
+    monkeypatch.setattr(
+        rebalancer_module.PortfolioRebalancer,
+        "calculate_plan",
+        staticmethod(fake_calculate_plan),
+    )
+    monkeypatch.setattr(rebalancer_module, "OrderExecutor", DummyExecutor)
+
+    data = DummyData("AAPL.SMART")
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={})
+
+    strategy.execute_rebalance(
+        target_symbols=[data],
+        top_k=1,
+        rebalance_threshold=0.2,
+        rebalance_when='skip',
+    )
+
+    assert calculate_calls == [], "显式 rebalance_when='skip' 时不应生成调仓计划。"
+    assert execute_calls == [], "显式 rebalance_when='skip' 时不应进入执行器。"
+
+
+def test_execute_rebalance_runs_plan_when_rebalance_when_next(monkeypatch):
+    """
+    显式调仓主流程回归:
+    rebalance_when='next' 时，应按本次正式调仓生成计划并执行。
+    """
+    import common.rebalancer as rebalancer_module
+
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+
+    calculate_calls = []
+    execute_calls = []
+
+    def fake_calculate_plan(**kwargs):
+        calculate_calls.append(kwargs)
+        return {"sell_clear": [], "reduce": [], "increase": [], "target_per_stock": 0.0}
+
+    class DummyExecutor:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def execute_plan(self, plan):
+            execute_calls.append(plan)
+
+    monkeypatch.setattr(
+        rebalancer_module.PortfolioRebalancer,
+        "calculate_plan",
+        staticmethod(fake_calculate_plan),
+    )
+    monkeypatch.setattr(rebalancer_module, "OrderExecutor", DummyExecutor)
+
+    data = DummyData(
+        "AAPL.SMART",
+        index=[
+            datetime(2026, 4, 20, 14, 45, 0),
+            datetime(2026, 4, 21, 14, 45, 0),
+        ],
+    )
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={"rebalance_when": "weekly"})
+
+    strategy.execute_rebalance(
+        target_symbols=[data],
+        top_k=1,
+        rebalance_threshold=0.2,
+        rebalance_when='next',
+    )
+
+    assert len(calculate_calls) == 1, "显式 rebalance_when='next' 时应生成调仓计划。"
+    assert len(execute_calls) == 1, "显式 rebalance_when='next' 时应进入执行器。"
+
+
+def test_should_execute_rebalance_rejects_invalid_rebalance_when(monkeypatch):
+    """
+    参数校验回归:
+    非法 rebalance_when 应直接报错，避免静默回退为 bar。
+    """
+    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0)
+    strategy = DummyStrategy(broker=broker, params={})
+
+    with pytest.raises(ValueError, match="Invalid rebalance_when"):
+        strategy.should_execute_rebalance(
+            target_symbols=broker.datas,
+            rebalance_when='every_bar',
+        )

@@ -255,13 +255,145 @@ class BaseStrategy(ABC):
 
         return allocatable_capital, current_positions
 
+    @staticmethod
+    def _normalize_rebalance_when(raw_value):
+        raw = str(raw_value or 'bar').strip().lower()
+        allowed = {'bar', 'daily', 'weekly', 'monthly', 'next', 'skip'}
+        if raw not in allowed:
+            raise ValueError(
+                f"Invalid rebalance_when={raw_value!r}. "
+                "Expected one of: 'bar', 'daily', 'weekly', 'monthly', 'next', 'skip'."
+            )
+        return raw
+
+    @staticmethod
+    def _normalize_bar_dt(dt_value):
+        if dt_value is None:
+            return None
+        ts = pd.Timestamp(dt_value)
+        if ts.tzinfo is not None:
+            ts = ts.tz_localize(None)
+        return ts
+
+    def _extract_bar_datetimes(self, data):
+        current_dt = None
+        prev_dt = None
+
+        dt_accessor = getattr(getattr(data, 'datetime', None), 'datetime', None)
+        if callable(dt_accessor):
+            try:
+                current_dt = self._normalize_bar_dt(dt_accessor(0))
+            except Exception:
+                current_dt = None
+
+            data_len = None
+            try:
+                data_len = len(data)
+            except Exception:
+                data_len = None
+
+            if data_len and data_len > 1:
+                try:
+                    prev_dt = self._normalize_bar_dt(dt_accessor(-1))
+                except Exception:
+                    prev_dt = None
+
+            if current_dt is not None:
+                return current_dt, prev_dt
+
+        df = getattr(getattr(data, 'p', None), 'dataname', None)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            current_dt = self._normalize_bar_dt(df.index[-1])
+            if len(df.index) > 1:
+                prev_dt = self._normalize_bar_dt(df.index[-2])
+            return current_dt, prev_dt
+
+        return None, None
+
+    def _get_rebalance_reference_datetimes(self, target_symbols=None):
+        candidates = []
+        for data in target_symbols or []:
+            if data is not None:
+                candidates.append(data)
+        for data in self.tradable_datas:
+            if data not in candidates:
+                candidates.append(data)
+        for data in getattr(self.broker, 'datas', []) or []:
+            if data not in candidates:
+                candidates.append(data)
+
+        for data in candidates:
+            current_dt, prev_dt = self._extract_bar_datetimes(data)
+            if current_dt is not None:
+                return current_dt, prev_dt
+
+        return None, None
+
+    def should_execute_rebalance(
+        self,
+        target_symbols=None,
+        rebalance_when=None,
+    ):
+        """
+        无状态调仓时点门控:
+        统一入口 rebalance_when 支持:
+        - 'bar': 每个策略周期都允许调仓（兼容旧行为）
+        - 'daily': 仅当进入新交易日时允许调仓
+        - 'weekly': 仅当进入新交易周时允许调仓
+        - 'monthly': 仅当进入新交易月时允许调仓
+        - 'next': 本次就是正式调仓，立即执行
+        - 'skip': 本次不是正式调仓，直接跳过
+        """
+        if rebalance_when is None:
+            rebalance_when = getattr(self.p, 'rebalance_when', 'bar')
+
+        frequency = self._normalize_rebalance_when(rebalance_when)
+        if frequency == 'next':
+            return True
+        if frequency == 'skip':
+            return False
+        if frequency == 'bar':
+            return True
+
+        current_dt, prev_dt = self._get_rebalance_reference_datetimes(target_symbols=target_symbols)
+        if current_dt is None or prev_dt is None:
+            return True
+
+        if frequency == 'daily':
+            return current_dt.date() != prev_dt.date()
+
+        if frequency == 'weekly':
+            current_iso = current_dt.isocalendar()
+            prev_iso = prev_dt.isocalendar()
+            return (current_iso.year, current_iso.week) != (prev_iso.year, prev_iso.week)
+
+        if frequency == 'monthly':
+            return (current_dt.year, current_dt.month) != (prev_dt.year, prev_dt.month)
+
+        return True
+
     # 声明式全自动调仓接口
-    def execute_rebalance(self, target_symbols, top_k, rebalance_threshold=0.2):
+    def execute_rebalance(
+        self,
+        target_symbols,
+        top_k,
+        rebalance_threshold=0.2,
+        rebalance_when=None,
+    ):
         """
         框架级自动调仓流水线。
         包含：自动底层隔离盘点 -> 计划生成 -> 智能发单。
         策略端只需提供目标标的列表，其余一概不用操心。
+        rebalance_when 为统一调仓时点入口:
+        - 'bar' / 'daily' / 'weekly' / 'monthly'
+        - 'next' / 'skip'
         """
+        if not self.should_execute_rebalance(
+            target_symbols=target_symbols,
+            rebalance_when=rebalance_when,
+        ):
+            return None
+
         # 延迟导入以防止循环依赖
         from common.rebalancer import PortfolioRebalancer, OrderExecutor
 
