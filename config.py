@@ -17,9 +17,6 @@ LOG = True
 # 是否打印交易计划
 PRINT_PLAN = False
 
-# 保护标的不参与策略计算，优先级低于策略参数。适用于压舱石；尊重客户主观选择实现虚拟多租户分仓；跨越法币-券商通道摩擦，券商内部转换标的，避免银行无法打款。
-IGNORED_SYMBOLS = ['SGOV', 'BIL', 'USFR', 'SHY']
-
 # 是否跨日保留委托：
 # - False: 每个交易日首次运行前自动清理所有在途委托（无状态推荐）
 # - True : 保留隔日委托，不做自动清理
@@ -142,15 +139,11 @@ BROKER_ENVIRONMENTS = {
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
             # 'alarm_window': '30m:15m',
-            # 实盘特定不卖的长线资产
-            # 'ignored_symbols': ['AAPL', 'TSLA']
         },
         'real': {  # 实盘/Docker Gateway
             'schedule': '1d:15:45:00',
             'timezone': 'America/New_York',
             # 'alarm_window': '30m:15m',
-            # 实盘特定不卖的长线资产
-            # 'ignored_symbols': ['AAPL', 'TSLA']
         }
     }
 }

@@ -17,10 +17,6 @@ class SampleAutoRebalanceStrategy(BaseStrategy):
         'roc_period': 20,  # 观察它过去 20 天的动量（涨幅）
         'rebalance_threshold': 0.05,  # 5% 缓冲带，防止微小波动导致频繁交易
         'rebalance_when': 'daily',  # 若想把现金注入延后到正式调仓日，可改为 weekly/monthly
-
-        # 🛡️ 核心护盾：告诉系统，这里面的标的是“理财底仓”或“信仰股”
-        # 系统在算钱和卖出时，会把它们当做空气，绝对不会动它们一分一毫！
-        'ignored_symbols': ['SHSE.511880'],
     }
 
     def init(self):
@@ -52,9 +48,7 @@ class SampleAutoRebalanceStrategy(BaseStrategy):
         # ==========================================
         valid_candidates = []
 
-        # 🪄 魔法所在：self.tradable_datas 已经自动帮你把 SHSE.511880 剔除了！
-        # 你面对的是一个极其干净的“可操作资产池”。
-        for data in self.tradable_datas:
+        for data in self.broker.datas:
             try:
                 # 拿到这只标的在“今天”的动量得分
                 score = self.roc_signals[data._name].asof(current_dt)

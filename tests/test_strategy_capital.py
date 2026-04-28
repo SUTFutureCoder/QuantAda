@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import config
 from strategies.base_strategy import BaseStrategy
 
 
@@ -64,7 +63,6 @@ def test_strategy_isolated_capital_prefers_rebalance_cash(monkeypatch):
     资金口径回归:
     策略分配资金应优先使用 broker.get_rebalance_cash，避免与下单资金语义撕裂。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     broker = DummyBroker(cash=1000.0, rebalance_cash=200.0)
     strategy = DummyStrategy(broker=broker, params={})
 
@@ -80,7 +78,6 @@ def test_strategy_isolated_capital_fallbacks_to_get_cash_on_rebalance_error(monk
     稳定性回归:
     get_rebalance_cash 异常时，策略层应回退 get_cash，不能中断调仓流程。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     broker = DummyBroker(cash=1000.0, rebalance_cash=None)
     strategy = DummyStrategy(broker=broker, params={})
 
@@ -95,8 +92,6 @@ def test_notify_order_prefers_execution_dt_for_logs(monkeypatch):
     成交日志时间回归:
     notify_order 应优先使用订单真实执行时间，而不是 broker 当前触发时间。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
-
     class RecordingBroker(DummyBroker):
         def __init__(self):
             super().__init__(cash=0.0, rebalance_cash=0.0)
@@ -141,7 +136,6 @@ def test_should_execute_rebalance_defaults_to_every_bar(monkeypatch):
     兼容性回归:
     未配置 rebalance_when 时，execute_rebalance 仍应保持每个 bar 可执行。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0)
     strategy = DummyStrategy(broker=broker, params={})
 
@@ -153,7 +147,6 @@ def test_should_execute_rebalance_weekly_blocks_same_week(monkeypatch):
     调仓时点回归:
     weekly 模式下，同一自然周内的后续 bar 不应再次触发等权调仓。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     data = DummyData(
         "AAPL.SMART",
         index=[
@@ -172,7 +165,6 @@ def test_should_execute_rebalance_weekly_allows_new_week(monkeypatch):
     调仓时点回归:
     weekly 模式下，跨周后的首个 bar 应允许执行调仓。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     data = DummyData(
         "AAPL.SMART",
         index=[
@@ -191,7 +183,6 @@ def test_should_execute_rebalance_monthly_allows_new_month(monkeypatch):
     调仓时点回归:
     monthly 模式下，跨月后的首个 bar 应允许执行调仓。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     data = DummyData(
         "AAPL.SMART",
         index=[
@@ -211,8 +202,6 @@ def test_execute_rebalance_skips_plan_when_weekly_gate_not_due(monkeypatch):
     非调仓周内不应生成计划，也不应进入执行器。
     """
     import common.rebalancer as rebalancer_module
-
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
 
     calculate_calls = []
     execute_calls = []
@@ -258,8 +247,6 @@ def test_execute_rebalance_runs_plan_when_weekly_gate_due(monkeypatch):
     """
     import common.rebalancer as rebalancer_module
 
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
-
     calculate_calls = []
     execute_calls = []
 
@@ -302,7 +289,6 @@ def test_should_execute_rebalance_respects_rebalance_when_skip(monkeypatch):
     显式调仓信号回归:
     rebalance_when='skip' 时，应跳过本次正式调仓，不受默认频率影响。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0)
     strategy = DummyStrategy(broker=broker, params={})
 
@@ -317,7 +303,6 @@ def test_should_execute_rebalance_respects_rebalance_when_next(monkeypatch):
     显式调仓信号回归:
     rebalance_when='next' 时，应允许本次正式调仓，不受频率门控限制。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     data = DummyData(
         "AAPL.SMART",
         index=[
@@ -340,8 +325,6 @@ def test_execute_rebalance_skips_plan_when_rebalance_when_skip(monkeypatch):
     rebalance_when='skip' 时，即使默认频率是 bar，也不应生成计划。
     """
     import common.rebalancer as rebalancer_module
-
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
 
     calculate_calls = []
     execute_calls = []
@@ -385,8 +368,6 @@ def test_execute_rebalance_runs_plan_when_rebalance_when_next(monkeypatch):
     rebalance_when='next' 时，应按本次正式调仓生成计划并执行。
     """
     import common.rebalancer as rebalancer_module
-
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
 
     calculate_calls = []
     execute_calls = []
@@ -435,7 +416,6 @@ def test_should_execute_rebalance_rejects_invalid_rebalance_when(monkeypatch):
     参数校验回归:
     非法 rebalance_when 应直接报错，避免静默回退为 bar。
     """
-    monkeypatch.setattr(config, "IGNORED_SYMBOLS", [])
     broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0)
     strategy = DummyStrategy(broker=broker, params={})
 
@@ -444,3 +424,79 @@ def test_should_execute_rebalance_rejects_invalid_rebalance_when(monkeypatch):
             target_symbols=broker.datas,
             rebalance_when='every_bar',
         )
+
+
+def test_execute_rebalance_skips_unknown_targets_and_pushes_warning(monkeypatch):
+    import common.rebalancer as rebalancer_module
+
+    pushed = []
+    calculate_calls = []
+
+    class DummyAlarmManager:
+        def push_text(self, content, level="INFO"):
+            pushed.append({"content": content, "level": level})
+
+    def fake_calculate_plan(**kwargs):
+        calculate_calls.append(kwargs)
+        return {"sell_clear": [], "reduce": [], "increase": [], "target_per_stock": 0.0}
+
+    class DummyExecutor:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def execute_plan(self, plan):
+            return None
+
+    monkeypatch.setattr(rebalancer_module.PortfolioRebalancer, "calculate_plan", staticmethod(fake_calculate_plan))
+    monkeypatch.setattr(rebalancer_module, "OrderExecutor", DummyExecutor)
+    monkeypatch.setattr("strategies.base_strategy.AlarmManager", lambda: DummyAlarmManager())
+
+    data = DummyData("AAPL.SMART")
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[data])
+    strategy = DummyStrategy(broker=broker, params={})
+
+    strategy.execute_rebalance(
+        target_symbols=[SimpleNamespace(_name="MSFT.SMART"), data],
+        top_k=1,
+        rebalance_threshold=0.2,
+    )
+
+    assert len(calculate_calls) == 1
+    assert calculate_calls[0]["target_symbols"] == [data], "未知目标应在进入 rebalancer 前被跳过。"
+    assert len(pushed) == 1
+    assert pushed[0]["level"] == "WARNING"
+    assert "unknown_targets" in pushed[0]["content"]
+
+
+def test_execute_rebalance_resolves_same_symbol_target_to_managed_data(monkeypatch):
+    import common.rebalancer as rebalancer_module
+
+    calculate_calls = []
+
+    def fake_calculate_plan(**kwargs):
+        calculate_calls.append(kwargs)
+        return {"sell_clear": [], "reduce": [], "increase": [], "target_per_stock": 0.0}
+
+    class DummyExecutor:
+        def __init__(self, broker):
+            self.broker = broker
+
+        def execute_plan(self, plan):
+            return None
+
+    monkeypatch.setattr(rebalancer_module.PortfolioRebalancer, "calculate_plan", staticmethod(fake_calculate_plan))
+    monkeypatch.setattr(rebalancer_module, "OrderExecutor", DummyExecutor)
+
+    managed = DummyData("AAPL.SMART")
+    broker = DummyBroker(cash=1000.0, rebalance_cash=1000.0, datas=[managed])
+    strategy = DummyStrategy(broker=broker, params={})
+    alias_target = DummyData("AAPL")
+
+    strategy.execute_rebalance(
+        target_symbols=[alias_target],
+        top_k=1,
+        rebalance_threshold=0.2,
+    )
+
+    assert len(calculate_calls) == 1
+    assert calculate_calls[0]["target_symbols"] == [managed]

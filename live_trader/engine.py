@@ -289,9 +289,6 @@ class LiveTrader:
                 "Engine will keep running and retry data recovery on each schedule."
             )
         params = self.config.get('params', {})
-        # 将环境级的豁免名单透传给策略
-        if 'ignored_symbols' in self.config:
-            params['env_ignored_symbols'] = self.config['ignored_symbols']
         self.strategy = self.strategy_class(broker=self.broker, params=params)
         self.strategy.init()
 

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-import config
+from alarms.manager import AlarmManager
 from common.log import extract_order_execution_dt
 
 
@@ -33,25 +33,6 @@ class BaseStrategy(ABC):
         # 3. 创建 'p' 作为 'params' 的快捷方式，以符合Backtrader的惯例
         self.p = self.params
 
-        # =========================================================
-        # 4. 三级级联豁免标的保护逻辑 (Configuration Cascading)
-        # =========================================================
-        # Level 1: 全局默认底仓豁免
-        ignored = getattr(config, 'IGNORED_SYMBOLS', [])
-
-        # Level 2: 环境级专属豁免 (来自 engine 透传)
-        if hasattr(self.p, 'env_ignored_symbols') and self.p.env_ignored_symbols is not None:
-            ignored = self.p.env_ignored_symbols
-
-        # Level 3: 策略专属定制豁免 (最高优)
-        if hasattr(self.p, 'ignored_symbols') and self.p.ignored_symbols is not None:
-            ignored = self.p.ignored_symbols
-
-        # 统一转为大写 Set，极大提升后续查表性能
-        self.active_ignored_symbols = {str(sym).upper() for sym in ignored}
-        # =========================================================
-
-
     def log(self, txt, dt=None):
         """
         通用日志记录
@@ -72,23 +53,6 @@ class BaseStrategy(ABC):
         每个K线周期调用的核心逻辑。
         """
         pass
-
-    @property
-    def tradable_datas(self):
-        """
-        [框架属性] 返回过滤掉所有豁免底仓后的可交易数据源列表。
-        策略端只需遍历 self.tradable_datas，无需手动判断豁免。
-        """
-        valid_datas = []
-        for d in self.broker.datas:
-            base_name = d._name.split('.')[0].upper()
-            full_name = d._name.upper()
-
-            # 只要不在三级级联的豁免名单中，就视为可交易
-            if base_name not in self.active_ignored_symbols and full_name not in self.active_ignored_symbols:
-                valid_datas.append(d)
-
-        return valid_datas
 
     def notify_order(self, order):
         """
@@ -181,7 +145,6 @@ class BaseStrategy(ABC):
     def get_strategy_isolated_capital(self):
         """
         获取策略隔离的真实可用资金 (Bottom-Up 盘点法)
-        完美无视未订阅及被豁免的底仓资产（如 SGOV）
         返回: (allocatable_capital, current_positions_dict)
         """
         current_positions = {}
@@ -209,13 +172,6 @@ class BaseStrategy(ABC):
 
         # 2. 盘点所有数据源
         for d in self.broker.datas:
-            base_name = d._name.split('.')[0].upper()
-            full_name = d._name.upper()
-
-            # 若在豁免名单中，实行物理隔离，不计入策略仓位
-            if base_name in self.active_ignored_symbols or full_name in self.active_ignored_symbols:
-                continue
-
             # 获取券商已结算仓位
             pos = self.broker.getposition(d)
             settled_size = pos.size
@@ -315,9 +271,6 @@ class BaseStrategy(ABC):
         for data in target_symbols or []:
             if data is not None:
                 candidates.append(data)
-        for data in self.tradable_datas:
-            if data not in candidates:
-                candidates.append(data)
         for data in getattr(self.broker, 'datas', []) or []:
             if data not in candidates:
                 candidates.append(data)
@@ -397,13 +350,51 @@ class BaseStrategy(ABC):
         # 延迟导入以防止循环依赖
         from common.rebalancer import PortfolioRebalancer, OrderExecutor
 
+        symbol_map = {}
+        for data in getattr(self.broker, 'datas', []) or []:
+            full_name = str(getattr(data, '_name', '') or '').strip().upper()
+            if not full_name:
+                continue
+            symbol_map.setdefault(full_name, data)
+            symbol_map.setdefault(full_name.split('.')[0], data)
+
+        resolved_targets = []
+        seen_targets = set()
+        unknown_targets = []
+        for raw_target in target_symbols or []:
+            raw_name = getattr(raw_target, '_name', raw_target)
+            full_name = str(raw_name or '').strip().upper()
+            if not full_name:
+                continue
+            resolved = symbol_map.get(full_name) or symbol_map.get(full_name.split('.')[0])
+            if resolved is None:
+                unknown_targets.append(str(raw_name))
+                continue
+
+            resolved_name = getattr(resolved, '_name', str(resolved))
+            if resolved_name in seen_targets:
+                continue
+            seen_targets.add(resolved_name)
+            resolved_targets.append(resolved)
+
+        if unknown_targets:
+            msg = (
+                "[Rebalance Warning] execute_rebalance 发现标的池外目标，当前调仓已跳过这些目标，不会对其发单。"
+                f" unknown_targets={unknown_targets}"
+            )
+            self.log(msg)
+            try:
+                AlarmManager().push_text(msg, level='WARNING')
+            except Exception:
+                pass
+
         # 1. 底层框架全自动盘点真实可用资金 (已完美无视所有豁免底仓)
         allocatable_capital, current_positions = self.get_strategy_isolated_capital()
 
         # 2. 生成调仓计划
         plan = PortfolioRebalancer.calculate_plan(
             current_positions=current_positions,
-            target_symbols=target_symbols,
+            target_symbols=resolved_targets,
             total_capital=allocatable_capital,
             select_top_k=top_k,
             rebalance_threshold=rebalance_threshold

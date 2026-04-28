@@ -16,12 +16,8 @@
 3. 若本 bar 买不进，交给下一根 K 重新生成目标。
 
 ## 3. Trading Universe Contract
-1. 发单逻辑优先遍历 `self.tradable_datas`
-2. `self.tradable_datas` 会自动应用三级 `ignored_symbols` 豁免:
-- 全局配置
-- 环境透传配置
-- 策略本地配置
-3. 如果只是做只读预计算，可以遍历 `self.broker.datas`
+1. 发单逻辑直接遍历 `self.broker.datas`
+2. 如果只是做只读预计算，也遍历 `self.broker.datas`
 
 ## 4. Supported Trading Paradigms
 1. Arbitrary target / signal-driven:
@@ -52,5 +48,4 @@
 
 ## 7. Isolated Capital Semantics
 1. 策略调仓使用真实持仓 + 在途订单做 bottom-up 盘点。
-2. 被豁免的底仓不会计入策略可分配资金。
-3. 若 broker 提供 `get_rebalance_cash()`，策略计划口径优先使用该值。
+2. 若 broker 提供 `get_rebalance_cash()`，策略计划口径优先使用该值。

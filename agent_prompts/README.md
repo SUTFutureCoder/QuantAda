@@ -35,7 +35,7 @@
 6. 隔夜清理失败会最多重试 5 次；若仍未清空，在继续本轮执行前会记录详细日志并推送 ERROR 级别报警。
 7. `get_pending_orders` 统一契约要求包含 `id` 字段，并由适配器实现 `cancel_pending_order(order_id)` 支持按单撤单。
 8. 策略侧当前的等权调仓接口为 `execute_rebalance(target_symbols, top_k, rebalance_threshold)`；`target_symbols` 传 `data` 对象列表，不传权重字典。调仓时点统一使用 `rebalance_when`：固定频率可用 `bar/daily/weekly/monthly`，不定期正式调仓可用 `next/skip`。
-9. 策略交易循环优先遍历 `self.tradable_datas`，自动尊重全局/环境/策略三级 `ignored_symbols` 豁免。
+9. 策略交易循环直接遍历 `self.broker.datas`。
 10. 实盘 adapter 模块需在同一文件中同时暴露 Broker 与 DataProvider 类，供 `LiveTrader` 反射发现。
 11. 风控支持逗号分隔的多模块链式加载；`risk_params` 可为平铺 dict，也可为 `{risk_name: {...}}` 的 scoped 结构。
 12. 实盘引擎自愈基线：当轮 live data refresh 不完整会跳过执行；`datas` 为空会尝试恢复；僵尸 `strategy.order` 会自动清锁。

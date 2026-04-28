@@ -31,6 +31,14 @@ If a proposed change conflicts with these rules, reject or redesign it.
 - Keep behavior deterministic and auditable.
 - Follow existing execution semantics consistently (sellability guard, immediate downgrade retry, daily cleanup policy).
 
+5. Anti-Abstraction Discipline
+- Do not introduce a new helper method, wrapper, mixin, bridge, or base-class API unless it clearly pays rent now.
+- If logic has only one call site, prefer keeping it local unless extraction materially improves correctness, testability, or readability.
+- Do not add thin pass-through wrappers that merely rename or forward a single call without reducing real complexity.
+- Do not move strategy-specific or broker-specific behavior into `base_*` classes unless at least two concrete implementations already need the same stable contract.
+- Prefer deleting obsolete compatibility layers over keeping two ways to do the same thing.
+- When touching a bloated base class, prefer shrinking or localizing logic instead of adding one more abstraction on top.
+
 ## 2) Architecture Contracts (Must Follow)
 1. Respect base interfaces and contracts:
 - `live_trader/adapters/base_broker.py`
@@ -51,7 +59,7 @@ If a proposed change conflicts with these rules, reject or redesign it.
 3. Strategy-side execution contract:
 - Current equal-weight rebalance API is `BaseStrategy.execute_rebalance(target_symbols, top_k, rebalance_threshold)`.
 - `target_symbols` should be a list of data objects, not weight dicts or raw symbol strings.
-- Prefer `self.tradable_datas` over raw `self.broker.datas` in trading loops so ignored-symbol cascading remains effective.
+- Prefer iterating `self.broker.datas` directly in trading loops unless a strategy explicitly needs a narrower local list.
 
 4. Broker-side hard constraints:
 - Pending orders contract includes `id` in `get_pending_orders`.
@@ -74,6 +82,8 @@ If a proposed change conflicts with these rules, reject or redesign it.
 - Reintroducing `_deferred_orders`, `_buffered_rejected_retries`, or similar queue replay design.
 - Persisting stale intent to force next-day replay of prior-day buy decisions.
 - Expanding state machines without explicit failure evidence and tests.
+- Adding base-class methods, config knobs, or compatibility shims for a single current caller or one-off scenario.
+- Extracting one-use local logic into named helpers or wrapper classes without a concrete second use case.
 
 ## 4) Fast-Generation Workflow (Mandatory)
 When user asks for rapid code generation or new module scaffolding, agents must follow this order:
